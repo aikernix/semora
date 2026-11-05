@@ -1,0 +1,16 @@
+Semora has been rendered for namespace {{ .Release.Namespace }}.
+
+Required pre-created secrets:
+- {{ .Values.database.metadataRuntimeSecret }} and {{ .Values.database.metadataMigrationSecret }}
+- {{ .Values.database.langgraphSecret }}
+- {{ .Values.database.langgraphMigrationSecret }}
+- {{ .Values.database.knowledgeRuntimeSecret }} and {{ .Values.database.knowledgeMigrationSecret }}
+- {{ .Values.database.ontologyRuntimeSecret }} and {{ .Values.database.ontologyMigrationSecret }}
+- {{ .Values.database.auditExporterRuntimeSecret }}
+- {{ .Values.internalToken.secretName }}
+- {{ .Values.executor.datasourceSecret }}
+- {{ .Values.knowledge.objectStoreSecret }}
+- {{ .Values.auditArchive.objectStoreSecret }}
+
+Migration credentials are used only by Helm hook Jobs. Runtime workloads never receive them.
+The chart intentionally does not install PostgreSQL, an identity provider, or object storage.

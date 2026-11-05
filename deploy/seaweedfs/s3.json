@@ -1,0 +1,14 @@
+{
+  "identities": [
+    {
+      "name": "semora-knowledge",
+      "credentials": [
+        {
+          "accessKey": "semora-knowledge-access",
+          "secretKey": "semora-object-store-dev"
+        }
+      ],
+      "actions": ["Admin", "Read", "List", "Tagging", "Write"]
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "semora.fullname" . }}-web
+  labels:
+    {{- include "semora.labels" . | nindent 4 }}
+data:
+  semora-config.js: |
+    window.__SEMORA_CONFIG__ = {
+      authRequired: {{ .Values.oidc.authRequired }},
+      keycloakUrl: {{ .Values.oidc.issuer | trimSuffix (printf "/realms/%s" .Values.oidc.realm) | quote }},
+      keycloakRealm: {{ .Values.oidc.realm | quote }},
+      keycloakClientId: {{ .Values.oidc.clientId | quote }}
+    }
+  default.conf: |
+    server {
+      listen 8080;
+      server_name _;
+      root /usr/share/nginx/html;
+      index index.html;
+      location /api/ {
+        proxy_pass http://{{ include "semora.fullname" . }}-api:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+      }
+      location / {
+        try_files $uri $uri/ /index.html;
+      }
+    }

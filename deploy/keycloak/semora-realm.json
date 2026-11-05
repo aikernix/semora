@@ -1,0 +1,108 @@
+{
+  "realm": "semora",
+  "enabled": true,
+  "displayName": "Semora",
+  "registrationAllowed": false,
+  "clients": [
+    {
+      "clientId": "semora-web",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "redirectUris": ["http://localhost:5173/*"],
+      "webOrigins": ["http://localhost:5173"],
+      "protocolMappers": [
+        {
+          "name": "branch-ids",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "branch_ids",
+            "claim.name": "branch_ids",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "sensitivity-clearance",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "sensitivity_clearance",
+            "claim.name": "sensitivity_clearance",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "semora-web-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "semora-web",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "roles": {
+    "realm": [
+      {"name": "business_user"},
+      {"name": "analyst"},
+      {"name": "data_steward"},
+      {"name": "approver"},
+      {"name": "auditor"},
+      {"name": "admin"}
+    ]
+  },
+  "users": [
+    {
+      "username": "demo",
+      "enabled": true,
+      "firstName": "Semora",
+      "lastName": "Analyst",
+      "email": "demo@semora.local",
+      "emailVerified": true,
+      "attributes": {
+        "branch_ids": ["1", "2", "3"],
+        "sensitivity_clearance": ["confidential"]
+      },
+      "credentials": [{"type": "password", "value": "demo1234", "temporary": false}],
+      "realmRoles": ["business_user", "analyst", "approver", "auditor"]
+    },
+    {
+      "username": "demo-admin",
+      "enabled": true,
+      "firstName": "Semora",
+      "lastName": "Administrator",
+      "email": "admin@semora.local",
+      "emailVerified": true,
+      "attributes": {
+        "branch_ids": ["1", "2", "3"],
+        "sensitivity_clearance": ["restricted"]
+      },
+      "credentials": [{"type": "password", "value": "admin1234", "temporary": false}],
+      "realmRoles": ["admin", "data_steward", "approver", "auditor"]
+    },
+    {
+      "username": "demo-other",
+      "enabled": true,
+      "firstName": "Semora",
+      "lastName": "Other Analyst",
+      "email": "other@semora.local",
+      "emailVerified": true,
+      "attributes": {
+        "branch_ids": ["1"],
+        "sensitivity_clearance": ["confidential"]
+      },
+      "credentials": [{"type": "password", "value": "other1234", "temporary": false}],
+      "realmRoles": ["business_user", "analyst"]
+    }
+  ]
+}
+

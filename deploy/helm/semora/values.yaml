@@ -1,0 +1,157 @@
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+imagePullPolicy: IfNotPresent
+
+images:
+  web: { repository: semora-web, tag: "0.1.0" }
+  api: { repository: semora-api, tag: "0.1.0" }
+  knowledge: { repository: semora-knowledge, tag: "0.1.0" }
+  ontology: { repository: semora-ontology, tag: "0.1.0" }
+  semanticPlanner: { repository: semora-semantic-planner, tag: "0.1.0" }
+  executor: { repository: semora-executor, tag: "0.1.0" }
+  auditExporter: { repository: semora-audit-exporter, tag: "0.1.0" }
+  migrator: { repository: semora-migrate, tag: "0.1.0" }
+
+replicas:
+  web: 2
+  api: 2
+  knowledge: 2
+  knowledgeWorker: 2
+  ontology: 2
+  semanticPlanner: 2
+  executor: 2
+  auditExporter: 2
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+service:
+  web:
+    type: ClusterIP
+    port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: semora.example.internal
+  tls: []
+
+oidc:
+  issuer: https://iam.example.internal/realms/semora
+  jwksUrl: https://iam.example.internal/realms/semora/protocol/openid-connect/certs
+  audience: semora-web
+  realm: semora
+  clientId: semora-web
+  authRequired: true
+
+database:
+  apiRole: semora_api
+  auditExporterRole: semora_audit_exporter
+  metadataRuntimeSecret: semora-metadata-runtime
+  metadataRuntimeKey: url
+  metadataMigrationSecret: semora-metadata-migration
+  metadataMigrationKey: url
+  langgraphSecret: semora-langgraph-runtime
+  langgraphKey: url
+  langgraphMigrationSecret: semora-langgraph-migration
+  langgraphMigrationKey: url
+  knowledgeRuntimeSecret: semora-knowledge-runtime
+  knowledgeRuntimeKey: url
+  knowledgeMigrationSecret: semora-knowledge-migration
+  knowledgeMigrationKey: url
+  ontologyRuntimeSecret: semora-ontology-runtime
+  ontologyRuntimeKey: url
+  ontologyMigrationSecret: semora-ontology-migration
+  ontologyMigrationKey: url
+  auditExporterRuntimeSecret: semora-audit-exporter-runtime
+  auditExporterRuntimeKey: url
+
+internalToken:
+  secretName: semora-internal-token
+  secretKey: token
+
+executor:
+  datasourceSecret: semora-datasources
+  queryTimeoutMs: 30000
+  maxResultRows: 1000
+  maxResultBytes: 10485760
+
+auditArchive:
+  objectStoreSecret: semora-audit-archive
+  objectStoreKeys:
+    endpoint: endpoint
+    bucket: bucket
+    accessKey: accessKey
+    secretKey: secretKey
+    region: region
+    kmsKeyId: kmsKeyId
+  sseMode: aws:kms
+  requireVersioning: true
+  wormMode: compliance
+  retentionYears: 10
+  pollSeconds: 5
+  kafkaSecret: ""
+
+knowledge:
+  uploadMaxBytes: 26214400
+  objectStoreSecret: semora-object-store
+  objectStoreKeys:
+    endpoint: endpoint
+    bucket: bucket
+    accessKey: accessKey
+    secretKey: secretKey
+    region: region
+    kmsKeyId: kmsKeyId
+  sseMode: aws:kms
+  requireVersioning: true
+  embeddingSecret: ""
+  ocrMode: tesseract
+  ocrLang: chi_sim+eng
+  workerPollSeconds: 1
+  jobLeaseSeconds: 900
+
+llm:
+  mode: optional
+  secretName: ""
+  baseUrlKey: baseUrl
+  apiKeyKey: apiKey
+  modelKey: model
+
+telemetry:
+  otlpEndpoint: http://otel-collector.observability.svc:4318
+  environment: production
+
+resources:
+  web: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 500m, memory: 256Mi } }
+  api: { requests: { cpu: 250m, memory: 512Mi }, limits: { cpu: "2", memory: 2Gi } }
+  knowledge: { requests: { cpu: 250m, memory: 512Mi }, limits: { cpu: "2", memory: 2Gi } }
+  knowledgeWorker: { requests: { cpu: 500m, memory: 1Gi }, limits: { cpu: "4", memory: 4Gi } }
+  ontology: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: "1", memory: 512Mi } }
+  semanticPlanner: { requests: { cpu: 250m, memory: 512Mi }, limits: { cpu: "2", memory: 2Gi } }
+  executor: { requests: { cpu: 250m, memory: 256Mi }, limits: { cpu: "2", memory: 1Gi } }
+  auditExporter: { requests: { cpu: 100m, memory: 256Mi }, limits: { cpu: "1", memory: 1Gi } }
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile: { type: RuntimeDefault }
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities: { drop: ["ALL"] }
+  readOnlyRootFilesystem: true
+
+networkPolicy:
+  enabled: true
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

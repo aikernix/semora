@@ -1,0 +1,95 @@
+{{- $root := . -}}
+{{- range $component, $replicas := dict "knowledge" .Values.replicas.knowledge "knowledge-worker" .Values.replicas.knowledgeWorker }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "semora.fullname" $root }}-{{ $component }}
+  labels:
+    {{- include "semora.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  replicas: {{ $replicas }}
+  selector:
+    matchLabels:
+      {{- include "semora.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $component }}
+  template:
+    metadata:
+      labels:
+        {{- include "semora.selectorLabels" $root | nindent 8 }}
+        app.kubernetes.io/component: {{ $component }}
+    spec:
+      serviceAccountName: {{ include "semora.serviceAccountName" $root }}
+      automountServiceAccountToken: false
+      securityContext: {{ toYaml $root.Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ $component }}
+          image: {{ include "semora.image" $root.Values.images.knowledge }}
+          imagePullPolicy: {{ $root.Values.imagePullPolicy }}
+          {{- if eq $component "knowledge-worker" }}
+          command: ["python", "-m", "app.worker"]
+          {{- end }}
+          securityContext: {{ toYaml $root.Values.containerSecurityContext | nindent 12 }}
+          {{- if eq $component "knowledge" }}
+          ports: [{ name: http, containerPort: 8003 }]
+          {{- end }}
+          env:
+            - name: KNOWLEDGE_DATABASE_URL
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.database.knowledgeRuntimeSecret }}, key: {{ $root.Values.database.knowledgeRuntimeKey }} } }
+            - { name: KNOWLEDGE_OBJECT_STORE, value: "s3" }
+            - name: KNOWLEDGE_S3_ENDPOINT
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.knowledge.objectStoreSecret }}, key: {{ $root.Values.knowledge.objectStoreKeys.endpoint }} } }
+            - name: KNOWLEDGE_S3_BUCKET
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.knowledge.objectStoreSecret }}, key: {{ $root.Values.knowledge.objectStoreKeys.bucket }} } }
+            - name: KNOWLEDGE_S3_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.knowledge.objectStoreSecret }}, key: {{ $root.Values.knowledge.objectStoreKeys.accessKey }} } }
+            - name: KNOWLEDGE_S3_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.knowledge.objectStoreSecret }}, key: {{ $root.Values.knowledge.objectStoreKeys.secretKey }} } }
+            - name: KNOWLEDGE_S3_REGION
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.knowledge.objectStoreSecret }}, key: {{ $root.Values.knowledge.objectStoreKeys.region }} } }
+            - { name: KNOWLEDGE_S3_SSE_MODE, value: {{ $root.Values.knowledge.sseMode | quote }} }
+            - name: KNOWLEDGE_S3_KMS_KEY_ID
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.knowledge.objectStoreSecret }}, key: {{ $root.Values.knowledge.objectStoreKeys.kmsKeyId }} } }
+            - { name: KNOWLEDGE_S3_REQUIRE_VERSIONING, value: {{ $root.Values.knowledge.requireVersioning | quote }} }
+            - { name: KNOWLEDGE_DATA_DIR, value: "/data/uploads" }
+            - { name: KNOWLEDGE_UPLOAD_MAX_BYTES, value: {{ $root.Values.knowledge.uploadMaxBytes | quote }} }
+            - { name: OCR_MODE, value: {{ $root.Values.knowledge.ocrMode | quote }} }
+            - { name: OCR_LANG, value: {{ $root.Values.knowledge.ocrLang | quote }} }
+            - { name: KNOWLEDGE_WORKER_POLL_SECONDS, value: {{ $root.Values.knowledge.workerPollSeconds | quote }} }
+            - { name: KNOWLEDGE_JOB_LEASE_SECONDS, value: {{ $root.Values.knowledge.jobLeaseSeconds | quote }} }
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: {{ $root.Values.telemetry.otlpEndpoint | quote }} }
+            - { name: SEMORA_ENVIRONMENT, value: {{ $root.Values.telemetry.environment | quote }} }
+            {{- if eq $component "knowledge" }}
+            - { name: REQUIRE_INTERNAL_TOKEN, value: "true" }
+            - name: INTERNAL_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.internalToken.secretName }}, key: {{ $root.Values.internalToken.secretKey }} } }
+            {{- end }}
+            {{- if $root.Values.knowledge.embeddingSecret }}
+            - name: EMBEDDING_BASE_URL
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.knowledge.embeddingSecret }}, key: baseUrl } }
+            - name: EMBEDDING_API_KEY
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.knowledge.embeddingSecret }}, key: apiKey } }
+            - name: EMBEDDING_MODEL
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.knowledge.embeddingSecret }}, key: model } }
+            {{- end }}
+          {{- if eq $component "knowledge" }}
+          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, initialDelaySeconds: 20, periodSeconds: 20 }
+          resources: {{ toYaml $root.Values.resources.knowledge | nindent 12 }}
+          {{- else }}
+          readinessProbe: { exec: { command: ["python", "-m", "app.worker", "healthcheck"] }, periodSeconds: 15 }
+          livenessProbe: { exec: { command: ["python", "-m", "app.worker", "healthcheck"] }, initialDelaySeconds: 20, periodSeconds: 30 }
+          resources: {{ toYaml $root.Values.resources.knowledgeWorker | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - { name: data, mountPath: /data/uploads }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: data, emptyDir: {} }
+        - { name: tmp, emptyDir: {} }
+      imagePullSecrets: {{ toYaml $root.Values.imagePullSecrets | nindent 8 }}
+      nodeSelector: {{ toYaml $root.Values.nodeSelector | nindent 8 }}
+      tolerations: {{ toYaml $root.Values.tolerations | nindent 8 }}
+      affinity: {{ toYaml $root.Values.affinity | nindent 8 }}
+{{- end }}
