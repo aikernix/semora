@@ -166,6 +166,9 @@ class Workflow:
             run.ontology, ontology_model = await self._ontology_snapshot(run.domain)
             knowledge_base_ids = [str(item) for item in ontology_model.get("knowledgeBaseIds", [])]
             data_source_id = str(ontology_model.get("dataSourceId") or "")
+            allowed = run.authorization.allowed_data_source_ids if run.authorization else None
+            if allowed is not None and data_source_id not in allowed:
+                raise ValueError('当前身份无权访问业务域绑定的数据源')
             if not data_source_id:
                 raise ValueError("本体未绑定数据源")
             if run.ontology.data_source_id and run.ontology.data_source_id != data_source_id:
@@ -344,14 +347,15 @@ class Workflow:
             self.emit(run, "run.failed", RunStatus.FAILED, {"error": run.error}, "conversation_owner")
             return {}
 
-        if state.get("auto_align") and not draft.clarifications:
+        automatic = not SystemSettings.model_validate(state['settings']).require_plan_confirmation
+        if (state.get("auto_align") or automatic) and not draft.clarifications:
             decision = {
                 "confirmed": True,
                 "answers": {
                     item.id: item.options[0].value if item.options else "测试环境自动确认"
                     for item in draft.clarifications
                 },
-                "actor": "test-auto-align",
+                "actor": "conversation-owner" if automatic else "test-auto-align",
             }
         else:
             self.emit(
@@ -415,6 +419,11 @@ class Workflow:
                     draft=next_draft
                     run.requirement_draft=draft
                     run.proposed_plan=next_plan
+                    if automatic and not draft.clarifications:
+                        self.emit(run, 'alignment.resolved', RunStatus.ALIGNING,
+                                  {'summary': '业务歧义已澄清，自动进入SQL生成和独立复核', 'requirement': draft.model_dump(mode='json')}, 'conversation_owner')
+                        decision = {'confirmed': True, 'answers': {}, 'actor': decision.get('actor', 'conversation-owner')}
+                        continue
                     self.emit(run,'alignment.required',RunStatus.CLARIFYING,{'requirement':draft.model_dump(mode='json'),'message':'请继续补充，或确认更新后的完整口径。'},'conversation_owner')
                     decision=interrupt({'run_id':run.id,'requirement_draft_version':draft.version,'requirement':draft.model_dump(mode='json')})
                     continue
@@ -489,6 +498,7 @@ class Workflow:
             "data_scope": draft.data_scope,
             "aggregation_rules": draft.aggregation_rules,
             "stages": [stage.model_dump(mode='json') for stage in plan.stages],
+            "source_steps": [step.model_dump(mode='json') for step in plan.source_steps],
             "calculations": [calculation.model_dump(mode='json') for calculation in plan.calculations],
             "output_fields": draft.output_fields or plan.fields or plan.dimensions + plan.metrics,
             "assumptions": draft.assumptions,
@@ -522,6 +532,18 @@ class Workflow:
         requested_fields = set(run.plan.fields + run.plan.dimensions)
         requested_fields.update(item.field for item in run.plan.filters)
         requested_fields.update(item.field for item in run.plan.calculations if item.field)
+        for step in run.plan.source_steps:
+            requested_fields.update(step.query.fields + step.query.dimensions)
+            requested_fields.update(f.field for f in step.query.filters)
+            requested_fields.update(c.field for c in step.query.calculations if c.field)
+            for binding in step.inputs:
+                requested_fields.update([binding.source_field, binding.target_field])
+                requested_fields.update(binding.include_source_fields)
+            for stage in step.query.stages:
+                requested_fields.update(stage.group_by)
+                requested_fields.update(m.field for m in stage.measures if m.field)
+                requested_fields.update(f.field for f in stage.filters)
+                requested_fields.update(f.field for m in stage.measures for f in m.filters)
         for stage in run.plan.stages:
             requested_fields.update(stage.group_by)
             requested_fields.update(item.field for item in stage.measures if item.field)
@@ -560,6 +582,14 @@ class Workflow:
         try:
             if run.ontology and run.ontology.artifact_version=='draft':
                 raise ValueError('需求已确认；当前本体仍为草稿，请到本体工作室发布后重新生成 SQL')
+            if run.plan.source_steps:
+                from .source_execution import SourceExecution
+                await SourceExecution(self, run, state['ontology_model'], state['settings']).compile_all()
+                run.sql_explanation = '跨源步骤先由Reviewer整体复核，程序提取并去重关联键后逐步绑定参数、重新过门禁和只读执行；各数据源不是同一个全局事务。'
+                self.emit(run, 'source.plan.compiled', RunStatus.COMPILING,
+                          {'steps': {key: value.model_dump(mode='json') for key, value in run.source_artifacts.items()}}, 'semantic_planner')
+                self.emit(run, 'sql.ready', RunStatus.COMPILING, {'sql': run.sql.model_dump(mode='json')}, 'semantic_planner')
+                return {}
             run.sql = await self._compile(run.plan, state["ontology_model"])
             from .planner import adapt_mysql_artifact
             try:
@@ -605,7 +635,7 @@ class Workflow:
             return {}
         self.emit(run, "gate.started", RunStatus.GATING)
         try:
-            estimate = await self.estimate(
+            estimate = {'estimated_rows': 0, 'source': 'runtime_per_source_step'} if run.plan.source_steps else await self.estimate(
                 run.sql.physical_sql, run.sql.parameters, run.sql.data_source_id
             )
         except Exception as exc:
@@ -614,19 +644,23 @@ class Workflow:
             return {}
         self.emit(run, "cost.estimated", RunStatus.GATING, estimate, "executor")
         settings = SystemSettings.model_validate(state["settings"])
-        run.gate = review_sql(
-            run.sql.physical_sql,
-            dialect=run.sql.dialect,
-            require_organization_scope=bool(run.plan.data_scope.get('branch_ids')),
-            approval_mode=settings.approval_mode,
-            sensitive_columns=set(run.sql.sensitive_columns),
-            approve_sensitive_detail=settings.approve_sensitive_detail,
-            estimated_rows=int(estimate["estimated_rows"]),
-            large_result_threshold=settings.large_result_threshold,
-            approve_large_result=settings.approve_large_result,
-            cross_organization=bool(run.plan.data_scope.get("cross_organization", False)),
-            approve_cross_organization=settings.approve_cross_organization,
-        )
+        if run.plan.source_steps:
+            from .source_execution import SourceExecution
+            run.gate = SourceExecution(self, run, state['ontology_model'], state['settings']).template_gate()
+        else:
+            run.gate = review_sql(
+                run.sql.physical_sql,
+                dialect=run.sql.dialect,
+                require_organization_scope=bool(run.plan.data_scope.get('branch_ids')),
+                approval_mode=settings.approval_mode,
+                sensitive_columns=set(run.sql.sensitive_columns),
+                approve_sensitive_detail=settings.approve_sensitive_detail,
+                estimated_rows=int(estimate["estimated_rows"]),
+                large_result_threshold=settings.large_result_threshold,
+                approve_large_result=settings.approve_large_result,
+                cross_organization=bool(run.plan.data_scope.get("cross_organization", False)),
+                approve_cross_organization=settings.approve_cross_organization,
+            )
         self.emit(
             run,
             "gate.completed",
@@ -717,8 +751,12 @@ class Workflow:
         self.emit(run, 'requirement.revised', RunStatus.ALIGNING, {'requirement': run.requirement_draft.model_dump(mode='json'), 'revision': run.revision_count}, 'analyst')
         return {'needs_revision': False, 'internal_repair': False, 'initial_clarification': None, 'alignment_initial_draft': run.requirement_draft.model_dump(mode='json')}
 
-    async def _approval_node(self, state: AgentState) -> dict:
+    async def _approval_node(self, state: AgentState, *, source_step=False) -> dict:
         run = self._run(state)
+        if run.plan and run.plan.source_steps and not source_step:
+            # Runtime key parameters are unknown until A completes. Approval,
+            # if enabled, must bind the actual SQL/parameters of each step.
+            return {}
         assert run.gate is not None and run.sql is not None
         settings = SystemSettings.model_validate(state["settings"])
         approval_mode = settings.approval_mode
@@ -771,6 +809,18 @@ class Workflow:
 
     async def _execute_node(self, state: AgentState) -> dict:
         run = self._run(state)
+        if run.plan and run.plan.source_steps:
+            from .source_execution import SourceExecution
+            from langgraph.errors import GraphInterrupt
+            try:
+                await SourceExecution(self, run, state['ontology_model'], state['settings']).execute(state)
+            except GraphInterrupt:
+                raise
+            except Exception as exc:
+                run.result = None
+                run.error = f'跨源查询未完成：{exc}'
+                self.emit(run, 'run.failed', RunStatus.FAILED, {'error': run.error}, 'executor')
+            return {}
         assert run.sql is not None
         self.emit(run, "execution.started", RunStatus.EXECUTING, actor="executor")
         try:

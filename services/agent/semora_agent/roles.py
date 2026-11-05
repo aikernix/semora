@@ -16,6 +16,8 @@ from semora_contracts import (
     QueryPlan,
     QueryCalculation,
     QueryStage,
+    SourceQueryStep,
+    SourceQueryPlan,
     RequirementDraft,
     RequirementSpec,
     ReviewDecision,
@@ -335,7 +337,7 @@ analysis_steps 仅输出可核验的理解结论、依据和待确认点，不�
             'metrics', 'dimensions', 'fields', 'aggregation_rules', 'output_fields',
             'assumptions', 'analysis_steps', 'relationship_path',
         }
-        for key in text_arrays | {'clarifications', 'clarification_options', 'calculations', 'filters', 'stages'}:
+        for key in text_arrays | {'clarifications', 'clarification_options', 'calculations', 'filters', 'stages', 'source_steps'}:
             value[key] = _model_list(value, key)
             if key in text_arrays and any(not isinstance(item, str) for item in value[key]):
                 raise ValueError(f'模型返回的 {key} 必须是字符串数组')
@@ -389,6 +391,8 @@ analysis_steps 仅输出可核验的理解结论、依据和待确认点，不�
                 status="awaiting_clarification",
             )
             return AnalysisOutcome(None, requirement, questions[0].question, model_mode)
+        if value['source_steps']:
+            return self._build_source_outcome(value, question, evidence, ontology, data_scope, model_mode)
         objects = {item["name"]: item for item in ontology.get("objects", [])}
         metrics = {item["name"]: item for item in ontology.get("metrics", [])}
         calculations=[QueryCalculation.model_validate(item) for item in value.get('calculations',[])]
@@ -494,6 +498,38 @@ analysis_steps 仅输出可核验的理解结论、依据和待确认点，不�
         validate_explicit_filters(plan, requirement.assumptions + requirement.analysis_steps, ontology)
         return AnalysisOutcome(plan, requirement=requirement, model_mode=model_mode)
 
+    def _build_source_outcome(self, value, question, evidence, ontology, scope, mode):
+        from .multisource import source_ontology, validate_source_steps
+        steps = []
+        last = None
+        for raw in value['source_steps']:
+            step = SourceQueryStep.model_validate(raw)
+            local = source_ontology(ontology, step.data_source_id)
+            candidate = step.query.model_dump(mode='json')
+            # Dependencies participate in relation planning but are not invented
+            # user literals. Actual keys are bound only by the execution engine.
+            binding_filters = [{'field': b.target_field, 'operator': 'in', 'value': [None]} for b in step.inputs]
+            candidate['filters'] += binding_filters
+            last = self._build_outcome(candidate, question, evidence, local, scope, mode)
+            if last.plan is None:
+                raise ValueError('跨源步骤必须是完整的单源查询方案')
+            if binding_filters:
+                last.plan.filters = last.plan.filters[:-len(binding_filters)]
+            step.query = SourceQueryPlan.model_validate(last.plan.model_dump(mode='json'))
+            steps.append(step)
+        plan = last.plan.model_copy(deep=True)
+        plan.data_source_id = str(ontology.get('dataSourceId') or '')
+        plan.intent = str(value.get('intent') or question)
+        plan.version = '3.0'
+        plan.source_steps = steps
+        validate_source_steps(plan, ontology)
+        requirement = RequirementDraft(summary=str(value.get('summary') or plan.intent), subject=str(value.get('subject') or ''),
+            metrics=plan.metrics, dimensions=plan.dimensions, filters=plan.filters, calculations=plan.calculations,
+            stages=plan.stages, source_steps=steps, grain=plan.grain, time_semantics=value.get('time_range'),
+            data_scope=scope, output_fields=value.get('output_fields') or plan.fields + plan.dimensions + plan.metrics,
+            assumptions=value.get('assumptions') or [], analysis_steps=value.get('analysis_steps') or [], evidence=evidence, status='ready')
+        return AnalysisOutcome(plan, requirement=requirement, model_mode=mode)
+
     @staticmethod
     def _connect_objects(required: set[str], relations: list[dict[str, Any]]) -> list[str]:
         if len(required) <= 1:
@@ -561,7 +597,7 @@ class ReviewerAgent:
             consistency_issues.append("确认指标与 QueryPlan 不一致")
         if set(requirement.dimensions) != set(plan.dimensions):
             consistency_issues.append("确认维度与 QueryPlan 不一致")
-        if requirement.stages != plan.stages or requirement.calculations != plan.calculations:
+        if requirement.stages != plan.stages or requirement.calculations != plan.calculations or requirement.source_steps != plan.source_steps:
             consistency_issues.append('确认的聚合阶段或计算公式与执行方案不一致')
         if requirement.grain and plan.grain and requirement.grain != plan.grain:
             consistency_issues.append("确认粒度与 QueryPlan 不一致")

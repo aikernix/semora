@@ -15,11 +15,15 @@ const error = ref('')
 const reviewMessage = ref('')
 const editorVisible = ref(false)
 const editorText = ref('')
+const dataSources = ref<any[]>([])
+const mappingsDirty = ref(false)
 
 const pendingCount = computed(() => candidates.value.filter(item => item.status === 'pending_review').length)
 
 async function loadDomains() {
   drafts.value = (await api.get('/ontology/drafts')).data
+  const sources = (await api.get('/datasources')).data
+  dataSources.value = Array.isArray(sources) ? sources : []
   if (!selectedDomain.value && drafts.value.length) selectedDomain.value = drafts.value[0].domain
 }
 
@@ -34,6 +38,7 @@ async function loadDomain() {
       api.get('/ontology/publication-status', { params: { domain: selectedDomain.value } }),
     ])
     draft.value = draftResponse.data
+    mappingsDirty.value = false
     candidates.value = candidateResponse.data
     publication.value = publicationResponse.data
   } catch (reason: any) {
@@ -121,6 +126,23 @@ async function saveDraft() {
 }
 
 onMounted(load)
+
+function sourceOf(name: string) { return draft.value.objects.find((o: any) => o.name === name)?.dataSourceId || draft.value.dataSourceId }
+async function saveMappings() {
+  const value = JSON.parse(JSON.stringify(draft.value))
+  if (publication.value?.published_version === value.version) {
+    const parts = value.version.split('.')
+    const last = Number(parts[parts.length - 1])
+    value.version = Number.isFinite(last) ? [...parts.slice(0, -1), String(last + 1)].join('.') : `${value.version}.1`
+  }
+  saving.value = true
+  try {
+    await api.put(`/ontology/drafts/${selectedDomain.value}`, value)
+    reviewMessage.value = '数据源映射已保存为草稿，发布后供新查询使用。跨源关系将用于分步传递关联键。'
+    await load()
+  } catch (reason: any) { error.value = reason?.response?.data?.detail || '映射保存失败' }
+  finally { saving.value = false }
+}
 </script>
 
 <template>
@@ -133,7 +155,7 @@ onMounted(load)
         </t-select>
         <t-button variant="outline" @click="createDomain">新建业务域</t-button>
         <t-button variant="outline" :disabled="!draft" @click="openEditor">编辑草稿</t-button>
-        <t-button theme="primary" :loading="publishing" :disabled="!draft" @click="publish">发布当前草稿</t-button>
+        <t-button theme="primary" :loading="publishing" :disabled="!draft || mappingsDirty" @click="publish">发布当前草稿</t-button>
       </div>
     </div>
     <t-alert v-if="error" theme="error" :message="error" style="margin-bottom:16px" />
@@ -151,6 +173,11 @@ onMounted(load)
           <span>指标 <b>{{ draft.metrics?.length || 0 }}</b></span><span>待审候选 <b>{{ pendingCount }}</b></span>
         </div>
       </div>
+      <div class="panel" style="padding:16px;margin-bottom:16px">
+        <label>默认数据源 <t-select v-model="draft.dataSourceId" @change="mappingsDirty = true" style="width:300px;display:inline-block;margin:0 12px"><t-option v-for="source in dataSources" :key="source.id" :value="source.id" :label="`${source.name} · ${source.type}`" /></t-select></label>
+        <t-button :disabled="!mappingsDirty" :loading="saving" @click="saveMappings">保存数据源映射</t-button>
+        <p>对象可绑定不同实例。跨源关系只定义关联键，由程序分步查询，不生成跨实例 JOIN。机构权限映射可在草稿 sourceScopes 中按数据源配置。</p>
+      </div>
 
       <div class="ontology-grid">
         <section class="model-column">
@@ -160,6 +187,7 @@ onMounted(load)
               <article v-for="object in draft.objects" :key="object.name" class="object-card">
                 <div><strong>{{ object.label }}</strong><code>{{ object.name }}</code></div>
                 <small>{{ object.table }} · PK {{ object.primaryKey }}</small>
+                <t-select v-model="object.dataSourceId" placeholder="沿用默认数据源" clearable @change="mappingsDirty = true" style="margin:10px 0"><t-option v-for="source in dataSources" :key="source.id" :value="source.id" :label="`${source.name} · ${source.type}`" /></t-select>
                 <div class="property-list"><span v-for="property in object.properties" :key="property.name" :class="{ sensitive: property.sensitive }">{{ property.label || property.name }} → {{ property.column }}</span></div>
               </article>
             </div>
@@ -169,7 +197,7 @@ onMounted(load)
           <div class="panel model-panel">
             <div class="panel-title">关系路径</div>
             <div v-if="draft.relations?.length" class="relation-list">
-              <article v-for="relation in draft.relations" :key="relation.name"><RelationIcon /><div><strong>{{ relation.label || relation.name }}</strong><span>{{ relation.from }} → {{ relation.to }} · {{ relation.cardinality }}</span><code>{{ relation.condition }}</code></div></article>
+              <article v-for="relation in draft.relations" :key="relation.name"><RelationIcon /><div><strong>{{ relation.label || relation.name }}</strong><span>{{ relation.from }} → {{ relation.to }} · {{ relation.cardinality }} · {{ sourceOf(relation.from) === sourceOf(relation.to) ? '同源关联' : '跨源分步查询' }}</span><code>{{ relation.condition }}</code></div></article>
             </div>
             <div v-else class="empty-hint">尚未定义对象关系。</div>
           </div>

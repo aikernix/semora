@@ -136,12 +136,16 @@ def authorization_context(request: Request) -> AuthorizationContext:
     clearance = principal.claims.get("sensitivity_clearance", "internal")
     if clearance not in {"internal", "confidential", "restricted"}:
         raise HTTPException(403, "invalid sensitivity_clearance authorization claim")
+    sources = principal.claims.get('data_source_ids')
+    if sources is not None and (not isinstance(sources, list) or any(not isinstance(s, str) or not s for s in sources)):
+        raise HTTPException(403, 'invalid data_source_ids authorization claim')
     return AuthorizationContext(
         subject=principal.subject,
         username=principal.username,
         roles=sorted(principal.roles),
         branch_ids=branch_ids,
         sensitivity_clearance=clearance,
+        allowed_data_source_ids=sources,
         cross_organization=bool(principal.claims.get("cross_organization", False)),
         policy_version=str(principal.claims.get("abac_policy_version", "abac-v1")),
     )
@@ -621,6 +625,15 @@ async def decide_ontology_candidate(candidate_id: str, request: Request) -> dict
 @app.post("/api/v1/ontology/publish")
 async def publish_ontology(domain: str = "retail_credit") -> dict:
     try:
+        draft = await ontology_service.get_draft(domain)
+        sources = {str(o.get('dataSourceId') or draft.get('dataSourceId') or '') for o in draft.get('objects', [])}
+        for source_id in sources:
+            try:
+                source = datasource_service.repository.get(source_id)
+            except KeyError:
+                raise HTTPException(422, f'本体数据源尚未登记：{source_id}')
+            if source.status != 'healthy' or source.access != 'read_only':
+                raise HTTPException(422, f'数据源尚未通过只读验证：{source.name}')
         return await ontology_service.publish(domain)
     except OntologyCoreError as exc:
         raise_ontology_error(exc)

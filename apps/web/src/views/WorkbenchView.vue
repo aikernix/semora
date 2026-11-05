@@ -23,6 +23,11 @@ let selectionVersion = 0
 const settings = ref<SystemSettings | null>(null)
 const alignmentAnswers = ref<Record<string, string>>({})
 const expanded = ref<Record<string, boolean>>({ agent: false, research: false, history: false, timeline: false, plan: false, sql: true, gate: false, evidence: false, sqlHistory: false })
+const sourceSteps = computed(() => run.value?.plan?.source_steps || run.value?.requirement_draft?.source_steps || [])
+function sourceStatus(name: string) {
+  const event = [...(run.value?.events || [])].reverse().find(e => e.data.step === name && e.event.startsWith('source.step.'))
+  return ({ 'source.step.gated': '门禁通过', 'source.step.started': '查询中', 'source.step.completed': '完成', 'source.step.skipped': '跳过：关联键为空' } as Record<string, string>)[event?.event || ''] || '等待执行'
+}
 const examples = ['最近12个月各分行贷款余额和90+逾期率', '查询贷款客户明细和手机号', '客户数']
 const statusLabel: Record<string, string> = {
   received: '已接收', retrieving: '检索知识', understanding: '理解需求', aligning: '准备对齐', clarifying: '待确认口径', aligned: '口径已确认', planning: '生成查询计划', compiling: '生成 SQL', gating: '安全门禁', reviewing: '独立复核', awaiting_approval: '等待审批', executing: '执行查询', explaining: '解释结果', completed: '已完成', failed: '失败',
@@ -228,7 +233,7 @@ async function streamRun(runId: string, after: number) {
       const event = JSON.parse(message.data)
       run.value.events.push(event)
       run.value.status = event.status
-      if (['evidence.collected', 'plan.ready', 'plan.repaired', 'plan.preflight.completed', 'sql.ready', 'gate.completed', 'review.completed', 'review.revision.required', 'analysis.revision.started', 'requirement.revised', 'alignment.required', 'approval.required', 'execution.completed', 'result_review.completed', 'answer.completed', 'run.failed', 'authorization.denied', 'execution.cancelled'].includes(message.event)) {
+      if (['evidence.collected', 'plan.ready', 'plan.repaired', 'plan.preflight.completed', 'sql.ready', 'gate.completed', 'review.completed', 'review.revision.required', 'analysis.revision.started', 'requirement.revised', 'alignment.required', 'alignment.resolved', 'source.plan.compiled', 'source.step.started', 'source.step.completed', 'source.step.skipped', 'source.step.gated', 'approval.required', 'execution.completed', 'result_review.completed', 'answer.completed', 'run.failed', 'authorization.denied', 'execution.cancelled'].includes(message.event)) {
         refreshSnapshot()
       }
     },
@@ -296,7 +301,7 @@ onMounted(async () => {
         <div v-if="!run" class="welcome">
           <div class="welcome-mark"><span></span><span></span><span></span></div>
           <h1>先描述这次查数需求</h1>
-          <p>提交需求后，AI 会检查含义、时间、统计范围和口径；有歧义时请通过选项卡片或自由补充与 AI 对齐。</p>
+          <p>有歧义时，AI 会通过卡片请你补充；口径明确后，Reviewer 复核通过即自动查询，展示 SQL、结果和说明。</p>
           <t-alert v-if="!modelConfigured" theme="warning" title="请先配置大模型"><template #message>需求分析需要真实模型连接。<router-link to="/settings#model">前往模型配置</router-link></template></t-alert>
           <form class="requirement-form" @submit.prevent="submitRequirement">
             <label>需求名称（选填）<t-input v-model="requirementForm.title" :maxlength="100" placeholder="例如：本月贷款情况分析" /></label>
@@ -447,7 +452,24 @@ onMounted(async () => {
             <div v-if="expanded.evidence" class="artifact-body evidence-list"><article v-for="item in run.evidence" :key="item.chunk_id"><strong>{{ item.title }}</strong><small>{{ item.locator }} · {{ item.revision }}</small><p>{{ item.summary }}</p></article></div>
           </div>
 
-          <div v-if="approvedSql" class="artifact-card">
+          <div v-if="sourceSteps.length" class="artifact-card source-plan">
+            <button class="artifact-title" @click="toggle('sources')"><span><b>跨源</b> 分步查询计划 <em>{{ sourceSteps.length }} 个步骤 · 程序传递关联键</em></span><ChevronDownIcon :class="{ rotate: expanded.sources }"/></button>
+            <div class="artifact-body">
+              <ol class="source-step-list"><li v-for="step in sourceSteps" :key="step.name">
+                <strong>{{ step.label || step.name }} · {{ sourceStatus(step.name) }}</strong>
+                <p>{{ step.query.intent }} · 数据源 {{ run.source_artifacts?.[step.name]?.compilation?.data_source_label || step.data_source_id }}</p>
+                <small v-for="binding in step.inputs" :key="binding.source_step">从 {{ binding.source_step }} 提取 {{ binding.source_field }}，去重后作为 {{ binding.target_field }} 的绑定参数；无关联键时跳过查询。</small>
+                <details v-if="run.source_artifacts?.[step.name]" :open="expanded.sources">
+                  <summary>查看本步 SQL{{ run.source_artifacts[step.name].compilation?.inputs_bound ? ' · 参数已绑定' : ' · 待前置步骤提供关联参数' }}</summary>
+                  <pre class="code-block">{{ run.source_artifacts[step.name].physical_sql }}</pre>
+                  <small>绑定参数 {{ Object.keys(run.source_artifacts[step.name].parameters).length }} 项，关联键由程序传递。</small>
+                </details>
+              </li></ol>
+              <small>各数据源为独立只读事务，读取时间可能不同；中间结果不完整时停止，不会作为完整结果交付。</small>
+            </div>
+          </div>
+
+          <div v-if="approvedSql && !sourceSteps.length" class="artifact-card">
             <button class="artifact-title" @click="toggle('sql')"><span><b>03</b> 当前 SQL <em>复核通过 · {{ run.result ? '已执行' : run.status === 'executing' ? '执行中' : '尚未执行' }} · {{ approvedSql.dialect }} · {{ approvedSql.artifact_hash.slice(0, 10) }}</em></span><ChevronDownIcon :class="{ rotate: expanded.sql }"/></button>
             <div v-if="expanded.sql" class="artifact-body"><p v-if="run.sql_explanation">{{ run.sql_explanation }}</p><pre class="code-block">{{ approvedSql.physical_sql }}</pre><div class="parameters"><span>绑定参数</span><code>{{ approvedSql.parameters }}</code></div></div>
           </div>
@@ -496,6 +518,7 @@ onMounted(async () => {
 .research-body{display:grid;gap:14px}.research-answer{border-left:3px solid var(--semora-green);padding:2px 12px}.research-answer small,.research-session{color:var(--semora-muted)}.research-answer p{margin:6px 0 0;line-height:1.7}.research-trace{display:grid;gap:8px}.research-trace article{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--semora-line);border-radius:8px;padding:10px 12px}.research-trace article>span{width:22px;height:22px;display:grid;place-items:center;flex:none;border-radius:50%;background:var(--semora-green-soft);color:var(--semora-green-dark);font-size:11px}.research-trace strong{font-size:12px}.research-trace p{margin:4px 0 0;color:var(--semora-muted);font-size:12px;line-height:1.55}
 .stage-plan{padding:14px;border-radius:8px;background:var(--semora-page);margin:12px 0}.stage-plan ol{padding-left:22px;margin:8px 0 0;line-height:1.8;color:var(--semora-muted)}
 @media (max-width:1100px){.query-steps{grid-template-columns:1fr}.query-step{display:none}.query-step.active{display:flex}.requirement-grid{grid-template-columns:1fr 1fr}.option-list{grid-template-columns:1fr}}
+.source-step-list{padding-left:22px;margin:0}.source-step-list li{padding:8px 0 16px}.source-step-list p{font-size:13px;color:var(--semora-muted);margin:6px 0}.source-step-list small{display:block;line-height:1.7}.source-step-list details{margin-top:8px}.source-step-list summary{cursor:pointer;color:var(--semora-green-dark);font-size:13px}
 .continuation-mode{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--semora-muted)}.continuation-mode select{border:1px solid var(--semora-line);border-radius:6px;padding:4px 8px;background:var(--semora-card);color:var(--semora-ink)}
 </style>
 

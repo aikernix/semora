@@ -228,7 +228,7 @@ def test_empty_query_result_completes_normally():
     assert '没有匹配数据' in run.answer
 
 
-def test_public_workflow_pauses_for_alignment_before_sql_then_resumes():
+def test_public_workflow_pauses_for_alignment_before_sql_then_resumes(manual_plan_confirmation):
     async def scenario():
         store = Store()
         workflow = Workflow(store, fake_execute, fake_retrieve, fake_snapshot)
@@ -270,7 +270,7 @@ def test_public_workflow_pauses_for_alignment_before_sql_then_resumes():
 def test_sensitive_query_waits_for_approval_then_executes():
     store = Store()
     workflow = Workflow(store, fake_execute, fake_retrieve, fake_snapshot)
-    run = asyncio.run(workflow.start("demo-session", "查询贷款客户明细和手机号"))
+    run = asyncio.run(workflow.start("demo-session", "查询贷款客户明细和手机号", approval_mode='risk_based'))
     assert run.status == RunStatus.AWAITING_APPROVAL
     assert run.result is None
     assert run.approval and run.approval.status == "pending"
@@ -286,7 +286,7 @@ def test_sensitive_query_waits_for_approval_then_executes():
 def test_rejected_approval_never_executes():
     store = Store()
     workflow = Workflow(store, fake_execute, fake_retrieve, fake_snapshot)
-    run = asyncio.run(workflow.start("demo-session", "查询贷款客户明细和手机号"))
+    run = asyncio.run(workflow.start("demo-session", "查询贷款客户明细和手机号", approval_mode='risk_based'))
     rejected = asyncio.run(workflow.approve(run, "approver-1", False, "用途不充分"))
     assert rejected.status == RunStatus.FAILED
     assert rejected.result is None
@@ -295,7 +295,7 @@ def test_rejected_approval_never_executes():
 def test_sql_change_invalidates_pending_approval():
     store = Store()
     workflow = Workflow(store, fake_execute, fake_retrieve, fake_snapshot)
-    run = asyncio.run(workflow.start("demo-session", "查询贷款客户明细和手机号"))
+    run = asyncio.run(workflow.start("demo-session", "查询贷款客户明细和手机号", approval_mode='risk_based'))
     run.sql.artifact_hash = "changed"
     try:
         asyncio.run(workflow.approve(run, "approver-1", True, "批准"))

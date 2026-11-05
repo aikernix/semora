@@ -152,6 +152,7 @@ class RequirementDraft(BaseModel):
     data_scope: dict[str, Any] = Field(default_factory=dict)
     aggregation_rules: list[str] = Field(default_factory=list)
     stages: list[QueryStage] = Field(default_factory=list)
+    source_steps: list[SourceQueryStep] = Field(default_factory=list)
     calculations: list[QueryCalculation] = Field(default_factory=list)
     output_fields: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
@@ -184,6 +185,7 @@ class RequirementSpec(BaseModel):
     data_scope: dict[str, Any] = Field(default_factory=dict)
     aggregation_rules: list[str] = Field(default_factory=list)
     stages: list[QueryStage] = Field(default_factory=list)
+    source_steps: list[SourceQueryStep] = Field(default_factory=list)
     calculations: list[QueryCalculation] = Field(default_factory=list)
     output_fields: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
@@ -215,7 +217,7 @@ class QueryStage(BaseModel):
     join_type: Literal['left', 'inner'] = 'left'
 
 
-class QueryPlan(BaseModel):
+class SourceQueryPlan(BaseModel):
     version: str = "1.0"
     domain: str
     data_source_id: str = ""
@@ -232,6 +234,26 @@ class QueryPlan(BaseModel):
     data_scope: dict[str, Any] = Field(default_factory=dict)
     assumptions: list[str] = Field(default_factory=list)
     evidence: list[EvidenceRef] = Field(default_factory=list)
+
+
+class StepInput(BaseModel):
+    relation: str
+    source_step: str
+    source_field: str
+    target_field: str
+    include_source_fields: list[str] = Field(default_factory=list, max_length=32)
+
+
+class SourceQueryStep(BaseModel):
+    name: str = Field(pattern=r'^[A-Za-z_][A-Za-z0-9_]{0,63}$')
+    label: str = ''
+    data_source_id: str
+    query: SourceQueryPlan
+    inputs: list[StepInput] = Field(default_factory=list, max_length=1)
+
+
+class QueryPlan(SourceQueryPlan):
+    source_steps: list[SourceQueryStep] = Field(default_factory=list, max_length=8)
 
 
 class SQLArtifact(BaseModel):
@@ -286,7 +308,8 @@ class ApprovalDecision(BaseModel):
 class SystemSettings(BaseModel):
     """Versioned, non-secret runtime policy managed by Semora administrators."""
 
-    approval_mode: Literal["disabled", "all", "risk_based"] = "risk_based"
+    approval_mode: Literal["disabled", "all", "risk_based"] = "disabled"
+    require_plan_confirmation: bool = False
     approve_sensitive_detail: bool = True
     approve_large_result: bool = True
     approve_cross_organization: bool = True
@@ -311,6 +334,7 @@ class AuthorizationContext(BaseModel):
     roles: list[str] = Field(default_factory=list)
     branch_ids: list[int] = Field(default_factory=list)
     sensitivity_clearance: Literal["internal", "confidential", "restricted"] = "internal"
+    allowed_data_source_ids: list[str] | None = None
     cross_organization: bool = False
     policy_version: str = "abac-v1"
 
@@ -368,6 +392,9 @@ class QueryRun(BaseModel):
     revision_count: int = 0
     plan: QueryPlan | None = None
     sql: SQLArtifact | None = None
+    source_artifacts: dict[str, SQLArtifact] = Field(default_factory=dict)
+    source_results: dict[str, ExecutionResult] = Field(default_factory=dict, exclude=True)
+    source_reviews: dict[str, ReviewDecision] = Field(default_factory=dict)
     sql_explanation: str | None = None
     gate: GateDecision | None = None
     review: ReviewDecision | None = None
@@ -377,4 +404,8 @@ class QueryRun(BaseModel):
     answer: str | None = None
     error: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
+
+
+RequirementDraft.model_rebuild()
+RequirementSpec.model_rebuild()
 

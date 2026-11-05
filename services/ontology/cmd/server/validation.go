@@ -209,7 +209,7 @@ func wrenTableReference(value string) (map[string]any, bool) {
 	return nil, false
 }
 
-func projectWren(ontology Ontology) (map[string]any, []ValidationIssue) {
+func projectWrenSingle(ontology Ontology) (map[string]any, []ValidationIssue) {
 	issues := []ValidationIssue{}
 	objects := map[string]ObjectClass{}
 	propertyColumns := map[string]map[string]Property{}

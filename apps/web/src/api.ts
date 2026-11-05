@@ -29,6 +29,7 @@ export interface ClarificationQuestion {
   blocking: boolean
 }
 export interface RequirementDraft {
+  source_steps?: any[]
   version: number
   summary: string
   analysis_steps: string[]
@@ -59,6 +60,7 @@ export interface KnowledgeResearchResult {
   evidence: any[]
 }
 export interface QueryRun {
+  source_artifacts?: Record<string, any>
   id: string
   session_id: string
   domain: string
@@ -95,6 +97,7 @@ export interface QuerySession {
 }
 
 export interface SystemSettings {
+  require_plan_confirmation?: boolean
   approval_mode: 'disabled' | 'all' | 'risk_based'
   approve_sensitive_detail: boolean
   approve_large_result: boolean

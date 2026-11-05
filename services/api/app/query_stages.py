@@ -315,6 +315,15 @@ def metric_catalog(plan, ontology):
 
 
 def validate_query_shape(plan, ontology):
+    if getattr(plan, 'source_steps', []):
+        from semora_agent.multisource import source_ontology, validate_source_steps
+        from semora_contracts import QueryPlan, QueryFilter
+        result = validate_source_steps(plan, ontology)
+        for step in plan.source_steps:
+            local = QueryPlan.model_validate(step.query.model_dump(mode='json'))
+            local.filters += [QueryFilter(field=b.target_field, operator='in', value=[None]) for b in step.inputs]
+            validate_query_shape(local, source_ontology(ontology, step.data_source_id))
+        return result
     return QueryStages(plan, ontology, metric_catalog(plan, ontology)).summary()
 
 

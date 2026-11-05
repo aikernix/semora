@@ -4,7 +4,8 @@ import { MessagePlugin } from 'tdesign-vue-next'
 import { api, type SystemSettings } from '../api'
 
 const form = ref<SystemSettings>({
-  approval_mode: 'risk_based',
+  require_plan_confirmation: false,
+  approval_mode: 'disabled',
   approve_sensitive_detail: true,
   approve_large_result: true,
   approve_cross_organization: true,
@@ -108,6 +109,7 @@ onMounted(async () => { await Promise.all([load(), loadModel()]) })
         <section class="panel">
           <div class="panel-title">审批策略</div>
           <div class="form">
+            <label class="switch-row">口径明确后仍需人工确认方案<t-switch v-model="form.require_plan_confirmation"/></label>
             <label>默认模式
               <t-select v-model="form.approval_mode">
                 <t-option value="disabled" label="关闭审批"/>

@@ -225,7 +225,7 @@ def test_wiki_tools_enforce_discovery_scope_and_follow_links(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_reviewer_revise_drives_reanalysis_and_requires_new_confirmation():
+def test_reviewer_revise_drives_reanalysis_and_requires_new_confirmation(manual_plan_confirmation):
     async def scenario():
         executions = []
         async def execute(*args):
@@ -337,7 +337,7 @@ def test_reviewer_budget_blocks_a_fourth_tool_before_execution():
     asyncio.run(scenario())
 
 
-def test_alignment_is_accepted_before_model_finishes_and_duplicates_are_blocked():
+def test_alignment_is_accepted_before_model_finishes_and_duplicates_are_blocked(manual_plan_confirmation):
     async def scenario():
         release = asyncio.Event()
         workflow = Workflow(Store(), fake_execute, fake_retrieve, fake_snapshot)
@@ -412,7 +412,7 @@ def test_typed_agent_output_corrects_text_confidence_before_delivery():
     asyncio.run(scenario())
 
 
-def test_native_agents_run_inside_checkpointed_workflow_and_async_alignment():
+def test_native_agents_run_inside_checkpointed_workflow_and_async_alignment(manual_plan_confirmation):
     async def scenario():
         executions = []
         async def execute(*args):

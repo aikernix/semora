@@ -50,6 +50,8 @@ def adapt_mysql_artifact(artifact: SQLArtifact) -> SQLArtifact:
 
 
 def compile_plan(plan: QueryPlan, ontology: dict[str, Any]) -> SQLArtifact:
+    if plan.source_steps:
+        raise PlanningError('跨源步骤必须由编排器分别编译，禁止转换成单连接SQL')
     objects = {item["name"]: item for item in ontology.get("objects", [])}
     relations = {item["name"]: item for item in ontology.get("relations", [])}
     metrics = {item["name"]: item for item in ontology.get("metrics", [])}
@@ -129,6 +131,9 @@ def compile_plan(plan: QueryPlan, ontology: dict[str, Any]) -> SQLArtifact:
     required_objects = {item.split(".", 1)[0] for item in plan.dimensions + plan.fields}
     required_objects.update(item.field.split(".", 1)[0] for item in plan.filters)
     required_objects.update(stages.required_objects())
+    selected_objects = required_objects | {r[key] for r in selected_relations for key in ('from', 'to')}
+    if any(str(objects[name].get('dataSourceId') or ontology_datasource) != plan.data_source_id for name in selected_objects):
+        raise PlanningError('不同数据源对象不能直接JOIN，请使用source_steps分步查询')
     scope_field = str(ontology.get("scopeField") or "")
     if plan.data_scope.get("branch_ids"):
         if not scope_field:

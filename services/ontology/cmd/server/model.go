@@ -15,6 +15,7 @@ type Property struct {
 }
 
 type ObjectClass struct {
+    DataSourceID string `json:"dataSourceId,omitempty"`
     Metadata map[string]any `json:"metadata,omitempty"`
 	Name       string     `json:"name"`
 	Label      string     `json:"label"`
@@ -53,6 +54,7 @@ type DefaultFilter struct {
 }
 
 type Ontology struct {
+    SourceScopes map[string]string `json:"sourceScopes,omitempty"`
     Metadata map[string]any `json:"metadata,omitempty"`
 	Domain           string          `json:"domain"`
 	Name             string          `json:"name"`

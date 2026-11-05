@@ -51,9 +51,6 @@ def test_multiple_clarification_rounds_continue_without_knowledge_and_execute_on
         assert run.status==RunStatus.CLARIFYING and run.requirement_draft.clarifications[0].id=='time'
         assert run.sql is None and not executions
         run=await workflow.align(run,'user',{'time':'全部数据'})
-        assert run.status==RunStatus.CLARIFYING and not run.requirement_draft.clarifications
-        assert run.sql is None and not executions
-        run=await workflow.align(run,'user',{})
         assert run.status==RunStatus.COMPLETED,run.error
         assert len(executions)==1 and analyst.calls==3
         assert len(run.requirement.confirmed_facts)==2

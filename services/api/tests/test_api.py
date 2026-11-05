@@ -10,7 +10,8 @@ def test_health_and_catalog_endpoints():
     assert client.get("/healthz").json()["status"] == "ok"
     assert client.get("/api/v1/datasources").json()[0]["access"] == "read_only"
     settings = client.get("/api/v1/settings").json()
-    assert settings["approval_mode"] == "risk_based"
+    assert settings["approval_mode"] == "disabled"
+    assert settings['require_plan_confirmation'] is False
     assert settings["policy_version"].startswith("approval-policy-v")
 
 

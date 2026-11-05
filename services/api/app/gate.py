@@ -26,6 +26,7 @@ def review_sql(
     approve_large_result: bool = True,
     cross_organization: bool = False,
     approve_cross_organization: bool = True,
+    max_sql_rows: int = 1000,
 ) -> GateDecision:
     checks: list[GateCheck] = []
     # SQLGlot intentionally parses SQL, not DB-driver parameter syntax. Replace
@@ -62,8 +63,11 @@ def review_sql(
     has_scope = not require_organization_scope or "branch_id" in normalized or "group by b.name" in normalized or "group by branch" in normalized
     checks.append(GateCheck(name="organization_scope", passed=has_scope, severity="blocking", message="已包含机构范围或机构聚合" if require_organization_scope else "当前未配置机构范围过滤，按数据源可读范围查询"))
 
-    has_limit = bool(ast and ast.args.get("limit"))
-    checks.append(GateCheck(name="row_limit", passed=has_limit, severity="blocking", message="结果上限不超过 1000 行"))
+    try:
+        has_limit = bool(ast and ast.args.get('limit') and 0 < int(ast.args['limit'].expression.name) <= max_sql_rows)
+    except (ValueError, AttributeError, TypeError):
+        has_limit = False
+    checks.append(GateCheck(name="row_limit", passed=has_limit, severity="blocking", message=f"SQL读取上限不超过 {max_sql_rows} 行"))
 
     sensitive = bool(columns & SENSITIVE_COLUMNS) or bool(sensitive_columns)
     sensitive_requires_approval = (

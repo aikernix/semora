@@ -76,7 +76,7 @@ def metric_predicates(plan, ontology):
 
 def compatible_repair(old_plan, new_plan, requirement, ontology):
     """Only preserve confirmed semantics; otherwise require another confirmation."""
-    fields = {'metrics', 'calculations', 'stages', 'dimensions', 'fields', 'time_range', 'grain', 'relationship_path', 'data_scope'}
+    fields = {'metrics', 'calculations', 'stages', 'source_steps', 'dimensions', 'fields', 'time_range', 'grain', 'relationship_path', 'data_scope'}
     if old_plan.model_dump(include=fields) != new_plan.model_dump(include=fields):
         return False
     old_filters = {filter_key(item) for item in old_plan.filters}
