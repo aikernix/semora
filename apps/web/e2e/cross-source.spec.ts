@@ -9,6 +9,7 @@ test('cross-source queries expose both SQL steps, dependencies and final results
   const run = { id: 'source-run', session_id: 'source-session', domain: 'commerce', question: '查客户账户余额', status: 'completed', evidence: [],
     plan: { version: '3.0', metrics: [], dimensions: [], fields: ['account.amount'], relationship_path: [], assumptions: [], source_steps },
     source_artifacts: { pick: artifact('SELECT customer_id FROM customers LIMIT 1001'), lookup: artifact('SELECT amount FROM accounts WHERE customer_id IN (%(p)s) LIMIT 1000') },
+    sql: artifact('SELECT amount FROM accounts LIMIT 1000'), gate: { allowed: true }, review: { decision: 'approved' },
     result: { columns: ['amount'], rows: [[100]], row_count: 1, duration_ms: 5, truncated: false }, answer: '已完成跨源查询',
     events: source_steps.map(step => ({ event: 'source.step.completed', status: 'executing', created_at: '2026-11-05T01:00:00Z', data: { step: step.name } })) }
   await page.route('**/api/v1/**', route => {
@@ -30,6 +31,26 @@ test('cross-source queries expose both SQL steps, dependencies and final results
   await expect(page.getByText('SELECT amount FROM accounts WHERE customer_id IN (%(p)s) LIMIT 1000', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: '当前 SQL', exact: false })).toHaveCount(0)
   await expect(page.locator('.result-table')).toContainText('100')
+})
+
+test('cross-source SQL is hidden until the whole plan passes review', async ({ page }) => {
+  const step = { name: 'pick', label: '选择客户', data_source_id: 'source-a', query: { intent: '查询客户编号' }, inputs: [] }
+  const run = { id: 'rejected-run', session_id: 'source-session', domain: 'commerce', question: '查询客户', status: 'failed', evidence: [], events: [],
+    plan: { metrics: [], dimensions: [], fields: [], relationship_path: [], assumptions: [], source_steps: [step] },
+    gate: { allowed: true }, review: { decision: 'rejected' }, error: '复核未通过',
+    source_artifacts: { pick: { physical_sql: 'SELECT unreviewed_field FROM private_records LIMIT 1000', parameters: {}, compilation: {} } } }
+  await page.route('**/api/v1/**', route => {
+    const path = new URL(route.request().url()).pathname
+    if (path === '/api/v1/sessions') return route.fulfill({ json: [{ id: 'source-session', title: '跨源查询', domain: 'commerce', run_count: 1 }] })
+    if (path === '/api/v1/domains') return route.fulfill({ json: [{ domain: 'commerce', name: '跨源演示' }] })
+    if (path === '/api/v1/model/status') return route.fulfill({ json: { configured: true } })
+    if (path === '/api/v1/sessions/source-session/runs') return route.fulfill({ json: [run] })
+    return route.fulfill({ json: {} })
+  })
+  await page.goto('/workbench')
+  await page.getByRole('button', { name: '分步查询计划', exact: false }).click()
+  await expect(page.getByText('SELECT unreviewed_field FROM private_records LIMIT 1000', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('复核未通过', { exact: true })).toBeVisible()
 })
 
 test('ontology shows object data sources and identifies cross-instance relations', async ({ page }) => {

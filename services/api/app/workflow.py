@@ -725,7 +725,7 @@ class Workflow:
         from semora_agent.constraints import compatible_repair
         old_plan = run.plan
         candidate = outcome.plan
-        same_execution = {'metrics', 'dimensions', 'fields', 'filters', 'grain', 'time_range', 'calculations', 'stages', 'relationship_path', 'data_scope'}
+        same_execution = {'metrics', 'dimensions', 'fields', 'filters', 'grain', 'time_range', 'calculations', 'stages', 'source_steps', 'relationship_path', 'data_scope'}
         if candidate and old_plan.model_dump(include=same_execution) == candidate.model_dump(include=same_execution):
             run.error = '修订未改变执行方案，已停止重复生成；请根据复核原因补充口径或本体配置'
             self.emit(run, 'run.failed', RunStatus.FAILED, {'error': run.error}, 'conversation_owner')

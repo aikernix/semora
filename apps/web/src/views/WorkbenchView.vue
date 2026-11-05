@@ -459,7 +459,7 @@ onMounted(async () => {
                 <strong>{{ step.label || step.name }} · {{ sourceStatus(step.name) }}</strong>
                 <p>{{ step.query.intent }} · 数据源 {{ run.source_artifacts?.[step.name]?.compilation?.data_source_label || step.data_source_id }}</p>
                 <small v-for="binding in step.inputs" :key="binding.source_step">从 {{ binding.source_step }} 提取 {{ binding.source_field }}，去重后作为 {{ binding.target_field }} 的绑定参数；无关联键时跳过查询。</small>
-                <details v-if="run.source_artifacts?.[step.name]" :open="expanded.sources">
+                <details v-if="approvedSql && run.source_artifacts?.[step.name]" :open="expanded.sources">
                   <summary>查看本步 SQL{{ run.source_artifacts[step.name].compilation?.inputs_bound ? ' · 参数已绑定' : ' · 待前置步骤提供关联参数' }}</summary>
                   <pre class="code-block">{{ run.source_artifacts[step.name].physical_sql }}</pre>
                   <small>绑定参数 {{ Object.keys(run.source_artifacts[step.name].parameters).length }} 项，关联键由程序传递。</small>

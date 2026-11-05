@@ -228,6 +228,48 @@ def test_invalid_cross_source_contracts_fail_before_any_query(kind):
         AnalystAgent(model)._build_outcome(value, '查询', [], model_ontology, scope, 'test')
 
 
+def test_reviewer_can_revise_only_source_steps_then_execute_without_extra_confirmation(monkeypatch):
+    async def scenario():
+        w, session, calls = harness(monkeypatch)
+        proposals = iter([proposal(), proposal(enrich=False)])
+        class Analyst:
+            async def analyse(self, question, evidence, model_ontology, scope):
+                return AnalystAgent(StructuredModel())._build_outcome(next(proposals), question, evidence, model_ontology, scope, 'test')
+        decisions = iter([
+            ReviewDecision(decision='revise', issues=['去掉不需要的来源附加列'], rationale='只需账户结果'),
+            ReviewDecision(decision='approved', issues=[], rationale='步骤已修订'),
+        ])
+        class Reviewer(ReviewerAgent):
+            async def review(self, *args):
+                return next(decisions)
+        w.analyst, w.reviewer = Analyst(), Reviewer(StructuredModel())
+        r = await w.start(session.id, '查有效客户的账户余额', domain='commerce')
+        assert r.status == RunStatus.COMPLETED, r.error
+        assert r.revision_count == 1
+        assert [call[0] for call in calls] == ['customers-db', 'accounts-db']
+        assert r.result.columns == ['balances_customer_id', 'balances_amount']
+        assert not any(e.event in {'alignment.required', 'approval.required'} for e in r.events)
+    asyncio.run(scenario())
+
+
+def test_native_tool_submission_runs_cross_source_plan_without_confirmation(monkeypatch):
+    async def scenario():
+        from services.api.tests.test_agent_runtime import NativeModel
+
+        w, session, calls = harness(monkeypatch)
+        w.analyst = AnalystAgent(NativeModel([
+            ('read_object', {'name': 'client'}),
+            ('AgentSubmission', {'payload': proposal()}),
+        ]))
+        r = await w.start(session.id, '查有效客户的账户余额，并带上客户类型', domain='commerce')
+        assert r.status == RunStatus.COMPLETED, r.error
+        assert len(r.plan.source_steps) == 2
+        assert [call[0] for call in calls] == ['customers-db', 'accounts-db']
+        assert r.review.decision == 'approved'
+        assert not any(e.event in {'alignment.required', 'approval.required'} for e in r.events)
+    asyncio.run(scenario())
+
+
 def test_cross_source_join_cannot_fall_back_to_single_connection_sql():
     from app.planner import compile_plan, PlanningError
     from semora_contracts import QueryPlan
