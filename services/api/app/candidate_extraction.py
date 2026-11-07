@@ -1,4 +1,6 @@
 from __future__ import annotations
+from semora_agent.prompts import ONTOLOGY_EXTRACTION, EVIDENCE
+from .model_outputs import CandidateBatch, CandidateProposal
 
 import json
 import re
@@ -59,17 +61,11 @@ class OntologyCandidateExtractor:
             }
             for item in chunks[:30]
         ]
-        system = """你是通用数据治理框架中的本体候选抽取器。只输出 JSON，不输出思维链。
-不预设行业、业务对象或规则；只依据当前业务域、给定本体和文档证据提取候选。
-从文档中抽取需要数据管理员审核的业务定义、本体对象、属性、关系或指标候选。
-禁止直接发布；禁止编造文档未出现的物理表、列、关系或计算口径。
-若文档证据不足以形成结构化 patch，则 kind 必须为 definition 且 patch 为空。
-metric patch 必须包含 name、label、expression、grain、dimensions、format，表达式只能引用给定本体中的对象和属性。
-object、property、relation 只有在文档明确给出物理映射时才允许输出。
-返回 {"candidates":[{"term":"...","proposal":"...","kind":"definition|metric|object|property|relation","patch":{},"evidence_chunk_id":"..."}]}。"""
+        system=ONTOLOGY_EXTRACTION+'\n'+EVIDENCE
         user = json.dumps(
             {
                 "domain": domain,
+                "output_contract": CandidateBatch.model_json_schema(),
                 "document": {
                     "id": str(document.get("id", "")),
                     "title": document.get("title", ""),
@@ -92,6 +88,10 @@ object、property、relation 只有在文档明确给出物理映射时才允许
         proposals: list[dict[str, Any]] = []
         for raw in raw_candidates[:20]:
             if not isinstance(raw, dict):
+                continue
+            try:
+                raw=CandidateProposal.model_validate(raw).model_dump()
+            except ValueError:
                 continue
             chunk = chunk_map.get(str(raw.get("evidence_chunk_id", "")))
             if chunk is None:

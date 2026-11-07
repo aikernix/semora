@@ -97,7 +97,7 @@ def test_wiki_research_actions_are_selected_by_the_model(monkeypatch):
     ])
     class Model:
         configured=True
-        async def complete_json(self,system,user):return next(decisions)
+        async def complete_json(self,system,user,**kwargs):return next(decisions)
     import semora_agent.model as model_module
     monkeypatch.setattr(model_module,'structured_model',Model())
     def handler(request):
@@ -120,7 +120,7 @@ def test_greeting_is_clarified_before_any_knowledge_lookup(monkeypatch):
         configured=True
         required=True
         calls=0
-        async def complete_json(self,system,user):
+        async def complete_json(self,system,user,**kwargs):
             self.calls+=1
             return {'summary':'您好，请描述想了解的数据','requires_knowledge':False,'clarifications':[{'id':'goal','field':'goal','question':'您想了解什么数据？','reason':'还未提供查数目标','options':[{'id':'summary','label':'汇总统计','value':'汇总统计'},{'id':'detail','label':'查看明细','value':'查看明细'}]}]}
     async def scenario():

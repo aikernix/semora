@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { analysisOutcomes, activeAnalysisStatus, displayValue } from '../analysisTimeline'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { api, type QueryRun, type QuerySession, type SystemSettings } from '../api'
 import { fetchEventSource } from '@microsoft/fetch-event-source'
@@ -33,7 +34,7 @@ const statusLabel: Record<string, string> = {
   received: '已接收', retrieving: '检索知识', understanding: '理解需求', aligning: '准备对齐', clarifying: '待确认口径', aligned: '口径已确认', planning: '生成查询计划', compiling: '生成 SQL', gating: '安全门禁', reviewing: '独立复核', awaiting_approval: '等待审批', executing: '执行查询', explaining: '解释结果', completed: '已完成', failed: '失败',
 }
 const progress = computed(() => (run.value?.events || []).filter((event, index, all) => index === 0 || event.status !== all[index - 1].status).slice(-8))
-const approvedSql = computed(() => run.value?.gate?.allowed && run.value?.review?.decision === 'approved' ? run.value.sql : null)
+const approvedSql = computed(() => run.value?.gate?.allowed && (run.value?.review?.decision === 'approved' || run.value?.review?.disposition === 'advisory') ? run.value.sql : null)
 const sqlHistory = computed(() => {
   const events = run.value?.events || []
   return events.flatMap((event, index) => {
@@ -57,25 +58,9 @@ const nextAction = computed(() => {
   if (run.value.review?.decision === 'revise') return 'Reviewer 要求修改 SQL，Analyst 正在修订。旧 SQL 保留在历史版本中，不会执行。'
   return statusLabel[run.value.status] || run.value.status
 })
-const agentTrace = computed(() => {
-  let iteration = run.value?.continuation?.model_round_offset || 0
-  const roleCounts: Record<string, number> = { ...run.value?.continuation?.role_rounds }
-  return (run.value?.events || []).filter(event => event.event.startsWith('agent.') || event.event.startsWith('analysis.revision') || event.event === 'review.revision.required' || event.event === 'requirement.revised').map(event => {
-    const data = { ...event.data }
-    const role = data.agent || 'analyst'
-    if (event.event === 'agent.model.started') {
-      iteration += 1
-      roleCounts[role] = (roleCounts[role] || 0) + 1
-      data.iteration = iteration
-      data.role_iteration = roleCounts[role]
-      data.summary = `任务第 ${iteration} 轮：${data.phase || '分析'}，核验需求与证据并选择下一步`
-    } else if (iteration && event.event.startsWith('agent.') && event.event !== 'agent.phase.started') {
-      data.iteration = iteration
-      data.role_iteration = roleCounts[role] || data.role_iteration
-    }
-    return { ...event, data }
-  })
-})
+const agentTrace = computed(() => (run.value?.events || []).filter(e => e.event.startsWith('agent.') || e.event.startsWith('plan.')))
+const analysisResults = computed(() => analysisOutcomes(run.value?.events || []))
+const analysisStatus = computed(() => run.value ? activeAnalysisStatus(run.value.status, run.value.events || []) : '')
 const approvalLabel = computed(() => ({ disabled: '审批已关闭', all: '全部审批', risk_based: '风险审批' }[settings.value?.approval_mode || 'risk_based']))
 const activeSessionInfo = computed(() => sessions.value.find(item => item.id === activeSession.value))
 const filteredSessions = computed(() => {
@@ -301,7 +286,7 @@ onMounted(async () => {
         <div v-if="!run" class="welcome">
           <div class="welcome-mark"><span></span><span></span><span></span></div>
           <h1>先描述这次查数需求</h1>
-          <p>有歧义时，AI 会通过卡片请你补充；口径明确后，Reviewer 复核通过即自动查询，展示 SQL、结果和说明。</p>
+          <p>{{ settings?.delivery_mode === 'best_effort' ? '先按当前理解查询并交付结果，假设和复核建议会明确列出；你可以继续对话调整。核心信息不足时再请你补充。' : '有歧义时，AI 会通过卡片请你补充；口径明确后，Reviewer 复核通过即自动查询，展示 SQL、结果和说明。' }}</p>
           <t-alert v-if="!modelConfigured" theme="warning" title="请先配置大模型"><template #message>需求分析需要真实模型连接。<router-link to="/settings#model">前往模型配置</router-link></template></t-alert>
           <form class="requirement-form" @submit.prevent="submitRequirement">
             <label>需求名称（选填）<t-input v-model="requirementForm.title" :maxlength="100" placeholder="例如：本月贷款情况分析" /></label>
@@ -319,7 +304,7 @@ onMounted(async () => {
             </div>
           </div>
           <div class="next-action" aria-live="polite">
-            <div><strong>{{ run.error ? '查询未完成' : run.status === 'clarifying' ? '当前需要您确认' : '当前进度' }}</strong><p>{{ nextAction }}</p><p v-if="run.error" class="bad-text">{{ run.error }}</p></div>
+            <div><strong>{{ run.delivery?.title || (run.error ? '查询未完成' : run.status === 'clarifying' ? '当前需要您确认' : '当前进度') }}</strong><p>{{ run.delivery?.next_action || nextAction }}</p><p v-if="run.error && !run.delivery" class="bad-text">{{ run.error }}</p><details v-if="run.error && run.delivery"><summary>查看技术详情</summary><p>{{ run.error }}</p></details></div>
             <t-button v-if="run.status === 'clarifying'" theme="primary" variant="outline" @click="showAlignment">查看待确认口径</t-button>
           </div>
           <details v-if="lastRevision" class="revision-reason"><summary>查看最近一次复核退回原因</summary><p>{{ lastRevision.data.summary }}</p></details>
@@ -398,27 +383,37 @@ onMounted(async () => {
             </div>
           </div>
 
-          <div v-if="agentTrace.length" class="artifact-card">
-            <button class="artifact-title" :aria-expanded="expanded.agent" aria-controls="agent-trace-panel" @click="toggle('agent')"><span><b>Agent</b> 多轮分析与协作 <em>{{ agentTrace.length }} 条过程记录</em></span><ChevronDownIcon :class="{ rotate: expanded.agent }"/></button>
+          <div v-if="analysisResults.length || analysisStatus || agentTrace.length" class="artifact-card">
+            <button class="artifact-title" :aria-expanded="expanded.agent" aria-controls="agent-trace-panel" @click="toggle('agent')"><span>分析产出 <em>{{ analysisResults.length }} 项发现与结论</em></span><ChevronDownIcon :class="{ rotate: expanded.agent }"/></button>
+            <p v-if="analysisStatus" class="analysis-live" role="status">{{ analysisStatus }}</p>
             <div v-if="expanded.agent" id="agent-trace-panel" class="artifact-body research-body">
+              <p v-if="!analysisResults.length">尚未形成新的分析产出。</p>
               <div class="research-trace">
-                <article v-for="(event, index) in agentTrace" :key="`${event.created_at}-${index}`">
+                <article v-for="(item, index) in analysisResults" :key="item.key">
                   <span>{{ index + 1 }}</span>
                   <div>
-                    <strong>{{ event.data.agent === 'reviewer' || event.event === 'review.revision.required' ? 'Reviewer · 独立复核' : 'Analyst · 需求分析' }}<template v-if="event.data.tool"> · {{ event.data.tool }}</template></strong>
-                    <small v-if="event.data.iteration">任务累计第 {{ event.data.iteration }} 轮 · {{ event.data.phase || '分析' }} · 本角色累计 {{ event.data.role_iteration || event.data.iteration }} 轮</small>
-                    <p>{{ event.data.summary || (event.event === 'requirement.revised' ? '方案已修订，请重新确认业务口径' : event.event) }}</p>
-                    <p v-if="event.data.analysis_goal"><b>核验目标：</b>{{ event.data.analysis_goal }}</p>
-                    <small v-if="event.data.lookup && Object.keys(event.data.lookup).length">查询参数：{{ Object.entries(event.data.lookup).map(([key, value]) => `${key}=${value}`).join('；') }}</small>
-                    <details v-if="event.data.observation && Object.keys(event.data.observation).length" class="agent-observation">
-                      <summary>查看工具返回的依据</summary>
-                      <pre>{{ JSON.stringify(event.data.observation, null, 2) }}</pre>
+                    <strong>{{ item.title }}</strong><p>{{ item.summary }}</p>
+                    <details v-if="item.details.length || item.changes?.length" class="agent-observation">
+                      <summary>查看依据与变化</summary>
+                      <ul v-if="item.details.length"><li v-for="(detail, i) in item.details" :key="i">{{ detail }}</li></ul>
+                      <div v-for="change in item.changes" :key="change.path" class="analysis-change">
+                        <strong>{{ change.path }}</strong>
+                        <p>修改前：{{ displayValue(change.before) }}</p>
+                        <p>修改后：{{ displayValue(change.after) }}</p>
+                      </div>
                     </details>
-                    <small v-if="event.data.issues?.length">{{ event.data.issues.join('；') }}</small>
                   </div>
                 </article>
               </div>
-              <small>展示公开的分析目标、工具观察、来源、校验结论和修订记录，供核验结果依据。</small>
+              <details class="agent-observation technical-diagnostics">
+                <summary>技术诊断（{{ agentTrace.length }} 条原始记录）</summary>
+                <p>模型请求、耗时、重试与工具诊断，仅用于排查运行问题。</p>
+                <div v-for="(event, index) in agentTrace" :key="index">
+                  <small>{{ event.created_at }} · {{ event.event }}</small>
+                  <p>{{ event.data.summary || event.event }}</p>
+                  <details><summary>诊断字段</summary><pre>{{ JSON.stringify(event.data, null, 2) }}</pre></details>
+                </div>
+              </details>
             </div>
           </div>
 
@@ -458,7 +453,7 @@ onMounted(async () => {
               <ol class="source-step-list"><li v-for="step in sourceSteps" :key="step.name">
                 <strong>{{ step.label || step.name }} · {{ sourceStatus(step.name) }}</strong>
                 <p>{{ step.query.intent }} · 数据源 {{ run.source_artifacts?.[step.name]?.compilation?.data_source_label || step.data_source_id }}</p>
-                <small v-for="binding in step.inputs" :key="binding.source_step">从 {{ binding.source_step }} 提取 {{ binding.source_field }}，去重后作为 {{ binding.target_field }} 的绑定参数；无关联键时跳过查询。</small>
+                <small v-for="binding in step.inputs" :key="binding.source_step">从 {{ binding.source_step }} 传递 {{ (binding.key_pairs?.length ? binding.key_pairs : [{ source_field: binding.source_field, target_field: binding.target_field }]).map((pair: any) => `${pair.source_field} → ${pair.target_field}`).join('；') }}；按完整键去重匹配，空键集合不匹配任何记录。</small>
                 <details v-if="approvedSql && run.source_artifacts?.[step.name]" :open="expanded.sources">
                   <summary>查看本步 SQL{{ run.source_artifacts[step.name].compilation?.inputs_bound ? ' · 参数已绑定' : ' · 待前置步骤提供关联参数' }}</summary>
                   <pre class="code-block">{{ run.source_artifacts[step.name].physical_sql }}</pre>
@@ -470,20 +465,22 @@ onMounted(async () => {
           </div>
 
           <div v-if="approvedSql && !sourceSteps.length" class="artifact-card">
-            <button class="artifact-title" @click="toggle('sql')"><span><b>03</b> 当前 SQL <em>复核通过 · {{ run.result ? '已执行' : run.status === 'executing' ? '执行中' : '尚未执行' }} · {{ approvedSql.dialect }} · {{ approvedSql.artifact_hash.slice(0, 10) }}</em></span><ChevronDownIcon :class="{ rotate: expanded.sql }"/></button>
+            <button class="artifact-title" @click="toggle('sql')"><span><b>03</b> 当前 SQL <em>{{ run.review?.disposition === 'advisory' ? '带建议交付' : '复核通过' }} · {{ run.result ? '已执行' : run.status === 'executing' ? '执行中' : '尚未执行' }} · {{ approvedSql.dialect }} · {{ approvedSql.artifact_hash.slice(0, 10) }}</em></span><ChevronDownIcon :class="{ rotate: expanded.sql }"/></button>
             <div v-if="expanded.sql" class="artifact-body"><p v-if="run.sql_explanation">{{ run.sql_explanation }}</p><pre class="code-block">{{ approvedSql.physical_sql }}</pre><div class="parameters"><span>绑定参数</span><code>{{ approvedSql.parameters }}</code></div></div>
           </div>
 
           <div v-if="run.gate" class="artifact-card">
-            <button class="artifact-title" @click="toggle('gate')"><span><b>04</b> 门禁与 Reviewer <em :class="approvedSql ? 'ok-text' : 'bad-text'">{{ approvedSql ? '通过' : !run.gate.allowed ? '门禁阻断' : run.review?.decision === 'revise' ? '内部修订中' : run.review?.decision === 'rejected' ? '复核拒绝' : '等待独立复核' }} · {{ run.gate.risk_level }} risk</em></span><ChevronDownIcon :class="{ rotate: expanded.gate }"/></button>
+            <button class="artifact-title" @click="toggle('gate')"><span><b>04</b> 门禁与 Reviewer <em :class="approvedSql ? 'ok-text' : 'bad-text'">{{ run.review?.disposition === 'advisory' ? '保留复核意见，继续交付' : approvedSql ? '通过' : !run.gate.allowed ? '门禁阻断' : run.review?.decision === 'revise' ? '内部修订中' : run.review?.decision === 'rejected' ? '复核拒绝' : '等待独立复核' }} · {{ run.gate.risk_level }} risk</em></span><ChevronDownIcon :class="{ rotate: expanded.gate }"/></button>
             <div v-if="expanded.gate" class="artifact-body"><div class="check-grid"><div v-for="check in run.gate.checks" :key="check.name" :class="{ warn: !check.passed }"><CheckCircleIcon v-if="check.passed"/><TimeIcon v-else/><span><strong>{{ check.name }}</strong><small>{{ check.message }}</small></span></div></div><div v-if="run.review" class="review-box"><strong>Reviewer：{{ run.review.decision }}</strong><p>{{ run.review.rationale }}</p></div></div>
           </div>
 
 
+            <div v-if="run.delivery && !run.result" class="artifact-card"><div class="artifact-body"><strong>{{ run.delivery.title }}</strong><p>{{ run.delivery.summary }}</p><p>{{ run.delivery.next_action }}</p><details v-if="run.sql && run.delivery.kind !== 'clarification'"><summary>查看已生成的 SQL（执行状态见当前任务）</summary><pre class="code-block">{{ run.sql.physical_sql }}</pre></details></div></div>
+            <div v-if="run.delivery?.warnings?.length" class="artifact-card"><div class="artifact-body"><details open><summary>本次待核对 {{ run.delivery.warnings.length }} 项，可继续对话调整</summary><ul><li v-for="(warning, index) in run.delivery.warnings" :key="index">{{ warning }}</li></ul></details></div></div>
             <div v-if="run.result" class="result-section">
             <div class="result-head"><div><strong>查询结果</strong><span>{{ run.result.row_count }} 行 · {{ run.result.duration_ms }} ms</span></div><t-tag theme="success" variant="light">只读事务</t-tag></div>
             <div class="result-table"><table><thead><tr><th v-for="column in run.result.columns" :key="column">{{ column }}</th></tr></thead><tbody><tr v-for="(row, i) in run.result.rows" :key="i"><td v-for="(cell, j) in row" :key="j">{{ cell }}</td></tr></tbody></table></div>
-            <div v-if="run.result_review" class="result-review"><strong>结果 Reviewer：{{ run.result_review.decision }}</strong><span>{{ run.result_review.reviewer_mode }} · {{ run.result_review.rationale }}</span></div>
+            <div v-if="run.result_review" class="result-review"><strong>{{ run.result_review.disposition === 'advisory' ? '复核建议（结果已交付）' : '结果 Reviewer：' + run.result_review.decision }}</strong><span>{{ run.result_review.reviewer_mode }} · {{ run.result_review.rationale }}</span></div>
             <div class="answer"><span class="answer-icon">S</span><div><strong>Semora 说明</strong><p>{{ run.answer }}</p><small>答案基于本体 v{{ run.ontology?.version }}、{{ run.evidence.length }} 条证据和已审计 SQL。</small></div></div>
           </div>
         </template>
@@ -522,3 +519,10 @@ onMounted(async () => {
 .continuation-mode{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--semora-muted)}.continuation-mode select{border:1px solid var(--semora-line);border-radius:6px;padding:4px 8px;background:var(--semora-card);color:var(--semora-ink)}
 </style>
 
+
+<style scoped>
+.analysis-live { margin: 0; padding: 12px 20px; color: var(--td-text-color-secondary); }
+.analysis-change { margin: 10px 0; padding: 10px; background: var(--td-bg-color-container-hover); border-radius: 6px; overflow-wrap: anywhere; }
+.technical-diagnostics { margin-top: 18px; border-top: 1px solid var(--td-component-border); padding-top: 12px; }
+.technical-diagnostics > div { padding: 8px 0; }
+</style>

@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import json
+import pytest
 from datetime import timedelta
 
 from app import agentic
@@ -11,6 +12,69 @@ from semora_agent.model import StructuredModel, ModelError
 from semora_contracts import ConfirmedFact, QueryRun, RunStatus
 from services.api.tests.test_agent_runtime import NativeModel, PLAN
 from services.api.tests.test_workflow import fake_snapshot, fake_execute, fake_retrieve
+
+
+def test_explicit_retry_of_completed_run_keeps_facts_but_no_execution_authority():
+    from semora_contracts import RequirementSpec
+    async def scenario():
+        w,source,ontology=await seed()
+        source.status=RunStatus.COMPLETED
+        source.requirement=RequirementSpec(version='req',content_hash='h',source_draft_version=1,summary='已确认',confirmed_by='owner')
+        source.user_answers=[ConfirmedFact(question_id='scope',field='loan.id',value='all',label='全部记录')]
+        retry,_=w._prepare_run(source.session_id,'重试',source.domain,None,source.authorization)
+        assert retry.continuation['source_run_id']==source.id
+        assert retry.user_answers==source.user_answers
+        assert retry.plan is None and retry.sql is None and retry.result is None and retry.review is None
+    asyncio.run(scenario())
+
+
+def test_failed_followup_does_not_lose_earlier_completed_requirement():
+    from semora_contracts import RequirementSpec
+    from app.task_memory import build_memory,memory_context
+    async def scenario():
+        w,failed,ontology=await seed()
+        prior=QueryRun(session_id=failed.session_id,domain=failed.domain,question='按编号降序取3条',authorization=failed.authorization,status=RunStatus.COMPLETED)
+        prior.requirement=RequirementSpec(version='req-prior',content_hash='hash',source_draft_version=1,summary='取3条',
+            order_by=[{'field':'loan.id','direction':'desc'}],limit=3,confirmed_by='owner')
+        w.store.add_run(prior)
+        w.store.sessions[failed.session_id].run_ids=[prior.id,failed.id]
+        current,_=w._prepare_run(failed.session_id,'只把数量改为2条',failed.domain,None,failed.authorization)
+        assert current.continuation['confirmed_requirement']['order_by'][0]['direction']=='desc'
+        assert current.continuation['confirmed_requirement']['limit']==3
+        assert '按编号降序取3条' in w._analysis_question(current)
+        memory=memory_context(build_memory(current,ontology,{}))
+        assert memory['previous_confirmed_execution']['values']['limit']==3
+        assert current.requirement is None and current.plan is None
+        # A failed explicit new request starts a separate business context.
+        fresh,_=w._prepare_run(failed.session_id,'新的独立问题',failed.domain,None,failed.authorization,'new')
+        fresh.status=RunStatus.FAILED
+        retry,_=w._prepare_run(failed.session_id,'继续',failed.domain,None,failed.authorization)
+        assert not retry.continuation.get('confirmed_requirement')
+        assert not retry.continuation.get('prior_confirmed_context')
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('memory_enabled',['false','true'])
+def test_reviewer_receives_historical_requirement_after_failed_edit(monkeypatch,memory_enabled):
+    from semora_contracts import RequirementSpec
+    monkeypatch.setenv('AGENT_TASK_MEMORY',memory_enabled)
+    async def scenario():
+        w,source,ontology=await seed()
+        historical=RequirementSpec(version='old',content_hash='h',source_draft_version=1,summary='历史确认',confirmed_by='owner',
+            order_by=[{'field':'loan.id','direction':'desc'}],limit=3,filters=[{'field':'loan.status','operator':'eq','value':'active'}])
+        source.continuation={'confirmed_requirement':historical.model_dump(mode='json'),'question_history':['原问题']}
+        current,_=w._prepare_run(source.session_id,'只改数量为2',source.domain,None,source.authorization)
+        outcome=w.analyst._build_outcome(PLAN,current.question,[],ontology,{},'test')
+        reviewer=NativeModel([('AgentSubmission',{'payload':{'decision':'revise','rationale':'旧筛选及排序丢失',
+            'findings':[{'kind':'repair','paths':['/filters','/order_by'],'message':'旧筛选和排序丢失','evidence':'历史确认','acceptance':'保留筛选与排序，仅修改数量'}]}})])
+        w.reviewer=ReviewerAgent(reviewer)
+        decision=await agentic.review_plan(w,current,ontology,w._analysis_question(current),outcome)
+        context=json.loads(next(m['content'] for m in reviewer.messages[0] if m['role']=='user'))
+        assert context['confirmed_requirement']['filters'][0]['value']=='active'
+        assert context['confirmed_requirement']['order_by'][0]['direction']=='desc'
+        assert context['confirmed_requirement']['limit']==3 and '只改数量为2' in context['user_request']
+        assert decision.decision=='revise' and current.sql is None
+    asyncio.run(scenario())
 
 
 async def seed():

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from query_stages import projected_table
 
 import base64
 from functools import lru_cache
@@ -88,10 +89,13 @@ def build_wren_manifest(ontology: dict[str, Any]) -> dict[str, Any]:
             }
             for column, data_type in sorted(column_types.items())
         ]
+        projection = projected_table(item)
+        if projection != item['table'] and set(column_types) != {p['column'] for p in item['properties']}:
+            raise WrenPlanningError('去重投影不能隐式添加未声明列')
         models.append(
             {
                 "name": object_name,
-                "tableReference": _table_reference(str(item["table"])),
+                **({"refSql": projection[1:-1]} if projection != item["table"] else {"tableReference": _table_reference(str(item["table"]))}),
                 **({"primaryKey": primary_key} if primary_key else {}),
                 "columns": columns,
             }
@@ -133,6 +137,10 @@ def _model_sql(physical_sql: str, ontology: dict[str, Any]) -> str:
     for item in sorted(ontology.get("objects", []), key=lambda value: len(str(value["table"])), reverse=True):
         object_name = _identifier(str(item["name"]), "本体对象")
         table = str(item["table"])
+        projection = projected_table(item)
+        if projection != table:
+            modeled = modeled.replace(f'{projection} {object_name}', f'{object_name} {object_name}')
+            continue
         escaped = re.escape(table)
         modeled, count = re.subn(
             rf"\b(FROM|JOIN)\s+{escaped}\s+{re.escape(object_name)}\b",
@@ -140,8 +148,9 @@ def _model_sql(physical_sql: str, ontology: dict[str, Any]) -> str:
             modeled,
             flags=re.IGNORECASE,
         )
-        if table in physical_sql and count == 0:
-            raise WrenPlanningError(f"无法将物理表投影为 Wren Model：{table}")
+        # An unused model may share a physical table or its name prefix with
+        # the selected model. Only the exact FROM/JOIN + model alias matches
+        # above are references; substring presence is not an unresolved table.
     return modeled
 
 

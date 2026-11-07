@@ -10,7 +10,7 @@ SEMANTIC_KEYS = (
     'sensitive', 'sensitivity', 'unit', 'aliases', 'enum', 'enumValues',
     'valueDefinitions', 'defaultFilters', 'filters', 'expression', 'grain',
     'from', 'to', 'condition', 'cardinality', 'joinType', 'optional',
-    'description', 'evidenceStatus', 'dataSourceId',
+    'description', 'evidenceStatus', 'dataSourceId', 'projection',
 )
 
 

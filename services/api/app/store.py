@@ -10,6 +10,7 @@ import psycopg
 from semora_contracts import ApprovalDecision, QueryRun
 
 from .audit import AuditLedger
+from .control_state import run_payload,restore_run
 
 
 @dataclass
@@ -53,7 +54,7 @@ class Store:
                     self.sessions[row[0]].requirement_form = row[5] or {}
                 cursor.execute("SELECT payload FROM semora_meta.runs ORDER BY created_at")
                 for (payload,) in cursor.fetchall():
-                    run = QueryRun.model_validate(payload)
+                    run = restore_run(payload)
                     self.runs[run.id] = run
                     self.sessions.setdefault(
                         run.session_id,
@@ -182,8 +183,7 @@ class Store:
                 """INSERT INTO semora_meta.runs(id,session_id,status,payload,created_at,updated_at)
                 VALUES(%s,%s,%s,%s::jsonb,%s,now())
                 ON CONFLICT(id) DO UPDATE SET status=excluded.status,payload=excluded.payload,updated_at=now()""",
-                (run.id, run.session_id, run.status.value, json.dumps({**run.model_dump(mode='json'), 'agent_memory': run.agent_memory,
-                    'source_results': {key: value.model_dump(mode='json') for key, value in run.source_results.items()}}, ensure_ascii=False), run.created_at),
+                (run.id, run.session_id, run.status.value, json.dumps(run_payload(run), ensure_ascii=False), run.created_at),
             )
 
     def list_audit_runs(self, search: str = "", status: str = "", limit: int = 50) -> list[dict]:

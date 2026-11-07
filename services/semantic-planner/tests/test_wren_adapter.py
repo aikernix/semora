@@ -30,6 +30,66 @@ ONTOLOGY = {
 
 
 class WrenAdapterTest(unittest.TestCase):
+    def test_having_and_conditional_aggregate_parameters_survive_wren_and_mysql(self):
+        import re
+        from planner import adapt_mysql_artifact
+        ontology={'dataSourceId':'one','objects':[{'name':'record','table':'records','primaryKey':'id',
+            'properties':[{'name':name,'column':name,'type':kind} for name,kind in
+                          [('id','integer'),('category','string'),('amount','number')]]}],
+            'relations':[],'metrics':[]}
+        plan=QueryPlan(domain='generic',data_source_id='one',intent='aggregate',metrics=['total'],
+            dimensions=['record.category'],calculations=[{'name':'total','function':'sum','field':'record.amount',
+                'filters':[{'field':'record.id','operator':'gt','value':0}]}],
+            having=[{'field':'total','operator':'between','value':[1,10]}])
+        artifact=compile_with_wren(plan,ontology)
+        for output in (artifact,adapt_mysql_artifact(artifact)):
+            self.assertEqual(set(re.findall(r'%\((\w+)\)s',output.physical_sql)),set(output.parameters))
+            self.assertNotIn(':having_',output.physical_sql)
+            self.assertNotIn(':m_',output.physical_sql)
+            sql=re.sub(r'%\((\w+)\)s',r':\1',output.physical_sql)
+            tree=sqlglot.parse_one(sql,read=output.dialect)
+            for table in tree.find_all(sqlglot.exp.Table):
+                if table.db=='public':table.set('db',None)
+            sql=tree.sql(dialect='sqlite')
+            with sqlite3.connect(':memory:') as db:
+                db.executescript("CREATE TABLE records(id INTEGER,category TEXT,amount INTEGER); INSERT INTO records VALUES(1,'a',2),(2,'a',3),(3,'b',50),(0,'a',100);")
+                self.assertEqual(db.execute(sql,output.parameters).fetchall(),[('a',5)])
+
+    def test_top_n_sort_survives_wren_and_mysql_translation(self):
+        from planner import adapt_mysql_artifact
+        ontology = {'dataSourceId':'one', 'objects':[{'name':'record','table':'records','primaryKey':'id','properties':[{'name':'id','column':'id','type':'integer'},{'name':'created_at','column':'created_at','type':'timestamp'}]}], 'relations':[], 'metrics':[]}
+        plan = QueryPlan(domain='generic',data_source_id='one',intent='latest records',metrics=[],fields=['record.id','record.created_at'],order_by=[{'field':'record.created_at','direction':'desc'},{'field':'record.id','direction':'desc'}],limit=10)
+        artifact = compile_with_wren(plan, ontology)
+        for sql, dialect in [(artifact.physical_sql, 'postgres'), (adapt_mysql_artifact(artifact).physical_sql, 'mysql')]:
+            tree = sqlglot.parse_one(sql, read=dialect)
+            self.assertEqual(tree.args['limit'].expression.this, '10')
+            ordered = [item for item in tree.args['order'].expressions if isinstance(item.this, sqlglot.exp.Column)]
+            self.assertEqual(len(ordered), 2)
+            self.assertTrue(ordered[0].args['desc'])
+
+
+    def test_unused_model_with_table_name_prefix_does_not_block_compilation(self):
+        ontology={'dataSourceId':'one','objects':[{'name':name,'table':'content.'+table,'primaryKey':'id','properties':[{'name':'id','column':'id','type':'integer'}]} for name,table in [('audio','appoint_audio'),('text','appoint_audio_text')]],'relations':[],'metrics':[]}
+        artifact=compile_with_wren(QueryPlan(domain='test',data_source_id='one',intent='text ids',metrics=[],fields=['text.id']),ontology)
+        self.assertIn('appoint_audio_text',artifact.physical_sql)
+
+    def test_distinct_refsql_and_composite_binding_survive_wren(self):
+        from semora_contracts import BoundKeyFilter
+        ontology = {'dataSourceId':'one', 'objects':[{'name':'student','table':'appointments','primaryKey':'s_id','projection':{'distinct':True},'properties':[{'name':'s_id','column':'s_id','type':'integer'},{'name':'kind','column':'kind','type':'string'}]}], 'relations':[], 'metrics':[]}
+        manifest = build_wren_manifest(ontology)
+        self.assertIn('SELECT DISTINCT', manifest['models'][0]['refSql'])
+        self.assertNotIn('tableReference', manifest['models'][0])
+        plan = QueryPlan(domain='example',data_source_id='one',intent='keys',metrics=[],fields=['student.s_id','student.kind'],bound_key_filters=[BoundKeyFilter(fields=['student.s_id','student.kind'],rows=[[1,'A'],[2,'B']])])
+        artifact = compile_with_wren(plan,ontology)
+        import re
+        sql = re.sub(r'%\((\w+)\)s',r':\1',artifact.physical_sql)
+        tree = sqlglot.parse_one(sql,read='postgres')
+        for table in tree.find_all(sqlglot.exp.Table):
+            table.set('db',None); table.set('catalog',None)
+        with sqlite3.connect(':memory:') as db:
+            db.executescript("CREATE TABLE appointments(s_id integer,kind text); INSERT INTO appointments VALUES(1,'A'),(1,'A'),(1,'B'),(2,'A'),(2,'B');")
+            self.assertEqual(sorted(db.execute(tree.sql(dialect='sqlite'),artifact.parameters).fetchall()),[(1,'A'),(2,'B')])
+
     def test_staged_query_preserves_parent_totals_and_ratio_after_wren(self):
         plan = QueryPlan(domain='example', data_source_id='retail-credit-pg', intent='验证多阶段汇总',
                          metrics=['loan_balance', 'overdue_90_rate'], dimensions=['branch.name'], grain='branch',
@@ -115,3 +175,66 @@ class WrenAdapterTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_wren_raw_partials_preserve_precision_before_regroup():
+    ont={'domain':'generic','dataSourceId':'one','objects':[{
+        'name':'fact','table':'facts','primaryKey':'id','properties':[
+            {'name':'id','column':'id','type':'integer'},
+            {'name':'owner_id','column':'owner_id','type':'integer'},
+            {'name':'amount','column':'amount','type':'decimal'}]}],'relations':[],'metrics':[]}
+    plan=QueryPlan(domain='generic',data_source_id='one',intent='partials',grain='fact',
+        dimensions=['fact.owner_id'],metrics=['total'],aggregate_precision='raw',
+        calculations=[{'name':'total','function':'sum','field':'fact.amount'}])
+    artifact=compile_with_wren(plan,ont)
+    assert 'ROUND' not in artifact.physical_sql.upper()
+    tree=sqlglot.parse_one(artifact.physical_sql,read='postgres')
+    for table in tree.find_all(sqlglot.exp.Table):
+        table.set('db',None);table.set('catalog',None)
+    with sqlite3.connect(':memory:') as db:
+        db.executescript('CREATE TABLE facts(id INTEGER,owner_id INTEGER,amount NUMERIC); INSERT INTO facts VALUES(1,1,0.004),(2,2,0.004);')
+        assert sorted(db.execute(tree.sql(dialect='sqlite')).fetchall())==[(1,0.004),(2,0.004)]
+
+
+def test_wren_membership_keys_are_unique_without_aggregate_metrics():
+    ont={'domain':'generic','dataSourceId':'one','objects':[{
+        'name':'fact','table':'facts','primaryKey':'id','properties':[
+            {'name':'id','column':'id','type':'integer'},
+            {'name':'owner_id','column':'owner_id','type':'integer'}]}],'relations':[],'metrics':[]}
+    plan=QueryPlan(domain='generic',data_source_id='one',intent='membership keys',grain='fact',
+        fields=['fact.owner_id'],dimensions=['fact.owner_id'],metrics=[])
+    artifact=compile_with_wren(plan,ont)
+    tree=sqlglot.parse_one(artifact.physical_sql,read='postgres')
+    for table in tree.find_all(sqlglot.exp.Table):table.set('db',None);table.set('catalog',None)
+    with sqlite3.connect(':memory:') as db:
+        db.executescript('CREATE TABLE facts(id INTEGER,owner_id INTEGER); INSERT INTO facts VALUES(1,11),(2,11);')
+        assert db.execute(tree.sql(dialect='sqlite')).fetchall()==[(11,)]
+
+
+def test_wren_stage_count_preserves_empty_and_matching_semantics():
+    """Real Wren compilation followed by execution of the physical SQL in SQLite."""
+    from copy import deepcopy
+    ont={'dataSourceId':'one','objects':[
+        {'name':'parent','table':'parent','primaryKey':'id','properties':[{'name':'id','column':'id','type':'integer'},{'name':'amount','column':'amount','type':'decimal'}]},
+        {'name':'line','table':'line','primaryKey':'id','properties':[{'name':'id','column':'id','type':'integer'},{'name':'parent_id','column':'parent_id','type':'integer'},{'name':'quantity','column':'quantity','type':'integer'}]}],
+        'relations':[{'name':'items','from':'parent','to':'line','condition':'parent.id = line.parent_id','cardinality':'1:N','optional':True}],'metrics':[]}
+    for optional,grouped,empty,nullable in [(True,True,False,False),(False,False,False,False),(True,False,True,False),(True,True,False,True)]:
+        ontology=deepcopy(ont);ontology['relations'][0]['optional']=optional
+        field='line.quantity' if nullable else 'line.id'
+        plan=QueryPlan(domain='generic',data_source_id='one',intent='aggregate',grain='parent',metrics=['total','detail'],
+            dimensions=['parent.id'] if grouped else [],relationship_path=['items'],
+            calculations=[{'name':'total','function':'sum','field':'parent.amount'},{'name':'detail','function':'count','field':field}],
+            stages=[{'name':'reduce_line','source':'line','group_by':['line.parent_id'],
+                     'measures':[{'name':'cnt','function':'count','field':field}],'join_type':'left' if optional else 'inner'}])
+        artifact=compile_with_wren(plan,ontology)
+        tree=sqlglot.parse_one(artifact.physical_sql,read='postgres')
+        for table in tree.find_all(sqlglot.exp.Table):
+            table.set('db',None);table.set('catalog',None)
+        with sqlite3.connect(':memory:') as db:
+            db.executescript('CREATE TABLE parent(id INTEGER PRIMARY KEY,amount NUMERIC); CREATE TABLE line(id INTEGER PRIMARY KEY,parent_id INTEGER,quantity NUMERIC);')
+            if not empty:
+                db.executescript('INSERT INTO parent VALUES(1,100),(2,200);')
+                db.executemany('INSERT INTO line VALUES(?,?,?)',[(1,1,None if nullable else 3),(2,1,None if nullable else 4)])
+            rows=sorted(db.execute(tree.sql(dialect='sqlite'),artifact.parameters).fetchall())
+        expected=[(None,0)] if empty else [(1,100,0),(2,200,0)] if nullable else [(1,100,2),(2,200,0)] if grouped else [(100,2)]
+        assert rows==expected,(optional,grouped,empty,nullable,rows,artifact.physical_sql)

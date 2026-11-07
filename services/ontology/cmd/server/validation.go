@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const wrenArtifactVersion = "wren-core-mdl-0.8.2+semora.8"
+const wrenArtifactVersion = "wren-core-mdl-0.8.2+semora.9"
 
 var (
 	wrenIdentifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -432,7 +432,9 @@ func projectWrenSingle(ontology Ontology) (map[string]any, []ValidationIssue) {
 		for _, name := range names {
 			column := map[string]any{"name": name, "type": columnTypes[object.Name][name]}
 			if name == object.PrimaryKey {
-				column["notNull"] = true
+                nullable := false
+                for _, property := range object.Properties { if property.Column == name { nullable = property.Nullable } }
+				column["notNull"] = !nullable
 			}
 			columns = append(columns, column)
 		}
@@ -453,6 +455,20 @@ func projectWrenSingle(ontology Ontology) (map[string]any, []ValidationIssue) {
         model := map[string]any{
 			"name": object.Name, "tableReference": tableReference,
             "columns": columns,
+        }
+        if object.Projection != nil && object.Projection.Distinct {
+            declared := map[string]bool{}
+            for _, property := range object.Properties { declared[property.Column] = true }
+            quoted := []string{}
+            for _, name := range names {
+                if !declared[name] { issues = append(issues, ValidationIssue{"objects." + object.Name + ".projection", "去重投影不能隐式添加未声明列"}) }
+                quoted = append(quoted, "\"" + name + "\"")
+            }
+            if len(quoted) == 0 { issues = append(issues, ValidationIssue{"objects." + object.Name + ".projection", "去重投影必须声明物理列"}) }
+            parts := strings.Split(object.Table, ".")
+            for i, part := range parts { parts[i] = "\"" + part + "\"" }
+            delete(model, "tableReference")
+            model["refSql"] = "SELECT DISTINCT " + strings.Join(quoted, ", ") + " FROM " + strings.Join(parts, ".")
         }
         if object.PrimaryKey != "" { model["primaryKey"] = object.PrimaryKey }
         models = append(models, model)

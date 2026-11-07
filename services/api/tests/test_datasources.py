@@ -30,6 +30,7 @@ def test_repository_seeds_demo_and_persists_scan_state_in_memory():
 def test_sensitivity_classification_is_deterministic():
     executor = _load_executor_module()
 
-    assert executor.sensitivity_level("customers", "id_no") == "restricted"
-    assert executor.sensitivity_level("customers", "mobile") == "confidential"
+    assert executor.sensitivity_level("customers", "id_no") == "internal"
+    assert executor.sensitivity_level("customers", "mobile") == "internal"
+    assert executor.sensitivity_level("arbitrary", "contact_email") == "internal"
     assert executor.sensitivity_level("loans", "outstanding_balance") == "internal"

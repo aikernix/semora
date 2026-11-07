@@ -14,23 +14,12 @@ from pydantic import BaseModel, Field
 from sqlglot import exp
 from semora_telemetry import configure_telemetry
 from . import mysql_adapter
+from .errors import database_error
 
 
 app = FastAPI(title="Semora Read-only Executor", version="0.1.0")
 configure_telemetry(app, "semora-executor")
 FORBIDDEN = (exp.Insert, exp.Update, exp.Delete, exp.Create, exp.Drop, exp.Alter, exp.Command, exp.Merge)
-SENSITIVE_RESULT_COLUMNS = {
-    "name",
-    "mobile",
-    "phone",
-    "id_no",
-    "id_number",
-    "customer_name",
-    "customer_mobile",
-    "customer_phone",
-    "customer_id_no",
-    "customer_id_number",
-}
 ACTIVE_QUERIES: dict[str, psycopg.Connection] = {}
 ACTIVE_QUERIES_LOCK = threading.Lock()
 
@@ -39,6 +28,10 @@ class DataSourceInput(BaseModel):
     datasource_id: str = Field(min_length=1, max_length=64)
     type: str = Field(min_length=1, max_length=32)
     secret_ref: str = Field(pattern=r"^DATASOURCE_[A-Z0-9_]+_URL$", max_length=200)
+
+
+class DataSourceScanInput(DataSourceInput):
+    tables: list[str] | None = Field(default=None, min_length=1, max_length=1000)
 
 
 class QueryInput(BaseModel):
@@ -102,13 +95,7 @@ def inspect_connection(dsn: str) -> dict[str, Any]:
 
 
 def sensitivity_level(table: str, column: str) -> str:
-    normalized = column.lower()
-    restricted = {"id_no", "id_number", "identity_no", "card_no", "account_no"}
-    confidential = {"name", "customer_name", "mobile", "phone", "email", "address"}
-    if normalized in restricted:
-        return "restricted"
-    if normalized in confidential or any(token in normalized for token in ("mobile", "phone", "email")):
-        return "confidential"
+    """Scanning discovers structure; sensitivity is explicitly configured."""
     return "internal"
 
 
@@ -215,13 +202,9 @@ def mask_sensitive(column: str, value: Any, sensitive_columns: set[str] | None =
     """Mask sensitive values before they can leave the isolated executor."""
     normalized = column.lower()
     configured_sensitive = {item.lower() for item in sensitive_columns or set()}
-    if value is None or (normalized not in SENSITIVE_RESULT_COLUMNS and normalized not in configured_sensitive):
+    if value is None or normalized not in configured_sensitive:
         return value.isoformat() if hasattr(value, "isoformat") else value
     text = str(value)
-    if normalized in {"mobile", "phone", "customer_mobile", "customer_phone"}:
-        return f"{text[:3]}****{text[-4:]}" if len(text) >= 7 else "****"
-    if normalized in {"id_no", "id_number", "customer_id_no", "customer_id_number"}:
-        return f"{text[:3]}***********{text[-4:]}" if len(text) >= 7 else "****"
     return f"{text[:1]}{'*' * max(1, len(text) - 1)}"
 
 
@@ -238,9 +221,11 @@ def test_datasource(body: DataSourceInput, x_semora_internal_token: str | None =
 
 
 @app.post("/internal/v1/datasources/scan")
-def scan_datasource(body: DataSourceInput, x_semora_internal_token: str | None = Header(default=None)) -> dict:
+def scan_datasource(body: DataSourceScanInput, x_semora_internal_token: str | None = Header(default=None)) -> dict:
     require_internal_token(x_semora_internal_token)
-    result = mysql_adapter.scan(resolve_datasource(body), sensitivity_level) if body.type == "mysql" else scan_postgresql(resolve_datasource(body))
+    if body.tables is not None and body.type != 'mysql':
+        raise HTTPException(422, '当前只有MySQL支持限定表扫描')
+    result = mysql_adapter.scan(resolve_datasource(body), sensitivity_level, body.tables) if body.type == "mysql" else scan_postgresql(resolve_datasource(body))
     return {"datasource_id": body.datasource_id, **result}
 
 
@@ -291,7 +276,7 @@ def execute_query(body: QueryInput, x_semora_internal_token: str | None = Header
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(502, f"业务库执行失败：{type(exc).__name__}") from exc
+        raise database_error(exc,'query') from exc
     finally:
         if body.execution_id:
             with ACTIVE_QUERIES_LOCK:
@@ -311,7 +296,7 @@ def execute_query(body: QueryInput, x_semora_internal_token: str | None = Header
             "masked_columns": [
                 column
                 for column in columns
-                if column.lower() in SENSITIVE_RESULT_COLUMNS or column.lower() in sensitive_columns
+                if column.lower() in sensitive_columns
             ],
         },
     }
@@ -355,7 +340,7 @@ def estimate_query(body: EstimateInput, x_semora_internal_token: str | None = He
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(502, f"查询成本估算失败：{exc}") from exc
+        raise database_error(exc,'estimate') from exc
     if not payload:
         raise HTTPException(502, "查询成本估算未返回执行计划")
     document = payload[0]

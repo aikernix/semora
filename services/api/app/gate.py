@@ -9,7 +9,6 @@ from semora_contracts import GateCheck, GateDecision
 
 
 FORBIDDEN = (exp.Insert, exp.Update, exp.Delete, exp.Create, exp.Drop, exp.Alter, exp.Command, exp.Merge)
-SENSITIVE_COLUMNS = {"mobile", "id_no", "customer_name"}
 
 
 def review_sql(
@@ -22,6 +21,7 @@ def review_sql(
     sensitive_columns: set[str] | None = None,
     approve_sensitive_detail: bool = True,
     estimated_rows: int | None = None,
+    estimate_unavailable: bool = False,
     large_result_threshold: int = 100_000,
     approve_large_result: bool = True,
     cross_organization: bool = False,
@@ -69,7 +69,7 @@ def review_sql(
         has_limit = False
     checks.append(GateCheck(name="row_limit", passed=has_limit, severity="blocking", message=f"SQL读取上限不超过 {max_sql_rows} 行"))
 
-    sensitive = bool(columns & SENSITIVE_COLUMNS) or bool(sensitive_columns)
+    sensitive = bool(sensitive_columns)
     sensitive_requires_approval = (
         sensitive and approve_sensitive_detail and approval_mode in {"all", "risk_based"}
     )
@@ -88,9 +88,14 @@ def review_sql(
     large_result = estimated_rows is not None and estimated_rows > large_result_threshold
     checks.append(GateCheck(
         name="estimated_result_size",
-        passed=not large_result,
-        severity="warning" if large_result else "info",
+        passed=not large_result and not estimate_unavailable,
+        severity="warning" if large_result or estimate_unavailable else "info",
         message=(
+            '成本估算不可用，未做行数预判'
+            if estimate_unavailable
+            else '尚未进行行数估算'
+            if estimated_rows is None
+            else
             f"数据库估算 {estimated_rows:,} 行，超过审批阈值 {large_result_threshold:,} 行"
             if large_result
             else f"数据库估算 {estimated_rows or 0:,} 行，未超过审批阈值"
@@ -105,10 +110,10 @@ def review_sql(
     blocking = any(not check.passed and check.severity == "blocking" for check in checks)
     risk_trigger = (
         sensitive and approve_sensitive_detail
-        or large_result and approve_large_result
+        or (large_result or estimate_unavailable) and approve_large_result
         or cross_organization and approve_cross_organization
     )
     requires_approval = approval_mode == "all" or (approval_mode == "risk_based" and risk_trigger)
-    risk = "high" if blocking else "medium" if requires_approval else "low"
+    risk = "high" if blocking else "medium" if requires_approval or estimate_unavailable else "low"
     return GateDecision(allowed=not blocking, risk_level=risk, requires_approval=requires_approval, checks=checks)
 

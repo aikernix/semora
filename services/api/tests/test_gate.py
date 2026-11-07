@@ -17,7 +17,7 @@ def test_safe_aggregate_is_allowed_without_approval():
 def test_sensitive_detail_requires_approval():
     sql = """SELECT b.name AS branch, c.mobile FROM customers c
     JOIN branches b ON b.id = c.branch_id WHERE b.id = ANY(%(branch_ids)s) LIMIT 1000"""
-    decision = review_sql(sql)
+    decision = review_sql(sql, sensitive_columns={'mobile'})
     assert decision.allowed is True
     assert decision.requires_approval is True
     assert decision.risk_level == "medium"
@@ -38,7 +38,7 @@ def test_large_estimated_result_requires_approval_when_enabled():
 def test_disabled_mode_does_not_claim_sensitive_approval_is_required():
     sql = """SELECT b.name AS branch, c.mobile FROM customers c
     JOIN branches b ON b.id = c.branch_id WHERE b.id = ANY(%(branch_ids)s) LIMIT 1000"""
-    decision = review_sql(sql, approval_mode="disabled")
+    decision = review_sql(sql, approval_mode="disabled", sensitive_columns={'mobile'})
     sensitive_check = next(check for check in decision.checks if check.name == "sensitive_data")
     assert decision.requires_approval is False
     assert "未要求" in sensitive_check.message
@@ -47,6 +47,15 @@ def test_disabled_mode_does_not_claim_sensitive_approval_is_required():
 def test_cross_organization_flag_uses_policy_trigger():
     decision = review_sql(SAFE_SQL, cross_organization=True, approve_cross_organization=True)
     assert decision.requires_approval is True
+
+
+def test_column_names_do_not_imply_sensitive_policy():
+    sql='SELECT name, mobile, id_no, customer_name FROM records LIMIT 100'
+    plain=review_sql(sql,require_organization_scope=False)
+    assert plain.allowed and not plain.requires_approval
+    assert next(c for c in plain.checks if c.name=='sensitive_data').passed
+    configured=review_sql(sql,require_organization_scope=False,sensitive_columns={'name'})
+    assert configured.allowed and configured.requires_approval
 
 
 def test_write_and_multiple_statements_are_blocked():

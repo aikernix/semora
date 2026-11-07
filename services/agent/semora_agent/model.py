@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
+from .model_diagnostics import RequestDiagnostics, read_response, await_public_delivery, NoDeliveryTimeoutError
+
 import json
 import os
 import re
-import time
 from typing import Any
 
 import httpx
@@ -13,13 +16,43 @@ class ModelError(RuntimeError):
     pass
 
 
+class ModelServiceError(ModelError):
+    """Provider/transport failure, distinct from application configuration bugs."""
+
+
+class ReviewBudgetExhaustedError(ModelError):
+    pass
+
+
+class ReviewTimeoutError(ModelError):
+    pass
+
+
+class ReviewOutputError(ModelError):
+    pass
+
+
+class TaskSupersededError(ModelError):
+    """A stale response must not replace a newer authoritative task input."""
+
+
+class NoDeliveryError(ModelError):
+    public_message='模型在交付截止时间内未返回答案或工具参数，已停止本次分析；需求与已确认口径已保留。'
+
+
+class AnalysisBlockedError(ModelError):
+    def __init__(self,reason):
+        self.public_message='当前需求尚不能形成可执行方案：'+reason
+        super().__init__(self.public_message)
+
+
 class PlanValidationError(ModelError):
     """Keep diagnostic details for callers, with a separate user-facing message."""
     public_message = '模型暂未能将已确认口径完整落实为可执行方案，已停止本次分析。请重新分析，详细原因可在分析记录中查看。'
 
 
 class StructuredModel:
-    """OpenAI-compatible structured model client; hidden reasoning is never requested or stored."""
+    """Compatible model client; only reasoning counts, never reasoning text, are retained."""
 
     def __init__(self) -> None:
         self.base_url = os.getenv("LLM_BASE_URL", "").rstrip("/")
@@ -45,28 +78,14 @@ class StructuredModel:
             return f"{self.base_url}/chat/completions"
         return f"{self.base_url}/v1/chat/completions"
 
-    async def complete_json(self, system: str, user: str) -> dict[str, Any]:
+    async def complete_json(self, system: str, user: str, *, on_request_event=None) -> dict[str, Any]:
         if not self.configured:
             raise ModelError("LLM 未配置")
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                response = await client.post(
-                    self.endpoint,
-                    headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                    json={
-                        "model": self.model,
-                        "temperature": 0,
-                        "response_format": {"type": "json_object"},
-                        "messages": [
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": user},
-                        ],
-                    },
-                )
-                response.raise_for_status()
-                content = response.json()["choices"][0]["message"]["content"]
-        except (httpx.HTTPError, KeyError, IndexError, TypeError) as exc:
-            raise ModelError(f"模型调用失败：{type(exc).__name__}") from exc
+        from .context_budget import prepare_context
+        messages,_=prepare_context([{'role':'system','content':system},{'role':'user','content':user}],[])
+        raw = await self._request({'model':self.model,'temperature':0,'response_format':{'type':'json_object'},
+            'messages':messages},on_request_event)
+        content = raw.get('content')
         if not isinstance(content, str):
             raise ModelError("模型未返回 JSON 文本")
         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.IGNORECASE)
@@ -87,36 +106,81 @@ class StructuredModel:
             body['tool_choice'] = kwargs['tool_choice']
         if kwargs.get('parallel_tool_calls') is not None:
             body['parallel_tool_calls'] = kwargs['parallel_tool_calls']
-        event = kwargs.get('on_request_event') or (lambda *args: None)
-        metadata = {'model': self.model, 'message_count': len(messages), 'tool_count': len(tools),
-                    'request_bytes': len(json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))}
-        for attempt in range(self.request_retries + 1):
-            started = time.monotonic()
-            event('agent.request.started', {**metadata, 'attempt': attempt + 1, 'summary': f'正在请求模型，第 {attempt + 1} 次尝试；{len(messages)} 条消息，约 {metadata["request_bytes"]} 字节'})
+        if kwargs.get('max_tool_argument_chars'):
+            # Internal transport policy, never forwarded to provider APIs.
+            body['_semora_tool_argument_limit']=kwargs['max_tool_argument_chars']
+        return await self._request(body, kwargs.get('on_request_event'))
+
+    async def _request(self, body, callback=None):
+        body=dict(body)
+        argument_limit=body.pop('_semora_tool_argument_limit',None)
+        thinking=os.getenv('LLM_ENABLE_THINKING','').strip().lower()
+        delivery_seconds=float(os.getenv('LLM_NO_DELIVERY_SECONDS','60'))
+        if delivery_seconds < 0:
+            raise ModelError('LLM_NO_DELIVERY_SECONDS 不能为负数')
+        if thinking not in {'','true','false'}:
+            raise ModelError('LLM_ENABLE_THINKING 必须为空、true 或 false')
+        if thinking:
+            # httpx sends provider extensions directly in the JSON body.
+            # Empty preserves compatibility with providers lacking this option.
+            body['enable_thinking']=thinking=='true'
+        streaming=os.getenv('LLM_STREAM_ENABLED','true').lower()=='true'
+        if streaming:
+            body={**body,'stream':True}
+            if os.getenv('LLM_STREAM_INCLUDE_USAGE','true').lower()=='true':
+                body['stream_options']={'include_usage':True}
+        callback=callback or (lambda *args:None)
+        metadata={'model':self.model,'message_count':len(body['messages']),'tool_count':len(body.get('tools',[])),
+                  'stream_requested':streaming,'request_bytes':len(json.dumps(body,ensure_ascii=False,separators=(',',':')).encode('utf-8')),
+                  'request_timeout_seconds':self.timeout_seconds,'thinking_mode':{'true':'enabled','false':'disabled','':'provider_default'}[thinking],
+                  'max_tool_argument_chars':argument_limit}
+        metadata['no_delivery_seconds']=delivery_seconds
+        for attempt in range(self.request_retries+1):
+            diagnostic=RequestDiagnostics({**metadata,'attempt':attempt+1},callback)
+            diagnostic.emit('agent.request.started',f'正在请求模型，第 {attempt+1} 次尝试；约 {metadata["request_bytes"]} 字节')
+            heartbeat=asyncio.create_task(diagnostic.heartbeat())
             try:
-                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                    response = await client.post(self.endpoint, headers={'Authorization': f'Bearer {self.api_key}'}, json=body)
-                    response.raise_for_status()
-                    choice = response.json()['choices'][0]
-                    message = choice['message']
-                if not isinstance(message, dict):
-                    raise ValueError('invalid message')
-                event('agent.request.completed', {'attempt': attempt + 1, 'duration_ms': round((time.monotonic()-started)*1000), 'summary': '模型请求已返回'})
-                return {'content': message.get('content'), 'tool_calls': message.get('tool_calls') or [], 'finish_reason': choice.get('finish_reason')}
-            except httpx.ReadTimeout as exc:
-                event('agent.request.timeout', {**metadata, 'attempt': attempt + 1, 'duration_ms': round((time.monotonic()-started)*1000), 'summary': f'等待模型响应超过 {self.timeout_seconds:g} 秒'})
-                if attempt < self.request_retries:
-                    event('agent.request.retry', {'attempt': attempt + 2, 'summary': f'模型响应超时，正在进行第 {attempt + 1}/{self.request_retries} 次重试；本次请求尚未产生工具执行'})
+                # Total request deadline remains 300s even if SSE keeps arriving.
+                async with asyncio.timeout(self.timeout_seconds):
+                    async def send_and_read():
+                        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                            async with client.stream('POST',self.endpoint,headers={'Authorization':f'Bearer {self.api_key}'},json=body,extensions={'trace':diagnostic.trace}) as response:
+                                diagnostic.headers(response)
+                                response.raise_for_status()
+                                return await read_response(response,diagnostic)
+                    result=await await_public_delivery(send_and_read(),diagnostic,delivery_seconds)
+                diagnostic.data['stage']='completed'
+                diagnostic.emit('agent.request.completed',f'模型请求完成：总耗时 {diagnostic.elapsed()/1000:.1f} 秒；首个响应事件 {diagnostic.data.get("first_event_ms", "未知")} ms；推理字符 {diagnostic.data["reasoning_chars"]}，输出字符 {diagnostic.data["output_chars"]}，工具参数字符 {diagnostic.data["tool_argument_chars"]}；推理token {diagnostic.data.get("reasoning_tokens", "服务未返回")}，输出token {diagnostic.data.get("completion_tokens", "服务未返回")}')
+                return result
+            except NoDeliveryTimeoutError as exc:
+                diagnostic.data['timeout_kind']='no_delivery_deadline'
+                diagnostic.data['retryable']=False
+                diagnostic.emit('agent.request.timeout',f'模型 {delivery_seconds:g} 秒未交付答案或工具参数，停止本次请求，不自动重试；部分产物不执行')
+                raise NoDeliveryError(NoDeliveryError.public_message) from exc
+            except (httpx.ReadTimeout,TimeoutError) as exc:
+                diagnostic.data['timeout_kind']='read_idle' if isinstance(exc,httpx.ReadTimeout) else 'request_deadline'
+                diagnostic.emit('agent.request.timeout',f'模型请求达到 {self.timeout_seconds:g} 秒等待限制；已保留响应进度')
+                if attempt<self.request_retries:
+                    diagnostic.data['next_attempt']=attempt+2
+                    diagnostic.emit('agent.request.retry',f'模型请求超时，正在进行第 {attempt+1}/{self.request_retries} 次重试；部分输出不执行')
                     continue
-                raise ModelError(f'模型响应读取超时（ReadTimeout）：单次等待上限 {self.timeout_seconds:g} 秒，已重试 {self.request_retries} 次；请稍后重试或检查模型服务响应速度') from exc
-            except httpx.TimeoutException as exc:
-                raise ModelError(f'模型请求超时（{type(exc).__name__}），请检查模型服务连接及网络') from exc
+                raise ModelServiceError(f'模型响应读取超时（ReadTimeout）：单次等待上限 {self.timeout_seconds:g} 秒，已重试 {self.request_retries} 次；请查看请求阶段及响应进度') from exc
+            except asyncio.CancelledError:
+                diagnostic.emit('agent.request.cancelled','请求被上层取消（可能是Agent总时限或用户停止），已保留响应进度')
+                raise
             except httpx.HTTPStatusError as exc:
-                raise ModelError(f'模型服务返回 HTTP {exc.response.status_code}；请检查服务状态、认证、额度和接口参数') from exc
+                diagnostic.emit('agent.request.failed',f'模型服务返回 HTTP {exc.response.status_code}')
+                raise ModelServiceError(f'模型服务返回 HTTP {exc.response.status_code}；请检查服务状态、认证、额度和接口参数') from exc
             except httpx.RequestError as exc:
-                raise ModelError(f'模型网络请求失败（{type(exc).__name__}），请检查网络与模型服务连接') from exc
-            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                diagnostic.data['error_type']=type(exc).__name__
+                diagnostic.emit('agent.request.failed',f'模型网络请求失败：{type(exc).__name__}')
+                raise ModelServiceError(f'模型网络请求失败（{type(exc).__name__}），请检查网络与模型服务连接') from exc
+            except (KeyError,IndexError,TypeError,ValueError) as exc:
+                diagnostic.emit('agent.request.failed','模型响应格式无效或流未完整结束；部分输出不执行')
                 raise ModelError(f'模型响应格式无效（{type(exc).__name__}），未取得有效的消息结构') from exc
+            finally:
+                heartbeat.cancel()
+                with suppress(asyncio.CancelledError):await heartbeat
 
 
 structured_model = StructuredModel()

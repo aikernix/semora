@@ -60,6 +60,8 @@ export interface KnowledgeResearchResult {
   evidence: any[]
 }
 export interface QueryRun {
+  delivery?: { kind: 'result' | 'clarification' | 'blocked' | 'cancelled' | 'interrupted'; title: string; summary: string; warnings: string[]; next_action: string; result_verified: boolean }
+  delivery_warnings?: string[]
   source_artifacts?: Record<string, any>
   id: string
   session_id: string
@@ -97,6 +99,7 @@ export interface QuerySession {
 }
 
 export interface SystemSettings {
+  delivery_mode?: 'strict' | 'best_effort'
   require_plan_confirmation?: boolean
   approval_mode: 'disabled' | 'all' | 'risk_based'
   approve_sensitive_detail: boolean

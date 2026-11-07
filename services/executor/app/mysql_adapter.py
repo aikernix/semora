@@ -6,6 +6,7 @@ from urllib.parse import unquote, urlsplit
 
 import pymysql
 from fastapi import HTTPException
+from .errors import database_error
 
 
 def connect(dsn: str, timeout_ms: int = 30_000):
@@ -54,8 +55,9 @@ def inspect(dsn: str) -> dict:
         raise HTTPException(502, f'MySQL 连接失败（{code}）：{message}') from exc
 
 
-def scan(dsn: str, sensitivity_level) -> dict:
+def scan(dsn: str, sensitivity_level, table_names: list[str] | None = None) -> dict:
     info = inspect(dsn)
+    selected = ' AND c.TABLE_NAME IN (' + ','.join(['%s'] * len(table_names)) + ')' if table_names else ''
     tables = {}
     sensitive = []
     try:
@@ -66,7 +68,7 @@ def scan(dsn: str, sensitivity_level) -> dict:
                     c.IS_NULLABLE,c.COLUMN_KEY,c.COLUMN_COMMENT,t.TABLE_COMMENT
                     FROM information_schema.COLUMNS c JOIN information_schema.TABLES t
                     ON c.TABLE_SCHEMA=t.TABLE_SCHEMA AND c.TABLE_NAME=t.TABLE_NAME
-                    WHERE c.TABLE_SCHEMA=DATABASE() ORDER BY c.TABLE_NAME,c.ORDINAL_POSITION''')
+                    WHERE c.TABLE_SCHEMA=DATABASE()''' + selected + ' ORDER BY c.TABLE_NAME,c.ORDINAL_POSITION', table_names or ())
                 for schema, table, name, dtype, nullable, key, comment, table_comment in cursor.fetchall():
                     item = tables.setdefault((schema, table), {'schema':schema, 'name':table, 'comment':table_comment, 'columns':[]})
                     level = sensitivity_level(table, name)
@@ -76,7 +78,7 @@ def scan(dsn: str, sensitivity_level) -> dict:
                 cursor.execute('''SELECT TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME,
                     REFERENCED_TABLE_SCHEMA,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME
                     FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE()
-                    AND REFERENCED_TABLE_NAME IS NOT NULL ORDER BY TABLE_NAME,ORDINAL_POSITION''')
+                    AND REFERENCED_TABLE_NAME IS NOT NULL''' + ((' AND TABLE_NAME IN (' + ','.join(['%s'] * len(table_names)) + ') AND REFERENCED_TABLE_NAME IN (' + ','.join(['%s'] * len(table_names)) + ')') if table_names else '') + ' ORDER BY TABLE_NAME,ORDINAL_POSITION', (table_names + table_names) if table_names else ())
                 foreign_keys = [{'from':'.'.join(row[:3]),'to':'.'.join(row[3:])} for row in cursor.fetchall()]
             connection.rollback()
     except Exception as exc:
@@ -104,5 +106,7 @@ def estimate(dsn: str, sql: str, parameters: dict, timeout_ms: int) -> dict:
                 for value in node: visit(value)
         visit(plan)
         return {'estimated_rows':int(max(rows, default=0)), 'total_cost':max(costs, default=0), 'source':'mysql-explain'}
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(502, f'MySQL 成本估算失败：{type(exc).__name__}') from exc
+        raise database_error(exc,'estimate') from exc

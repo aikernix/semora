@@ -1,4 +1,5 @@
 from __future__ import annotations
+from semora_agent.prompts import PROBE_JSON, PROBE_TOOL
 
 import asyncio
 import json
@@ -353,11 +354,11 @@ async def test_model_config(body: ModelConfigInput, request: Request):
     try:
         candidate=model_settings.candidate(body)
         candidate.timeout_seconds=20
-        result=await candidate.complete_json('只输出 JSON 对象 {"ok":true}。','连接测试，不要输出思考过程。')
+        result=await candidate.complete_json(PROBE_JSON,'连接测试。')
         if result.get('ok') is not True:
             raise ValueError('模型未返回要求的 JSON；请检查是否支持 JSON 输出')
         probe = await candidate.complete_messages(
-            [{'role':'user','content':'请调用 semora_probe，参数 ok=true。这是工具兼容性测试，不执行任何业务操作。'}],
+            [{'role':'user','content':PROBE_TOOL}],
             [{'type':'function','function':{'name':'semora_probe','description':'验证模型的原生工具调用能力','parameters':{'type':'object','properties':{'ok':{'type':'boolean'}},'required':['ok']}}}],
             tool_choice={'type':'function','function':{'name':'semora_probe'}},
         )
@@ -668,9 +669,9 @@ async def test_datasource(datasource_id: str) -> dict:
 
 
 @app.post("/api/v1/datasources/{datasource_id}/scan")
-async def scan_datasource(datasource_id: str) -> dict:
+async def scan_datasource(datasource_id: str, tables: list[str] | None = Query(default=None, min_length=1, max_length=1000)) -> dict:
     try:
-        return await datasource_service.scan(datasource_id)
+        return await datasource_service.scan(datasource_id, tables=tables) if tables is not None else await datasource_service.scan(datasource_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except RuntimeError as exc:

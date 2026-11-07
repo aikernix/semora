@@ -3,6 +3,7 @@ WORKDIR /app
 COPY services/semantic-planner/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 COPY packages/contracts/python /app/packages/contracts/python
+COPY packages/query-core/python/semora_query_core /app/semora_query_core
 COPY services/api/app/planner.py /app/planner.py
 COPY services/api/app/query_stages.py /app/query_stages.py
 COPY packages/telemetry/python/semora_telemetry /app/semora_telemetry

@@ -25,7 +25,7 @@ test('cross-source queries expose both SQL steps, dependencies and final results
   await expect(page.getByText('分步查询计划', { exact: false })).toBeVisible()
   await expect(page.getByText('选择客户 · 完成', { exact: true })).toBeVisible()
   await expect(page.getByText('查账户 · 完成', { exact: true })).toBeVisible()
-  await expect(page.getByText('从 pick 提取 customer.id', { exact: false })).toBeVisible()
+  await expect(page.getByText('从 pick 传递 customer.id', { exact: false })).toBeVisible()
   await page.getByRole('button', { name: '分步查询计划', exact: false }).click()
   await expect(page.getByText('SELECT customer_id FROM customers LIMIT 1001', { exact: true })).toBeVisible()
   await expect(page.getByText('SELECT amount FROM accounts WHERE customer_id IN (%(p)s) LIMIT 1000', { exact: true })).toBeVisible()

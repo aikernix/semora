@@ -118,6 +118,20 @@ def test_cross_source_failure_and_empty_conditions_never_publish_partial_answers
     asyncio.run(scenario())
 
 
+def test_empty_timeout_message_reports_step_and_operation(monkeypatch):
+    import httpx
+    async def scenario():
+        w,session,calls=harness(monkeypatch)
+        async def timeout(*args):raise httpx.ReadTimeout('')
+        w.estimate=timeout
+        run=await w.start(session.id,'查询',domain='commerce')
+        assert run.status==RunStatus.FAILED and run.result is None
+        assert 'pick_clients' in run.error and '成本估算' in run.error and 'ReadTimeout' in run.error
+        assert run.events[-1].data['operation']=='成本估算'
+        assert not calls
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('kind', ['oversized', 'conflicting_attributes', 'injection', 'unauthorized'])
 def test_intermediate_keys_are_complete_unique_safe_and_authorized(monkeypatch, kind):
     async def scenario():
@@ -277,3 +291,118 @@ def test_cross_source_join_cannot_fall_back_to_single_connection_sql():
                      fields=['client.customer_id', 'balances.amount'], grain='client', relationship_path=['customer_accounts'])
     with pytest.raises(PlanningError, match='不同数据源对象不能直接JOIN'):
         compile_plan(plan, ontology())
+
+
+@pytest.mark.parametrize('function,expected', [('count', [[0]]), ('sum', [[None]])])
+def test_empty_source_keys_preserve_global_aggregate_semantics(monkeypatch, function, expected):
+    async def scenario():
+        w, session, calls = harness(monkeypatch, rows=[])
+        class Analyst:
+            async def analyse(self, question, evidence, model_ontology, scope):
+                value = proposal(enrich=False)
+                value['source_steps'][1]['query'].update({
+                    'fields': [], 'metrics': ['total'],
+                    'calculations': [{'name': 'total', 'function': function, 'field': 'balances.amount'}],
+                })
+                return AnalystAgent(StructuredModel())._build_outcome(value, question, evidence, model_ontology, scope, 'test')
+        w.analyst = Analyst()
+        r = await w.start(session.id, '查询有效客户的账户汇总', domain='commerce')
+        assert r.status == RunStatus.COMPLETED, r.error
+        assert r.result.rows == expected
+        assert [call[0] for call in calls] == ['customers-db', 'accounts-db']
+        assert list(calls[1][2].values()) == [None]
+    asyncio.run(scenario())
+
+
+def test_unmatched_lookup_key_cannot_silently_lose_enriched_attributes(monkeypatch):
+    async def scenario():
+        w, session, calls = harness(monkeypatch)
+        execute = w.execute
+        async def collation_lookup(sql, parameters, sensitive, settings):
+            result = await execute(sql, parameters, sensitive, settings)
+            if settings['data_source_id'] == 'accounts-db':
+                # A database collation may match 'a' to a bound 'A'; Python
+                # cannot assume those keys identify the same source record.
+                for row in result.rows:
+                    row[0] = 'a'
+            return result
+        w.execute = collation_lookup
+        r = await w.start(session.id, '查有效客户账户并带上来源属性', domain='commerce')
+        assert r.status == RunStatus.FAILED
+        assert r.result is None
+        assert '关联键' in r.error
+    asyncio.run(scenario())
+
+
+def test_source_output_alias_collisions_are_rejected_before_sql():
+    value = proposal()
+    query = value['source_steps'][0]['query']
+    query['metrics'] = ['client_customer_id']
+    query['calculations'] = [{'name': 'client_customer_id', 'function': 'count', 'field': 'client.row_id'}]
+    value['source_steps'][1]['inputs'][0]['include_source_fields'] = ['client_customer_id']
+    with pytest.raises(ValueError, match='别名冲突'):
+        AnalystAgent(StructuredModel())._build_outcome(value, '查询客户及记录数', [], ontology(), {}, 'test')
+
+
+@pytest.mark.parametrize('failure', ['connection', 'timeout', 'invalid_response'])
+def test_executor_cancel_failure_still_stops_cross_source_workflow(monkeypatch, failure):
+    async def scenario():
+        import httpx
+        w, session, calls = harness(monkeypatch)
+        started = asyncio.Event()
+        async def waiting_execute(sql, parameters, sensitive, settings):
+            calls.append(settings['data_source_id'])
+            started.set()
+            await asyncio.Event().wait()
+        w.execute = waiting_execute
+        auth = AuthorizationContext(subject='test', username='test', roles=['analyst'], branch_ids=[1])
+        run = await w.start_background(session.id, '跨源查询', auth, domain='commerce')
+        await asyncio.wait_for(started.wait(), 3)
+        task = w._tasks[run.id]
+        async def offline(*args, **kwargs):
+            assert task.cancelling() > 0
+            if failure == 'timeout':
+                raise httpx.ReadTimeout('executor timeout')
+            if failure == 'invalid_response':
+                return httpx.Response(200, content=b'invalid json', request=httpx.Request('POST', 'http://executor/cancel'))
+            raise httpx.ConnectError('executor unavailable')
+        monkeypatch.setattr(httpx.AsyncClient, 'post', offline)
+        result = await w.cancel(run.id)
+        assert result['task_cancelled'] and not result['executor_cancelled']
+        assert result['executor_cancel_error']
+        assert run.status == RunStatus.FAILED
+        assert calls == ['customers-db']
+    asyncio.run(scenario())
+
+
+def test_cross_source_explicit_predicate_checked_in_step_not_root():
+    raw = proposal()
+    raw['assumptions'] = ["client.status = 'active'"]
+    agent = AnalystAgent()
+    result = agent._build_outcome(copy.deepcopy(raw), '查有效记录', [], ontology(), {}, 'test')
+    assert result.plan.filters == []
+    assert result.plan.source_steps[0].query.filters[0].field == 'client.status'
+    raw['source_steps'][0]['query']['filters'] = []
+    with pytest.raises(ValueError, match='未落实到 filters'):
+        agent._build_outcome(raw, '查有效记录', [], ontology(), {}, 'test')
+
+
+def test_explicit_predicate_adjacent_to_chinese_text_is_not_silently_ignored():
+    raw = proposal()
+    raw['assumptions'] = ["仅保留client.status='active'筛选有效记录"]
+    raw['source_steps'][0]['query']['filters'] = []
+    with pytest.raises(ValueError, match='未落实到 filters'):
+        AnalystAgent()._build_outcome(raw, '查有效记录', [], ontology(), {}, 'test')
+
+
+def test_unqualified_cross_source_key_is_not_misreported_as_missing_output():
+    from semora_agent.multisource import validate_source_steps
+    from semora_contracts import QueryPlan
+    raw=proposal()
+    raw['source_steps'][1]['inputs'][0]['source_field']='customer_id'
+    plan=QueryPlan(domain='commerce',data_source_id='customers-db',intent='query',metrics=[],source_steps=raw['source_steps'])
+    with pytest.raises(ValueError) as error:
+        validate_source_steps(plan,ontology())
+    assert '字段引用无效' in str(error.value)
+    assert 'client.customer_id' in str(error.value) and 'balances.customer_id' in str(error.value)
+    assert '未包含在上一步输出' not in str(error.value)

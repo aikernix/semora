@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('api', 'web', 'semantic-planner', 'ontology')]
+    [ValidateSet('api', 'web', 'semantic-planner', 'ontology', 'executor')]
     [string[]]$Services = @('api', 'web')
 )
 $ErrorActionPreference = 'Stop'

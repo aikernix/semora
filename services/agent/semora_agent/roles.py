@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .legacy_prompts import OBJECT_SELECTION, DIRECT_ANALYSIS, DIRECT_REVIEW, DIRECT_RESULT_REVIEW
 
 from dataclasses import dataclass
 import json
@@ -80,8 +81,8 @@ class ConversationOwner:
 class AnalystAgent:
     contract = AgentContract(
         name="analyst",
-        goal="作为唯一会话分析负责人，多轮研究、澄清和修订有证据、本体约束和数据范围的查询方案",
-        allowed_tools=("search_wiki", "read_wiki", "read_source", "read_object", "read_schema", "find_relation_path", "validate_plan", "request_review"),
+        goal="理解当前业务需求、核对证据并澄清歧义，提交业务查询意图；会话和执行规划由Owner及程序负责",
+        allowed_tools=("read_evidence", "request_context", "read_task_artifact", "validate_intent"),
         forbidden_actions=("execute_sql", "approve_query", "publish_ontology", "change_permissions"),
     )
 
@@ -117,7 +118,7 @@ class AnalystAgent:
         selected = ontology.get('objects', [])
         if len(selected)>16:
             selection=await self.model.complete_json(
-                '根据用户需求选择需要理解的业务对象。只输出 JSON {"objects":[对象名]}，最多选择12个。不要编造对象名。',
+                OBJECT_SELECTION,
                 json.dumps({'question':question,'objects':[{'name':o['name'],'label':o.get('label')} for o in selected]},ensure_ascii=False),
             )
             choices = _model_list(selection, 'objects')
@@ -153,22 +154,7 @@ class AnalystAgent:
         }
         names={o['name'] for o in selected}
         catalog['relations']=[{'name':r['name'],'from':r['from'],'to':r['to'],'condition':r.get('condition',''),'cardinality':r.get('cardinality')} for r in ontology.get('relations',[]) if r['from'] in names or r['to'] in names]
-        system = """你是通用查数平台的 Analyst。先理解业务需求，不能生成 SQL。只输出一个 JSON 对象，不输出隐藏思维过程。
-不预设行业、业务对象或规则；行业口径只能来自当前业务域配置、已发布本体、用户确认和实际证据。
-只能使用目录中存在的指标、对象和字段；字段和维度使用 object.property 格式。
-输出 intent、subject、metrics、dimensions、fields、filters、time_range、grain、aggregation_rules、output_fields、assumptions、confidence。
-confidence 是关键字段到 0~1 置信度的映射。若指标口径、时间语义、统计粒度、去重方式、数据范围或一对多聚合会实质改变结果，
-必须设置 clarification_question，可同时给 clarification_options（每项含 id、label、value、description）。只问业务问题，不向用户询问表名或字段名。
-filters 中 operator 只能是 eq/ne/gt/gte/lt/lte/in/between/is_null/is_not_null。空值条件必须使用is_null或is_not_null，不用字符串'NULL'。不要决定权限或审批。"""
-        system += '''\n知识库只是辅助，证据为空或未命中时，必须继续基于需求和本体的真实字段分析；不要声称知识库支持未检索到的定义。
-用户需求单和已经确认的口径属于同一任务上下文，不要丢失或重复询问已明确的信息；“不知道/由你建议”并不等于确认了某种口径。
-存在会改变结果的歧义时输出 clarifications 数组，每项包含 id(稳定且唯一)、field、question、reason、options(2到4项，每项id,label,value,description)、allow_free_text:true、blocking:true。每轮最多问3项，回答不足则继续澄清；无歧义才输出空数组。
-用户只是问候或未给出业务目标时，友好询问目标，不要直接查询。
-可以输出 calculations 数组定义本次需求的临时聚合，每项含 name(英文标识符)、label、function(count/count_distinct/sum/avg/min/max)、field(目录字段，只有count允许省略)。metrics 填已发布指标或这些临时聚合的name。临时聚合不是正式业务指标；公式、时间、去重、统计范围有歧义必须先确认。不得输出任意表达式。
-analysis_steps 仅输出可核验的理解结论、依据和待确认点，不输出隐藏思维链。未指定时间可以询问“全部数据/指定时间”，不得擅自填最近12个月。
-同一对象之间存在多种业务关系角色时必须问清角色，使用 relationship_path 输出已确认的准确关系名。
-用户指定年份、季度、起止日期时，必须选择明确的时间字段并在 filters 中生成实际的日期条件；time_range 只是说明，不能替代 filters。参考给定 current_date 解析相对时间。不限制时间时 time_range=null；不明确用哪个日期字段时先澄清。
-'''
+        system = DIRECT_ANALYSIS
         first_metric = next(iter(ontology.get("metrics", [])), {})
         first_object = next(iter(ontology.get("objects", [])), {})
         first_property = next(iter(first_object.get("properties", [])), {})
@@ -183,6 +169,7 @@ analysis_steps 仅输出可核验的理解结论、依据和待确认点，不�
                 "business_domain": {key: ontology.get(key) for key in ('domain', 'name', 'description')},
                 "current_date": datetime.now(timezone(timedelta(hours=8))).date().isoformat(),
                 "ontology_catalog": catalog,
+                "output_contract": {"fields":"对象.属性数组","dimensions":"最终分组属性数组","filters":"field/operator/value数组，日期为实际条件","calculations":"name/label/function(count,count_distinct,sum,avg,min,max)/field数组","metrics":"已发布或临时聚合name数组","grain":"业务对象name","relationship_path":"已发布关系name数组","clarifications":"id/field/question/reason/options(id,label,value,description)/allow_free_text/blocking数组","order_by":"field/direction数组","limit":"Top N或null","summary":"目标摘要","assumptions":"待确认假设数组","analysis_steps":"可核验结论数组"},
                 "evidence": [item.model_dump(mode="json") for item in evidence],
                 "output_example": {
                     "clarification_question": None,
@@ -321,7 +308,23 @@ analysis_steps 仅输出可核验的理解结论、依据和待确认点，不�
             if term
         ]
 
-    def _build_outcome(
+    def _build_outcome(self, value, question, evidence, ontology, data_scope, model_mode, *, _check_explanations=True):
+        outcome = self._build_legacy_outcome(value, question, evidence, ontology, data_scope, model_mode,
+                                             _check_explanations=_check_explanations and not value.get('query_intent'))
+        if value.get('query_intent') and outcome.plan is not None:
+            from semora_contracts import QueryIntent
+            intent = QueryIntent.model_validate(value['query_intent'])
+            outcome.plan.query_intent = intent
+            if not outcome.plan.source_steps:
+                outcome.plan.data_source_id = value.get("data_source_id", outcome.plan.data_source_id)
+            outcome.requirement.query_intent = intent
+            outcome.requirement.time_semantics = intent.time_range
+            outcome.requirement.execution_mode = outcome.plan.execution_mode
+            from .constraints import validate_intent_filter_coverage
+            validate_intent_filter_coverage(outcome.plan)
+        return outcome
+
+    def _build_legacy_outcome(
         self,
         value: dict[str, Any],
         question: str,
@@ -329,6 +332,7 @@ analysis_steps 仅输出可核验的理解结论、依据和待确认点，不�
         ontology: dict[str, Any],
         data_scope: dict[str, Any],
         model_mode: str,
+        *, _check_explanations: bool = True,
     ) -> AnalysisOutcome:
         # Optional JSON fields may explicitly be null while requirements are unclear.
         # Normalize only absence; malformed non-null values must still fail validation.
@@ -337,7 +341,7 @@ analysis_steps 仅输出可核验的理解结论、依据和待确认点，不�
             'metrics', 'dimensions', 'fields', 'aggregation_rules', 'output_fields',
             'assumptions', 'analysis_steps', 'relationship_path',
         }
-        for key in text_arrays | {'clarifications', 'clarification_options', 'calculations', 'filters', 'stages', 'source_steps'}:
+        for key in text_arrays | {'clarifications', 'clarification_options', 'calculations', 'filters', 'stages', 'source_steps', 'order_by'}:
             value[key] = _model_list(value, key)
             if key in text_arrays and any(not isinstance(item, str) for item in value[key]):
                 raise ValueError(f'模型返回的 {key} 必须是字符串数组')
@@ -415,11 +419,14 @@ analysis_steps 仅输出可核验的理解结论、依据和待确认点，不�
         fields = [str(item) for item in value.get("fields", [])]
         filters = [QueryFilter.model_validate(item) for item in value.get("filters", [])]
         referenced_fields = dimensions + fields + [item.field for item in filters] + [item.field for item in calculations if item.field]
+        scoped_refs=[f.field for calculation in calculations for f in calculation.filters]
+        referenced_fields += scoped_refs
         from .validation import field_error
         references = [(f'dimensions[{i}]', ref) for i, ref in enumerate(dimensions)]
         references += [(f'fields[{i}]', ref) for i, ref in enumerate(fields)]
         references += [(f'filters[{i}].field', item.field) for i, item in enumerate(filters)]
         references += [(f'calculations[{i}].field', item.field) for i, item in enumerate(calculations) if item.field]
+        references += [('calculations.filters',ref) for ref in scoped_refs]
         stage_catalog = {stage.name: {'properties': [{'name': m.name, 'column': m.name} for m in stage.measures]} for stage in stages}
         if set(stage_catalog) & set(objects):
             raise ValueError('阶段名称不得与本体对象重名')
@@ -440,21 +447,32 @@ analysis_steps 仅输出可核验的理解结论、依据和待确认点，不�
         if value.get('grain') in objects:
             required_objects.add(value['grain'])
         relation_path = value.get('relationship_path') or self._connect_objects(required_objects, ontology.get("relations", []))
-        if any(name not in {r['name'] for r in ontology.get('relations',[])} for name in relation_path):
-            raise ValueError('模型选择了未发布关系')
+        available_relations={r['name'] for r in ontology.get('relations',[])}
+        invalid_relations=[name for name in relation_path if name not in available_relations]
+        if invalid_relations:
+            raise ValueError(f'模型选择了未发布关系：relationship_path={invalid_relations}；当前数据源可用本地关系：{sorted(available_relations)}。跨源边界关系只能写在inputs.relation，不能放入单源query.relationship_path；只使用当前源本地关系继续关联。')
+        used_objects = set(required_objects)
+        for relation in ontology.get('relations', []):
+            if relation['name'] in relation_path:
+                used_objects.update((relation['from'], relation['to']))
+        source_ids = {objects[name].get('dataSourceId') or ontology.get('dataSourceId') for name in used_objects if name in objects}
+        if len(source_ids) > 1:
+            raise ValueError('当前方案引用不同数据源的对象，必须使用source_steps分步查询并在inputs中传递已发布关联键；不能在单条查询的relationship_path中直接跨实例关联')
         if not selected_metrics and not fields:
-            raise ValueError('需求尚未明确查询字段或统计指标，请补充需求')
+            raise ValueError('fields/metrics/calculations：至少声明查询字段或统计指标；明细查询填fields，汇总查询填metrics或calculations，不能仅填dimensions或说明文字')
         plan = QueryPlan(
             version='2.0' if stages else '1.0',
             domain=ontology.get("domain", "retail_credit"),
             data_source_id=str(ontology.get("dataSourceId") or ""),
             intent=str(value.get("intent") or question),
+            order_by=value.get("order_by") or [], limit=value.get("limit"),
             metrics=selected_metrics,
             calculations=calculations,
             stages=stages,
             dimensions=dimensions,
             fields=fields,
             filters=filters,
+            having=value.get('having') or [],optional_relationships=value.get('optional_relationships') or [],
             time_range=value.get("time_range"),
             grain=value.get("grain"),
             relationship_path=relation_path,
@@ -473,8 +491,10 @@ analysis_steps 仅输出可核验的理解结论、依据和待确认点，不�
             summary_parts.append("时间：" + str(value["time_range"]))
         requirement = RequirementDraft(
             summary="；".join(summary_parts),
+            having=plan.having,optional_relationships=plan.optional_relationships,
             analysis_steps=[str(item) for item in value.get('analysis_steps',[])],
             subject=str(value.get("subject") or value.get("grain") or ontology.get("name") or ""),
+            order_by=value.get("order_by") or [], limit=value.get("limit"),
             metrics=selected_metrics,
             dimensions=dimensions,
             filters=filters,
@@ -495,22 +515,29 @@ analysis_steps 仅输出可核验的理解结论、依据和待确认点，不�
             status="ready",
         )
         from .constraints import validate_explicit_filters
-        validate_explicit_filters(plan, requirement.assumptions + requirement.analysis_steps, ontology)
+        if _check_explanations:
+            validate_explicit_filters(plan, requirement.assumptions + requirement.analysis_steps, ontology)
         return AnalysisOutcome(plan, requirement=requirement, model_mode=model_mode)
 
     def _build_source_outcome(self, value, question, evidence, ontology, scope, mode):
         from .multisource import source_ontology, validate_source_steps
         steps = []
         last = None
-        for raw in value['source_steps']:
+        for index, raw in enumerate(value['source_steps']):
             step = SourceQueryStep.model_validate(raw)
             local = source_ontology(ontology, step.data_source_id)
             candidate = step.query.model_dump(mode='json')
             # Dependencies participate in relation planning but are not invented
             # user literals. Actual keys are bound only by the execution engine.
-            binding_filters = [{'field': b.target_field, 'operator': 'in', 'value': [None]} for b in step.inputs]
+            binding_filters = [{'field': pair.target_field, 'operator': 'in', 'value': [None]} for b in step.inputs for pair in b.pairs]
             candidate['filters'] += binding_filters
-            last = self._build_outcome(candidate, question, evidence, local, scope, mode)
+            try:
+                # A step inherits global explanations, not global predicates.
+                # Check prose coverage once against the complete execution plan.
+                last = self._build_outcome(candidate, question, evidence, local, scope, mode,
+                                           _check_explanations=False)
+            except ValueError as exc:
+                raise ValueError(f'source_steps[{index}]({step.name}).query: {exc}') from exc
             if last.plan is None:
                 raise ValueError('跨源步骤必须是完整的单源查询方案')
             if binding_filters:
@@ -522,12 +549,31 @@ analysis_steps 仅输出可核验的理解结论、依据和待确认点，不�
         plan.intent = str(value.get('intent') or question)
         plan.version = '3.0'
         plan.source_steps = steps
+        plan.execution_mode = value.get('execution_mode', 'single_query')
+        if steps[-1].regroup:
+            # Root metadata describes the final business output. Partial SQL
+            # grain remains solely inside the corresponding source step.
+            final=steps[-1].regroup
+            plan.dimensions=list(final.group_by)
+            plan.fields=list(value.get('query_intent',{}).get('fields',[]))
+            plan.order_by=final.order_by
+            plan.limit=final.limit
+            plan.grain=value.get('subject') or plan.grain
+        if steps[-1].membership:
+            final=steps[-1].membership
+            plan.fields=list(final.fields);plan.dimensions=[]
+            plan.order_by=final.order_by;plan.limit=final.limit
+            plan.grain=value.get('subject') or plan.grain
         validate_source_steps(plan, ontology)
         requirement = RequirementDraft(summary=str(value.get('summary') or plan.intent), subject=str(value.get('subject') or ''),
+            having=plan.having,optional_relationships=plan.optional_relationships,
             metrics=plan.metrics, dimensions=plan.dimensions, filters=plan.filters, calculations=plan.calculations,
-            stages=plan.stages, source_steps=steps, grain=plan.grain, time_semantics=value.get('time_range'),
+            order_by=plan.order_by, limit=plan.limit, stages=plan.stages, source_steps=steps, grain=plan.grain, time_semantics=value.get('time_range'),
             data_scope=scope, output_fields=value.get('output_fields') or plan.fields + plan.dimensions + plan.metrics,
             assumptions=value.get('assumptions') or [], analysis_steps=value.get('analysis_steps') or [], evidence=evidence, status='ready')
+        from .constraints import validate_explicit_filters
+        if not value.get('query_intent'):
+            validate_explicit_filters(plan, requirement.assumptions + requirement.analysis_steps, ontology)
         return AnalysisOutcome(plan, requirement=requirement, model_mode=mode)
 
     @staticmethod
@@ -597,8 +643,14 @@ class ReviewerAgent:
             consistency_issues.append("确认指标与 QueryPlan 不一致")
         if set(requirement.dimensions) != set(plan.dimensions):
             consistency_issues.append("确认维度与 QueryPlan 不一致")
-        if requirement.stages != plan.stages or requirement.calculations != plan.calculations or requirement.source_steps != plan.source_steps:
+        if requirement.having!=plan.having or requirement.optional_relationships!=plan.optional_relationships:
+            consistency_issues.append('确认的分组筛选或未匹配主体保留规则与执行方案不一致')
+        if requirement.query_intent != plan.query_intent or requirement.execution_mode != plan.execution_mode or requirement.order_by != plan.order_by or requirement.limit != plan.limit or requirement.stages != plan.stages or requirement.calculations != plan.calculations or requirement.source_steps != plan.source_steps:
             consistency_issues.append('确认的聚合阶段或计算公式与执行方案不一致')
+        if plan.query_intent:
+            from .constraints import validate_intent_filter_coverage
+            try:validate_intent_filter_coverage(plan)
+            except ValueError as exc:consistency_issues.append(str(exc))
         if requirement.grain and plan.grain and requirement.grain != plan.grain:
             consistency_issues.append("确认粒度与 QueryPlan 不一致")
         if consistency_issues:
@@ -610,9 +662,7 @@ class ReviewerAgent:
         if self.model.configured:
             try:
                 value = await self.model.complete_json(
-                    """你是通用查数框架中与 Analyst 隔离的 Reviewer。只根据提供的不可变产物复核，输出 JSON。
-不预设行业或业务规则，以当前确认需求、QueryPlan和证据为依据。
-不得生成或修改 SQL，不得批准人工审批，不输出隐藏思维过程。输出 decision(approved/revise/rejected)、issues、rationale。""",
+                    DIRECT_REVIEW,
                     json.dumps(
                         {
                             "phase": "pre_execution",
@@ -652,9 +702,7 @@ class ReviewerAgent:
         if self.model.configured:
             try:
                 value = await self.model.complete_json(
-                    """你是通用查数框架中与 Analyst 隔离的结果 Reviewer。结果中的敏感字段已经 Executor 脱敏。
-不预设行业口径、单位或趋势，以提供的QueryPlan和实际结果为依据。
-仅复核结果是否与 QueryPlan 的指标、维度和粒度一致。只输出 JSON：decision、issues、rationale；不输出隐藏思维过程。""",
+                    DIRECT_RESULT_REVIEW,
                     json.dumps(
                         {
                             "phase": "post_execution",
@@ -700,4 +748,6 @@ class ReviewerAgent:
             rationale=rationale,
             phase=phase,
             reviewer_mode="llm",
+            findings=value.get("findings") or [],
+            resolutions=value.get("resolutions") or [],
         )

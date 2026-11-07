@@ -171,7 +171,7 @@ def test_wiki_test_entry_resolves_single_scope_and_corrects_invalid_ids(monkeypa
     class Model:
         configured = required = True
         observations = []
-        async def complete_json(self, system, user):
+        async def complete_json(self, system, user, **kwargs):
             self.observations.append(json.loads(user))
             return actions.pop(0)
     model = Model()
@@ -191,6 +191,25 @@ def test_wiki_test_entry_resolves_single_scope_and_corrects_invalid_ids(monkeypa
     if bad_action:
         assert model.observations[1]['observations'][0]['error'] == 'invalid_knowledge_base'
         assert model.observations[1]['observations'][0]['allowed_kb_ids'] == bound_ids
+
+
+def test_knowledge_research_stops_repeated_empty_searches(monkeypatch):
+    from semora_agent import model as model_module
+    class Model:
+        configured=required=True
+        calls=0
+        async def complete_json(self,system,user,**kwargs):
+            self.calls+=1
+            return {'action':'wiki_search','query':'empty'}
+    model=Model();monkeypatch.setattr(model_module,'structured_model',model)
+    calls=[]
+    def respond(request):
+        calls.append(str(request.url))
+        return httpx.Response(200,json={'pages':[]})
+    client=WeKnoraClient('https://wiki.example/api/v1','test-key',httpx.MockTransport(respond))
+    result=asyncio.run(client.research('需要确认的口径',['kb-one']))
+    assert model.calls==3 and len(calls)==2 and result.evidence==[]
+    assert '停止' in result.answer
 
 
 def test_native_wiki_tool_defaults_only_for_a_single_binding(monkeypatch):

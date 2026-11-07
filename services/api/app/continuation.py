@@ -59,16 +59,20 @@ def handoff(source, session):
         plan = plan.model_dump(mode='json')
     history = previous.get('question_history', []) + [source.question]
     return {
+        'task_memory': (source.agent_memory.get('task_memory') or [None])[-1],
         'source_run_id': source.id, 'root_run_id': previous.get('root_run_id', source.id),
         'question_history': [history[0], *history[-11:]] if len(history) > 12 else history,
         'requirement_form': previous.get('requirement_form', {} if source.message_mode == 'new' else session.requirement_form),
         'confirmed_facts': list(facts.values()),
+        'confirmed_fact_context':source.agent_memory.get('confirmed_fact_context') or previous.get('confirmed_fact_context',[]),
         'legacy_confirmations': legacy_confirmations(source) or previous.get('legacy_confirmations', ''),
         'draft': draft, 'candidate_plan': plan,
         'legacy_candidate': legacy_candidate(source) if not candidate else None,
         'confirmed_requirement': source.requirement.model_dump(mode='json') if source.requirement else previous.get('confirmed_requirement'),
         'review_feedback': reviews[-1].data if reviews else previous.get('review_feedback'),
         'previous_error': source.error,
+        'candidate_intent':(source.agent_memory.get('last_intent_candidate') or [None])[-1],
+        'planning_diagnostics':source.agent_memory.get('planning_diagnostics',[])[-2:],
         'failed_stage': next((e.status.value for e in reversed(source.events) if e.status.value != 'failed'), 'received'),
         'model_round_offset': sum(counts.values()), 'role_rounds': counts,
         'ontology': source.ontology.model_dump(mode='json') if source.ontology else None,

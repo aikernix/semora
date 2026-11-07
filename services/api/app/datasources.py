@@ -129,13 +129,13 @@ class ExecutorDataSourceClient:
         self.base_url = (base_url or os.getenv("EXECUTOR_URL", "http://localhost:8002")).rstrip("/")
         self.token = token or os.getenv("INTERNAL_TOKEN", "semora-dev-internal")
 
-    async def request(self, endpoint: str, item: DataSourceRecord) -> dict[str, Any]:
+    async def request(self, endpoint: str, item: DataSourceRecord, tables: list[str] | None = None) -> dict[str, Any]:
         try:
             async with httpx.AsyncClient(timeout=35) as client:
                 response = await client.post(
                     f"{self.base_url}/internal/v1/datasources/{endpoint}",
                     headers={"X-Semora-Internal-Token": self.token},
-                    json={"datasource_id": item.id, "type": item.type, "secret_ref": item.secret_ref},
+                    json={"datasource_id": item.id, "type": item.type, "secret_ref": item.secret_ref, **({"tables": tables} if tables is not None else {})},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -162,9 +162,9 @@ class DataSourceService:
         self.repository.record_test(datasource_id, result)
         return result
 
-    async def scan(self, datasource_id: str) -> dict[str, Any]:
+    async def scan(self, datasource_id: str, tables: list[str] | None = None) -> dict[str, Any]:
         item = self.repository.get(datasource_id)
-        result = await self.executor.request("scan", item)
+        result = await self.executor.request("scan", item, tables=tables) if tables is not None else await self.executor.request("scan", item)
         self.repository.record_scan(datasource_id, result)
         return result
 

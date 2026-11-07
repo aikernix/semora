@@ -18,6 +18,59 @@ PLAN = {'intent': '分行贷款余额', 'metrics': ['loan_balance'], 'dimensions
 CARD = {'summary': '请确认时间', 'clarifications': [{'id': 'time', 'field': 'time_range', 'question': '统计哪个时间？', 'reason': '影响范围', 'options': []}]}
 
 
+def test_reviewer_stage_schema_does_not_invent_resolutions():
+    from pydantic import ValidationError
+    schema=agentic.review_submission()
+    value={'payload':{'decision':'approved','rationale':'目标与执行字段一致'}}
+    assert 'resolutions' not in schema.model_validate(value).payload.model_dump()
+    assert 'ReviewResolution' not in json.dumps(schema.model_json_schema())
+    value['payload']['resolutions']=[{'finding_id':'invented','status':'resolved','rationale':'x'}]
+    with pytest.raises(ValidationError): schema.model_validate(value)
+    pending_schema=agentic.review_submission([{'id':'known','structured':True}])
+    with pytest.raises(ValidationError): pending_schema.model_validate(value)
+    value['payload']['resolutions'][0]['finding_id']='known'
+    assert pending_schema.model_validate(value).payload.resolutions
+    del value['payload']['resolutions']
+    with pytest.raises(ValidationError): pending_schema.model_validate(value)
+    value['payload']['rationale']='x'*1201
+    with pytest.raises(ValidationError): schema.model_validate(value)
+
+
+def test_reviewer_public_output_overflow_has_only_one_delivery_repair():
+    from semora_agent.runtime import ToolCallingModel
+    from semora_agent.model_diagnostics import PublicOutputLimitError
+    from langchain_core.messages import HumanMessage
+    class Overflow:
+        def __init__(self): self.calls=0
+        async def complete_messages(self,*args,**kwargs):
+            self.calls+=1
+            raise PublicOutputLimitError('over limit')
+    async def scenario():
+        client=Overflow();events=[];m=ToolCallingModel(client,lambda n,d:events.append(n),max_models=4)
+        m._argument_limit=65536
+        with pytest.raises(ModelError,match='限定修订仍未完成'):
+            await m._agenerate([HumanMessage(content='review')],tools=[])
+        assert client.calls==2 and events.count('agent.delivery.repair')==1
+    asyncio.run(scenario())
+
+
+def test_unlocated_reviewer_rejection_is_repaired_before_analyst_rework():
+    async def scenario():
+        workflow=Workflow(Store(),fake_execute,fake_retrieve,fake_snapshot)
+        ref,ontology=await fake_snapshot('retail_credit')
+        run=QueryRun(session_id='demo-session',question='按机构统计余额',ontology=ref)
+        analyst=NativeModel([('AgentSubmission',{'payload':PLAN})])
+        reviewer=NativeModel([
+            ('AgentSubmission',{'payload':{'decision':'revise','rationale':'用户明确要求'}}),
+            ('AgentSubmission',{'payload':{'decision':'approved','rationale':'当前指标、维度和用户要求一致'}}),
+        ])
+        workflow.analyst=AnalystAgent(analyst);workflow.reviewer=ReviewerAgent(reviewer)
+        outcome=await agentic.analyse(workflow,run,run.question,ontology,{})
+        assert outcome.plan is not None and len(analyst.messages)==1 and len(reviewer.messages)==2
+        assert any(e.event=='agent.validation.failed' for e in run.events)
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('domain,name,object_label,location_label', [
     ('inventory', '仓储管理', '商品', '仓库'),
     ('production', '生产管理', '工单', '车间'),
@@ -97,7 +150,32 @@ class NativeModel:
         raise AssertionError('The Agent must use native tool calls, not one-shot JSON')
 
 
-def test_analyst_observes_tool_results_and_resumes_memory_for_followup():
+def test_final_invalid_delivery_stops_with_concrete_error_without_sixth_call():
+    from semora_agent.model import PlanValidationError
+    async def scenario():
+        model=NativeModel([('AgentSubmission',{'payload':{'candidate_id':'invented'}})])
+        def invalid(value):raise ValueError('候选未校验通过：具体分组键错误')
+        with pytest.raises(PlanValidationError,match='具体分组键错误'):
+            await run_agent(model,'test',{},[],[],lambda *a:None,invalid,max_models=1,bounded_protocol=True)
+        assert len(model.messages)==1
+    asyncio.run(scenario())
+
+
+def test_protocol_error_after_last_call_never_starts_another_model_request():
+    from semora_agent.runtime import ToolCallingModel
+    from semora_agent.model import PlanValidationError
+    from langchain_core.messages import ToolMessage
+    async def scenario():
+        client=NativeModel([])
+        model=ToolCallingModel(client,lambda *a:None,max_models=1)
+        model._models=1
+        with pytest.raises(PlanValidationError,match='具体协议错误'):
+            await model._agenerate([ToolMessage(content='具体协议错误',name='AgentSubmission',tool_call_id='invalid')],tools=[])
+        assert not client.messages and model._models==1
+    asyncio.run(scenario())
+
+
+def test_analyst_observes_tools_and_receives_fresh_context_for_followup():
     async def scenario():
         workflow = Workflow(Store(), fake_execute, fake_retrieve, fake_snapshot)
         ref, ontology = await fake_snapshot('retail_credit')
@@ -117,6 +195,11 @@ def test_analyst_observes_tool_results_and_resumes_memory_for_followup():
         assert len(model.messages) == 5
         assert any(m['role'] == 'tool' and 'outstanding_balance' in str(m['content']) for m in model.messages[1])
         assert any(m['role'] == 'user' and '分行贷款余额' in str(m['content']) for m in model.messages[2])
+        assert not any(m['role']=='tool' for m in model.messages[2])
+        followup=json.loads(next(m['content'] for m in model.messages[2] if m['role']=='user'))
+        assert followup['open_business_questions'][0]['id']=='time'
+        assert followup['original_user_request']=='分行贷款余额'
+        assert run.agent_memory['task_contracts'][-1]['run_user_message']=='分行贷款余额'
         assert 'PRIVATE_REASONING' not in json.dumps(run.agent_memory)
         assert 'This text must not be persisted.' not in json.dumps(run.agent_memory)
         assert 'agent_memory' not in run.model_dump()
@@ -180,7 +263,9 @@ def test_final_failed_submission_is_logged_with_the_invalid_field():
     asyncio.run(scenario())
 
 
-def test_tool_budget_stops_before_thirteenth_tool_execution():
+def test_tool_budget_stops_before_thirteenth_tool_execution(monkeypatch):
+    # Isolate the independent total-tool cap from the new consecutive-no-progress cap.
+    monkeypatch.setenv('AGENT_MAX_NO_PROGRESS','99')
     model = NativeModel([('read_object', {'name': 'loan'})] * 20)
     async def scenario():
         workflow = Workflow(Store(), fake_execute, fake_retrieve, fake_snapshot)
@@ -460,6 +545,8 @@ def test_task_rounds_continue_after_restore_and_reviewer_has_a_separate_role_cou
         ]))
         outcome = await agentic.analyse(workflow, run, '用户补充：不限时间', ontology, {})
         run.plan = outcome.plan
+        from app.planner import compile_plan
+        run.sql=compile_plan(run.plan,ontology)
         workflow.reviewer = ReviewerAgent(NativeModel([
             ('AgentSubmission', {'payload': {'decision': 'approved', 'issues': [], 'rationale': '核验通过'}}),
         ]))
@@ -540,9 +627,12 @@ def test_preflight_repairs_missing_goal_before_user_confirmation():
         run = QueryRun(session_id='demo-session', question='有效贷款余额', ontology=ref)
         corrected = {**PLAN, 'filters': [{'field': 'loan.status', 'operator': 'eq', 'value': 'active'}]}
         analyst = NativeModel([('AgentSubmission', {'payload': PLAN}), ('AgentSubmission', {'payload': corrected})])
+        finding={'kind':'repair','paths':['/filters'],'message':'缺少状态条件','acceptance':'filters包含用户限定的状态'}
+        from app.review_loop import issue_ledger
+        pending_id=issue_ledger(ReviewDecision(decision='revise',rationale='缺少条件',findings=[finding]),[])[0]['id']
         reviewer = NativeModel([
-            ('AgentSubmission', {'payload': {'decision': 'revise', 'issues': ['filters缺少有效状态'], 'rationale': '应落实用户的有效贷款限定'}}),
-            ('AgentSubmission', {'payload': {'decision': 'approved', 'issues': [], 'rationale': '目标和条件完整'}}),
+            ('AgentSubmission', {'payload': {'decision': 'revise', 'issues': ['filters缺少有效状态'], 'rationale': '应落实用户的有效贷款限定','findings':[finding]}}),
+            ('AgentSubmission', {'payload': {'decision': 'approved', 'issues': [], 'rationale': '目标和条件完整','resolutions':[{'finding_id':pending_id,'status':'resolved','rationale':'状态条件已落实'}]}}),
         ])
         workflow.analyst = AnalystAgent(analyst)
         workflow.reviewer = ReviewerAgent(reviewer)
@@ -563,13 +653,14 @@ def test_exhausted_preflight_keeps_internal_feedback_out_of_failure_banner():
         detail = 'INTERNAL_REVIEW: requirement.filters缺少业务条件，完整SQL修订建议' * 20
         workflow.analyst = AnalystAgent(NativeModel([('AgentSubmission', {'payload': PLAN})] * 3))
         workflow.reviewer = ReviewerAgent(NativeModel([('AgentSubmission', {'payload': {
-            'decision': 'revise', 'issues': ['缺少条件'], 'rationale': detail}})] * 3))
+            'decision': 'revise', 'issues': ['缺少条件'], 'rationale': detail,'findings':[{'kind':'repair','paths':['/filters'],'message':'缺少条件','acceptance':'必须补齐条件'}]}})] * 3))
         with pytest.raises(ValueError) as error:
             await agentic.analyse(workflow, run, run.question, ontology, {})
         assert '自动修订未完成' in str(error.value)
         assert 'INTERNAL_REVIEW' not in str(error.value) and len(str(error.value)) < 150
         reviews = [e for e in run.events if e.event == 'plan.preflight.completed']
-        assert len(reviews) == 3 and reviews[-1].data['review']['rationale'] == detail
+        assert len(reviews) == 1 and reviews[-1].data['review']['rationale'] == detail
+        assert any(e.event == 'plan.revision.stalled' for e in run.events)
         assert run.sql is None and run.result is None
     asyncio.run(scenario())
 

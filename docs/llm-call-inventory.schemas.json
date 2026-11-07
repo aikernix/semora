@@ -1,0 +1,776 @@
+{
+  "QueryIntent": {
+    "$defs": {
+      "IntentExistence": {
+        "additionalProperties": false,
+        "description": "Keep subjects with/without related records through a published relation.",
+        "properties": {
+          "relation": {
+            "title": "Relation",
+            "type": "string"
+          },
+          "anchor": {
+            "title": "Anchor",
+            "type": "string"
+          },
+          "present": {
+            "title": "Present",
+            "type": "boolean"
+          },
+          "filters": {
+            "items": {
+              "$ref": "#/$defs/QueryFilter"
+            },
+            "maxItems": 32,
+            "title": "Filters",
+            "type": "array"
+          }
+        },
+        "required": [
+          "relation",
+          "anchor",
+          "present"
+        ],
+        "title": "IntentExistence",
+        "type": "object"
+      },
+      "IntentMeasure": {
+        "additionalProperties": false,
+        "description": "Business aggregate, never an SQL expression or a physical stage.",
+        "properties": {
+          "name": {
+            "maxLength": 64,
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+            "title": "Name",
+            "type": "string"
+          },
+          "label": {
+            "default": "",
+            "title": "Label",
+            "type": "string"
+          },
+          "function": {
+            "enum": [
+              "count",
+              "count_distinct",
+              "sum",
+              "avg",
+              "min",
+              "max"
+            ],
+            "title": "Function",
+            "type": "string"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "function",
+          "field"
+        ],
+        "title": "IntentMeasure",
+        "type": "object"
+      },
+      "IntentSelection": {
+        "additionalProperties": false,
+        "properties": {
+          "object": {
+            "title": "Object",
+            "type": "string"
+          },
+          "unit": {
+            "enum": [
+              "entities",
+              "records"
+            ],
+            "title": "Unit",
+            "type": "string"
+          },
+          "time_field": {
+            "title": "Time Field",
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 1000,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "direction": {
+            "default": "desc",
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "filters": {
+            "items": {
+              "$ref": "#/$defs/QueryFilter"
+            },
+            "maxItems": 32,
+            "title": "Filters",
+            "type": "array"
+          },
+          "relationship_roles": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 16,
+            "title": "Relationship Roles",
+            "type": "array"
+          }
+        },
+        "required": [
+          "object",
+          "unit",
+          "time_field",
+          "limit"
+        ],
+        "title": "IntentSelection",
+        "type": "object"
+      },
+      "QueryFilter": {
+        "properties": {
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "operator": {
+            "enum": [
+              "eq",
+              "ne",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "in",
+              "between",
+              "is_null",
+              "is_not_null"
+            ],
+            "title": "Operator",
+            "type": "string"
+          },
+          "value": {
+            "default": null,
+            "title": "Value"
+          }
+        },
+        "required": [
+          "field",
+          "operator"
+        ],
+        "title": "QueryFilter",
+        "type": "object"
+      },
+      "QueryOrder": {
+        "properties": {
+          "field": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Field",
+            "type": "string"
+          },
+          "direction": {
+            "default": "asc",
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "title": "Direction",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field"
+        ],
+        "title": "QueryOrder",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "description": "Analyst-owned meaning. Physical execution is exclusively program-owned.",
+    "properties": {
+      "version": {
+        "const": "1.0",
+        "default": "1.0",
+        "title": "Version",
+        "type": "string"
+      },
+      "summary": {
+        "maxLength": 1200,
+        "minLength": 1,
+        "title": "Summary",
+        "type": "string"
+      },
+      "subject": {
+        "title": "Subject",
+        "type": "string"
+      },
+      "fields": {
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 32,
+        "title": "Fields",
+        "type": "array"
+      },
+      "group_by": {
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 16,
+        "title": "Group By",
+        "type": "array"
+      },
+      "metrics": {
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 32,
+        "title": "Metrics",
+        "type": "array"
+      },
+      "measures": {
+        "items": {
+          "$ref": "#/$defs/IntentMeasure"
+        },
+        "maxItems": 32,
+        "title": "Measures",
+        "type": "array"
+      },
+      "filters": {
+        "items": {
+          "$ref": "#/$defs/QueryFilter"
+        },
+        "maxItems": 64,
+        "title": "Filters",
+        "type": "array"
+      },
+      "relationship_roles": {
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 16,
+        "title": "Relationship Roles",
+        "type": "array"
+      },
+      "selection": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/IntentSelection"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "existence": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/IntentExistence"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "record_scope": {
+        "default": "selected_records",
+        "enum": [
+          "selected_records",
+          "selection_window",
+          "all_related_records"
+        ],
+        "title": "Record Scope",
+        "type": "string"
+      },
+      "order_by": {
+        "items": {
+          "$ref": "#/$defs/QueryOrder"
+        },
+        "maxItems": 8,
+        "title": "Order By",
+        "type": "array"
+      },
+      "limit": {
+        "anyOf": [
+          {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Limit"
+      },
+      "time_range": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Time Range"
+      },
+      "assumptions": {
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 24,
+        "title": "Assumptions",
+        "type": "array"
+      },
+      "analysis_steps": {
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 16,
+        "title": "Analysis Steps",
+        "type": "array"
+      }
+    },
+    "required": [
+      "summary",
+      "subject"
+    ],
+    "title": "QueryIntent",
+    "type": "object"
+  },
+  "ReviewDecision": {
+    "$defs": {
+      "ReviewFinding": {
+        "properties": {
+          "id": {
+            "default": "",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "default": "repair",
+            "enum": [
+              "repair",
+              "clarification",
+              "capability"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "paths": {
+            "description": "执行方案的JSON Pointer路径，例如/filters或/source_steps/0/query/calculations",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 12,
+            "title": "Paths",
+            "type": "array"
+          },
+          "message": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "evidence": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Evidence",
+            "type": "string"
+          },
+          "acceptance": {
+            "description": "修复后应满足的可核验条件",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Acceptance",
+            "type": "string"
+          },
+          "question": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Question"
+          },
+          "capability_key": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Capability Key"
+          }
+        },
+        "required": [
+          "message",
+          "acceptance"
+        ],
+        "title": "ReviewFinding",
+        "type": "object"
+      },
+      "ReviewResolution": {
+        "properties": {
+          "finding_id": {
+            "title": "Finding Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "resolved",
+              "unresolved"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "rationale": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Rationale",
+            "type": "string"
+          }
+        },
+        "required": [
+          "finding_id",
+          "status",
+          "rationale"
+        ],
+        "title": "ReviewResolution",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "findings": {
+        "items": {
+          "$ref": "#/$defs/ReviewFinding"
+        },
+        "title": "Findings",
+        "type": "array"
+      },
+      "resolutions": {
+        "items": {
+          "$ref": "#/$defs/ReviewResolution"
+        },
+        "title": "Resolutions",
+        "type": "array"
+      },
+      "decision": {
+        "enum": [
+          "approved",
+          "revise",
+          "rejected"
+        ],
+        "title": "Decision",
+        "type": "string"
+      },
+      "issues": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Issues",
+        "type": "array"
+      },
+      "rationale": {
+        "title": "Rationale",
+        "type": "string"
+      },
+      "phase": {
+        "default": "pre_execution",
+        "enum": [
+          "pre_execution",
+          "post_execution"
+        ],
+        "title": "Phase",
+        "type": "string"
+      },
+      "reviewer_mode": {
+        "default": "deterministic",
+        "enum": [
+          "deterministic",
+          "llm"
+        ],
+        "title": "Reviewer Mode",
+        "type": "string"
+      }
+    },
+    "required": [
+      "decision",
+      "rationale"
+    ],
+    "title": "ReviewDecision",
+    "type": "object"
+  },
+  "KnowledgeResearchResult": {
+    "$defs": {
+      "EvidenceRef": {
+        "properties": {
+          "knowledge_base_id": {
+            "title": "Knowledge Base Id",
+            "type": "string"
+          },
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
+          "chunk_id": {
+            "title": "Chunk Id",
+            "type": "string"
+          },
+          "locator": {
+            "title": "Locator",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "knowledge_base_id",
+          "document_id",
+          "chunk_id",
+          "locator",
+          "revision",
+          "title",
+          "summary"
+        ],
+        "title": "EvidenceRef",
+        "type": "object"
+      },
+      "KnowledgeResearchStep": {
+        "properties": {
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "tool": {
+            "default": "",
+            "title": "Tool",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "status": {
+            "default": "completed",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "summary"
+        ],
+        "title": "KnowledgeResearchStep",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "provider": {
+        "title": "Provider",
+        "type": "string"
+      },
+      "agent_id": {
+        "title": "Agent Id",
+        "type": "string"
+      },
+      "session_id": {
+        "title": "Session Id",
+        "type": "string"
+      },
+      "answer": {
+        "default": "",
+        "title": "Answer",
+        "type": "string"
+      },
+      "steps": {
+        "items": {
+          "$ref": "#/$defs/KnowledgeResearchStep"
+        },
+        "title": "Steps",
+        "type": "array"
+      },
+      "evidence": {
+        "items": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "title": "Evidence",
+        "type": "array"
+      }
+    },
+    "required": [
+      "provider",
+      "agent_id",
+      "session_id"
+    ],
+    "title": "KnowledgeResearchResult",
+    "type": "object"
+  },
+  "AgentSubmission": {
+    "$defs": {
+      "BoundedReviewFinding": {
+        "properties": {
+          "id": {
+            "default": "",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "default": "repair",
+            "enum": [
+              "repair",
+              "clarification",
+              "capability"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "paths": {
+            "description": "执行方案的JSON Pointer路径，例如/filters或/source_steps/0/query/calculations",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 12,
+            "title": "Paths",
+            "type": "array"
+          },
+          "message": {
+            "maxLength": 600,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "evidence": {
+            "default": "",
+            "maxLength": 600,
+            "title": "Evidence",
+            "type": "string"
+          },
+          "acceptance": {
+            "maxLength": 600,
+            "minLength": 1,
+            "title": "Acceptance",
+            "type": "string"
+          },
+          "question": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Question"
+          },
+          "capability_key": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Capability Key"
+          }
+        },
+        "required": [
+          "message",
+          "acceptance"
+        ],
+        "title": "BoundedReviewFinding",
+        "type": "object"
+      },
+      "InitialReviewPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "approved",
+              "revise",
+              "rejected"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "issues": {
+            "items": {
+              "maxLength": 300,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "title": "Issues",
+            "type": "array"
+          },
+          "rationale": {
+            "maxLength": 1200,
+            "minLength": 1,
+            "title": "Rationale",
+            "type": "string"
+          },
+          "findings": {
+            "items": {
+              "$ref": "#/$defs/BoundedReviewFinding"
+            },
+            "maxItems": 8,
+            "title": "Findings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "decision",
+          "rationale"
+        ],
+        "title": "InitialReviewPayload",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "payload": {
+        "$ref": "#/$defs/InitialReviewPayload"
+      }
+    },
+    "required": [
+      "payload"
+    ],
+    "title": "AgentSubmission",
+    "type": "object"
+  }
+}

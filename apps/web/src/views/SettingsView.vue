@@ -4,6 +4,7 @@ import { MessagePlugin } from 'tdesign-vue-next'
 import { api, type SystemSettings } from '../api'
 
 const form = ref<SystemSettings>({
+  delivery_mode: 'strict',
   require_plan_confirmation: false,
   approval_mode: 'disabled',
   approve_sensitive_detail: true,
@@ -82,6 +83,7 @@ onMounted(async () => { await Promise.all([load(), loadModel()]) })
       <t-button theme="primary" :loading="saving" :disabled="loading" @click="save">发布配置</t-button>
     </div>
 
+    <section class="panel"><div class="panel-title">答案交付方式</div><t-radio-group v-model="form.delivery_mode"><t-radio value="best_effort">尽力交付：先给实际结果，复核意见供后续调整</t-radio><t-radio value="strict">严格复核：未通过时停止执行</t-radio></t-radio-group></section>
     <section id="model" class="panel model-config">
       <div class="panel-title">基础模型配置 <t-tag :theme="modelStatus.configured ? 'success' : 'warning'" variant="light">{{ modelStatus.configured ? '已配置' : '未配置' }}</t-tag></div>
       <div class="form">

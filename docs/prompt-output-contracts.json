@@ -1,0 +1,1262 @@
+{
+  "prompt_version": "2026-11-07.1",
+  "schemas": {
+    "QueryIntent": {
+      "$defs": {
+        "IntentExistence": {
+          "additionalProperties": false,
+          "description": "Keep subjects with/without related records through a published relation.",
+          "properties": {
+            "relation": {
+              "description": "用于判断有无关联记录的已发布关系name。",
+              "title": "Relation",
+              "type": "string"
+            },
+            "anchor": {
+              "description": "该关系的来源端对象name。",
+              "title": "Anchor",
+              "type": "string"
+            },
+            "present": {
+              "description": "true保留有关联的主体；false保留无关联的主体。按subject唯一标识判断，范围内任一记录匹配即视为存在。",
+              "title": "Present",
+              "type": "boolean"
+            },
+            "filters": {
+              "description": "仅限定待检查的目标关联记录。",
+              "items": {
+                "$ref": "#/$defs/QueryFilter"
+              },
+              "maxItems": 32,
+              "title": "Filters",
+              "type": "array"
+            }
+          },
+          "required": [
+            "relation",
+            "anchor",
+            "present"
+          ],
+          "title": "IntentExistence",
+          "type": "object"
+        },
+        "IntentMeasure": {
+          "additionalProperties": false,
+          "description": "Business aggregate, never an SQL expression or a physical stage.",
+          "properties": {
+            "name": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "title": "Name",
+              "type": "string"
+            },
+            "label": {
+              "default": "",
+              "title": "Label",
+              "type": "string"
+            },
+            "function": {
+              "enum": [
+                "count",
+                "count_distinct",
+                "sum",
+                "avg",
+                "min",
+                "max"
+              ],
+              "title": "Function",
+              "type": "string"
+            },
+            "field": {
+              "description": "用于聚合的完整对象.属性。",
+              "title": "Field",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "function",
+            "field"
+          ],
+          "title": "IntentMeasure",
+          "type": "object"
+        },
+        "IntentSelection": {
+          "additionalProperties": false,
+          "properties": {
+            "object": {
+              "description": "被选取的业务对象类型name；可以与提供时间属性的对象不同。",
+              "title": "Object",
+              "type": "string"
+            },
+            "unit": {
+              "description": "entities按object的唯一标识去重并以每个实体关联时间的MAX/MIN排序；records直接选事件记录，可重复所属实体。",
+              "enum": [
+                "entities",
+                "records"
+              ],
+              "title": "Unit",
+              "type": "string"
+            },
+            "time_field": {
+              "description": "决定先后的对象.时间属性；关联角色用于确定该时间的业务含义。",
+              "title": "Time Field",
+              "type": "string"
+            },
+            "limit": {
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            },
+            "direction": {
+              "default": "desc",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "title": "Direction",
+              "type": "string"
+            },
+            "filters": {
+              "description": "仅用于选取的范围；明确日期用实际起止条件，按已知类型、时区与单位表达。",
+              "items": {
+                "$ref": "#/$defs/QueryFilter"
+              },
+              "maxItems": 32,
+              "title": "Filters",
+              "type": "array"
+            },
+            "relationship_roles": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 16,
+              "title": "Relationship Roles",
+              "type": "array"
+            }
+          },
+          "required": [
+            "object",
+            "unit",
+            "time_field",
+            "limit"
+          ],
+          "title": "IntentSelection",
+          "type": "object"
+        },
+        "QueryFilter": {
+          "properties": {
+            "field": {
+              "title": "Field",
+              "type": "string"
+            },
+            "operator": {
+              "enum": [
+                "eq",
+                "ne",
+                "gt",
+                "gte",
+                "lt",
+                "lte",
+                "in",
+                "between",
+                "is_null",
+                "is_not_null"
+              ],
+              "title": "Operator",
+              "type": "string"
+            },
+            "value": {
+              "default": null,
+              "title": "Value"
+            }
+          },
+          "required": [
+            "field",
+            "operator"
+          ],
+          "title": "QueryFilter",
+          "type": "object"
+        },
+        "QueryOrder": {
+          "properties": {
+            "field": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Field",
+              "type": "string"
+            },
+            "direction": {
+              "default": "asc",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "title": "Direction",
+              "type": "string"
+            }
+          },
+          "required": [
+            "field"
+          ],
+          "title": "QueryOrder",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Analyst-owned meaning. Physical execution is exclusively program-owned.",
+      "properties": {
+        "version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Version",
+          "type": "string"
+        },
+        "summary": {
+          "maxLength": 1200,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "subject": {
+          "description": "本次分析的业务主体对象name。",
+          "title": "Subject",
+          "type": "string"
+        },
+        "fields": {
+          "description": "输出的完整对象.属性；有汇总时只可重复group_by，不加入额外明细。",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Fields",
+          "type": "array"
+        },
+        "group_by": {
+          "description": "最终业务汇总维度，使用完整对象.属性。",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "title": "Group By",
+          "type": "array"
+        },
+        "metrics": {
+          "description": "当前已发布指标name；临时聚合使用measures。",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Metrics",
+          "type": "array"
+        },
+        "measures": {
+          "items": {
+            "$ref": "#/$defs/IntentMeasure"
+          },
+          "maxItems": 32,
+          "title": "Measures",
+          "type": "array"
+        },
+        "filters": {
+          "description": "最终统计范围，日期落实到明确时间属性的起止条件；说明文字不替代筛选。",
+          "items": {
+            "$ref": "#/$defs/QueryFilter"
+          },
+          "maxItems": 64,
+          "title": "Filters",
+          "type": "array"
+        },
+        "relationship_roles": {
+          "description": "当前需求使用的已发布业务关系name；只选择关联角色，不表示有/无关联记录。",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "title": "Relationship Roles",
+          "type": "array"
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IntentSelection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "先选前N个对象或记录，再展示/汇总关联数据时填写；仅对最终结果排序限量时为null。"
+        },
+        "existence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IntentExistence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "record_scope": {
+          "default": "selected_records",
+          "description": "selected_records仅选中的事件记录；selection_window为实体选取后仍限制记录窗口；all_related_records为选中实体的全部关联记录。",
+          "enum": [
+            "selected_records",
+            "selection_window",
+            "all_related_records"
+          ],
+          "title": "Record Scope",
+          "type": "string"
+        },
+        "order_by": {
+          "description": "最终展示顺序，与selection的成员选取顺序独立。",
+          "items": {
+            "$ref": "#/$defs/QueryOrder"
+          },
+          "maxItems": 8,
+          "title": "Order By",
+          "type": "array"
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Limit"
+        },
+        "time_range": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "时间范围说明，不替代filters中的实际条件。",
+          "title": "Time Range"
+        },
+        "assumptions": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 24,
+          "title": "Assumptions",
+          "type": "array"
+        },
+        "analysis_steps": {
+          "description": "简短的可核验结论、依据或待确认项。",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "title": "Analysis Steps",
+          "type": "array"
+        }
+      },
+      "required": [
+        "summary",
+        "subject"
+      ],
+      "title": "QueryIntent",
+      "type": "object"
+    },
+    "ClarificationQuestion": {
+      "$defs": {
+        "ClarificationOption": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "value": {
+              "title": "Value",
+              "type": "string"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "value"
+          ],
+          "title": "ClarificationOption",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "field": {
+          "title": "Field",
+          "type": "string"
+        },
+        "question": {
+          "description": "面向业务用户的具体问题。",
+          "title": "Question",
+          "type": "string"
+        },
+        "reason": {
+          "description": "该选择会影响什么结果。",
+          "title": "Reason",
+          "type": "string"
+        },
+        "options": {
+          "description": "可选业务解释，同时允许用户自由补充。",
+          "items": {
+            "$ref": "#/$defs/ClarificationOption"
+          },
+          "title": "Options",
+          "type": "array"
+        },
+        "allow_free_text": {
+          "default": true,
+          "title": "Allow Free Text",
+          "type": "boolean"
+        },
+        "blocking": {
+          "default": true,
+          "title": "Blocking",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "field",
+        "question",
+        "reason"
+      ],
+      "title": "ClarificationQuestion",
+      "type": "object"
+    },
+    "CompactDelivery": {
+      "$defs": {
+        "ClarificationOption": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "value": {
+              "title": "Value",
+              "type": "string"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "value"
+          ],
+          "title": "ClarificationOption",
+          "type": "object"
+        },
+        "ClarificationQuestion": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "field": {
+              "title": "Field",
+              "type": "string"
+            },
+            "question": {
+              "description": "面向业务用户的具体问题。",
+              "title": "Question",
+              "type": "string"
+            },
+            "reason": {
+              "description": "该选择会影响什么结果。",
+              "title": "Reason",
+              "type": "string"
+            },
+            "options": {
+              "description": "可选业务解释，同时允许用户自由补充。",
+              "items": {
+                "$ref": "#/$defs/ClarificationOption"
+              },
+              "title": "Options",
+              "type": "array"
+            },
+            "allow_free_text": {
+              "default": true,
+              "title": "Allow Free Text",
+              "type": "boolean"
+            },
+            "blocking": {
+              "default": true,
+              "title": "Blocking",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "field",
+            "question",
+            "reason"
+          ],
+          "title": "ClarificationQuestion",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "candidate_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "已校验候选引用；采用候选时仅填此字段。",
+          "title": "Candidate Id"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
+        },
+        "clarifications": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ClarificationQuestion"
+              },
+              "maxItems": 3,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "影响当前结果且尚未确定的业务问题。",
+          "title": "Clarifications"
+        },
+        "blocked_reason": {
+          "anyOf": [
+            {
+              "maxLength": 1000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Blocked Reason"
+        }
+      },
+      "title": "CompactDelivery",
+      "type": "object"
+    },
+    "InitialReviewPayload": {
+      "$defs": {
+        "BoundedReviewFinding": {
+          "properties": {
+            "id": {
+              "default": "",
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "default": "repair",
+              "description": "repair为可修复遗漏/错误；clarification为需用户决定的业务含义；capability为已知执行能力缺口。",
+              "enum": [
+                "repair",
+                "clarification",
+                "capability"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "paths": {
+              "description": "问题对应的JSON Pointer。业务声明遗漏定位/query_intent/下字段；声明正确但编译产物错误定位执行计划字段。",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 12,
+              "title": "Paths",
+              "type": "array"
+            },
+            "message": {
+              "description": "影响结果的具体问题。",
+              "maxLength": 600,
+              "minLength": 1,
+              "title": "Message",
+              "type": "string"
+            },
+            "evidence": {
+              "default": "",
+              "description": "当前资料或产物中的可核验依据。",
+              "maxLength": 600,
+              "title": "Evidence",
+              "type": "string"
+            },
+            "acceptance": {
+              "description": "问题解决后应满足的具体条件。",
+              "maxLength": 600,
+              "minLength": 1,
+              "title": "Acceptance",
+              "type": "string"
+            },
+            "question": {
+              "anyOf": [
+                {
+                  "maxLength": 1000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Question"
+            },
+            "capability_key": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Capability Key"
+            }
+          },
+          "required": [
+            "message",
+            "acceptance"
+          ],
+          "title": "BoundedReviewFinding",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "decision": {
+          "description": "一致且无实质问题为approved；可修复为revise；不允许的操作为rejected。",
+          "enum": [
+            "approved",
+            "revise",
+            "rejected"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "issues": {
+          "description": "问题摘要字符串数组；具体问题对象写findings。",
+          "items": {
+            "maxLength": 300,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Issues",
+          "type": "array"
+        },
+        "rationale": {
+          "maxLength": 1200,
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "findings": {
+          "description": "具体问题对象放在此数组，包含位置、依据和验收条件；无问题为[]。",
+          "items": {
+            "$ref": "#/$defs/BoundedReviewFinding"
+          },
+          "maxItems": 8,
+          "title": "Findings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "decision",
+        "rationale"
+      ],
+      "title": "InitialReviewPayload",
+      "type": "object"
+    },
+    "ReviewPayload": {
+      "$defs": {
+        "BoundedReviewFinding": {
+          "properties": {
+            "id": {
+              "default": "",
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "default": "repair",
+              "description": "repair为可修复遗漏/错误；clarification为需用户决定的业务含义；capability为已知执行能力缺口。",
+              "enum": [
+                "repair",
+                "clarification",
+                "capability"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "paths": {
+              "description": "问题对应的JSON Pointer。业务声明遗漏定位/query_intent/下字段；声明正确但编译产物错误定位执行计划字段。",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 12,
+              "title": "Paths",
+              "type": "array"
+            },
+            "message": {
+              "description": "影响结果的具体问题。",
+              "maxLength": 600,
+              "minLength": 1,
+              "title": "Message",
+              "type": "string"
+            },
+            "evidence": {
+              "default": "",
+              "description": "当前资料或产物中的可核验依据。",
+              "maxLength": 600,
+              "title": "Evidence",
+              "type": "string"
+            },
+            "acceptance": {
+              "description": "问题解决后应满足的具体条件。",
+              "maxLength": 600,
+              "minLength": 1,
+              "title": "Acceptance",
+              "type": "string"
+            },
+            "question": {
+              "anyOf": [
+                {
+                  "maxLength": 1000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Question"
+            },
+            "capability_key": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Capability Key"
+            }
+          },
+          "required": [
+            "message",
+            "acceptance"
+          ],
+          "title": "BoundedReviewFinding",
+          "type": "object"
+        },
+        "ReviewResolution": {
+          "properties": {
+            "finding_id": {
+              "title": "Finding Id",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "resolved",
+                "unresolved"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "rationale": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "title": "Rationale",
+              "type": "string"
+            }
+          },
+          "required": [
+            "finding_id",
+            "status",
+            "rationale"
+          ],
+          "title": "ReviewResolution",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "findings": {
+          "description": "具体问题对象放在此数组，包含位置、依据和验收条件；无问题为[]。",
+          "items": {
+            "$ref": "#/$defs/BoundedReviewFinding"
+          },
+          "maxItems": 8,
+          "title": "Findings",
+          "type": "array"
+        },
+        "resolutions": {
+          "items": {
+            "$ref": "#/$defs/ReviewResolution"
+          },
+          "maxItems": 24,
+          "title": "Resolutions",
+          "type": "array"
+        },
+        "decision": {
+          "description": "一致且无实质问题为approved；可修复为revise；不允许的操作为rejected。",
+          "enum": [
+            "approved",
+            "revise",
+            "rejected"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "issues": {
+          "description": "问题摘要字符串数组；具体问题对象写findings。",
+          "items": {
+            "maxLength": 300,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Issues",
+          "type": "array"
+        },
+        "rationale": {
+          "maxLength": 1200,
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        }
+      },
+      "required": [
+        "decision",
+        "rationale"
+      ],
+      "title": "ReviewPayload",
+      "type": "object"
+    },
+    "SQLExplanation": {
+      "properties": {
+        "explanation": {
+          "minLength": 1,
+          "title": "Explanation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "explanation"
+      ],
+      "title": "SQLExplanation",
+      "type": "object"
+    },
+    "AnswerExplanation": {
+      "properties": {
+        "answer": {
+          "minLength": 1,
+          "title": "Answer",
+          "type": "string"
+        }
+      },
+      "required": [
+        "answer"
+      ],
+      "title": "AnswerExplanation",
+      "type": "object"
+    },
+    "CandidateBatch": {
+      "$defs": {
+        "CandidateProposal": {
+          "properties": {
+            "term": {
+              "minLength": 1,
+              "title": "Term",
+              "type": "string"
+            },
+            "proposal": {
+              "minLength": 1,
+              "title": "Proposal",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "definition",
+                "metric",
+                "object",
+                "property",
+                "relation"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "patch": {
+              "additionalProperties": true,
+              "description": "definition为空；metric包含name、label、expression、grain、dimensions、format，引用当前对象属性；其他映射须原文明确支持。",
+              "title": "Patch",
+              "type": "object"
+            },
+            "evidence_chunk_id": {
+              "description": "支撑候选的给定分块id。",
+              "title": "Evidence Chunk Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "term",
+            "proposal",
+            "kind",
+            "patch",
+            "evidence_chunk_id"
+          ],
+          "title": "CandidateProposal",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/CandidateProposal"
+          },
+          "title": "Candidates",
+          "type": "array"
+        }
+      },
+      "required": [
+        "candidates"
+      ],
+      "title": "CandidateBatch",
+      "type": "object"
+    },
+    "KnowledgeAction": {
+      "properties": {
+        "action": {
+          "enum": [
+            "wiki_search",
+            "wiki_read_page",
+            "read_source",
+            "finish"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "kb_id": {
+          "default": "",
+          "description": "给定知识库准确ID；仅一个库时可省略。",
+          "title": "Kb Id",
+          "type": "string"
+        },
+        "query": {
+          "default": "",
+          "description": "搜索动作的一个短关键词或别名。",
+          "title": "Query",
+          "type": "string"
+        },
+        "slug": {
+          "default": "",
+          "description": "观察中已发现的页面标识。",
+          "title": "Slug",
+          "type": "string"
+        },
+        "document_id": {
+          "default": "",
+          "description": "已读内容引用的原文标识。",
+          "title": "Document Id",
+          "type": "string"
+        },
+        "page": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Page",
+          "type": "integer"
+        },
+        "summary": {
+          "default": "",
+          "description": "finish时提交已取得事实、冲突与未知项。",
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "title": "KnowledgeAction",
+      "type": "object"
+    },
+    "ContextSelection": {
+      "additionalProperties": false,
+      "properties": {
+        "objects": {
+          "description": "当前目录中完成需求必需的准确对象name。",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Objects",
+          "type": "array"
+        },
+        "knowledge_keywords": {
+          "description": "需要补充的业务知识主题，每项一个短关键词。",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 2,
+          "title": "Knowledge Keywords",
+          "type": "array"
+        }
+      },
+      "title": "ContextSelection",
+      "type": "object"
+    },
+    "InformationAssessment": {
+      "$defs": {
+        "ClarificationOption": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "value": {
+              "title": "Value",
+              "type": "string"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "value"
+          ],
+          "title": "ClarificationOption",
+          "type": "object"
+        },
+        "ClarificationQuestion": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "field": {
+              "title": "Field",
+              "type": "string"
+            },
+            "question": {
+              "description": "面向业务用户的具体问题。",
+              "title": "Question",
+              "type": "string"
+            },
+            "reason": {
+              "description": "该选择会影响什么结果。",
+              "title": "Reason",
+              "type": "string"
+            },
+            "options": {
+              "description": "可选业务解释，同时允许用户自由补充。",
+              "items": {
+                "$ref": "#/$defs/ClarificationOption"
+              },
+              "title": "Options",
+              "type": "array"
+            },
+            "allow_free_text": {
+              "default": true,
+              "title": "Allow Free Text",
+              "type": "boolean"
+            },
+            "blocking": {
+              "default": true,
+              "title": "Blocking",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "field",
+            "question",
+            "reason"
+          ],
+          "title": "ClarificationQuestion",
+          "type": "object"
+        },
+        "EntitySelection": {
+          "additionalProperties": false,
+          "properties": {
+            "entity_field": {
+              "minLength": 1,
+              "title": "Entity Field",
+              "type": "string"
+            },
+            "time_field": {
+              "minLength": 1,
+              "title": "Time Field",
+              "type": "string"
+            },
+            "limit": {
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            },
+            "direction": {
+              "default": "desc",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "title": "Direction",
+              "type": "string"
+            },
+            "mode": {
+              "default": "entities",
+              "enum": [
+                "entities",
+                "records"
+              ],
+              "title": "Mode",
+              "type": "string"
+            }
+          },
+          "required": [
+            "entity_field",
+            "time_field",
+            "limit"
+          ],
+          "title": "EntitySelection",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "sufficient",
+            "ambiguous",
+            "missing_core"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "clarifications": {
+          "items": {
+            "$ref": "#/$defs/ClarificationQuestion"
+          },
+          "maxItems": 3,
+          "title": "Clarifications",
+          "type": "array"
+        },
+        "missing_objects": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4,
+          "title": "Missing Objects",
+          "type": "array"
+        },
+        "purpose": {
+          "anyOf": [
+            {
+              "enum": [
+                "output",
+                "filter",
+                "time",
+                "join",
+                "aggregation",
+                "sort"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Purpose"
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntitySelection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "status",
+        "reason"
+      ],
+      "title": "InformationAssessment",
+      "type": "object"
+    }
+  }
+}

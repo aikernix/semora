@@ -14,7 +14,12 @@ type Property struct {
 	Nullable  bool     `json:"nullable,omitempty"`
 }
 
+type ObjectProjection struct {
+    Distinct bool `json:"distinct"`
+}
+
 type ObjectClass struct {
+    Projection *ObjectProjection `json:"projection,omitempty"`
     DataSourceID string `json:"dataSourceId,omitempty"`
     Metadata map[string]any `json:"metadata,omitempty"`
 	Name       string     `json:"name"`

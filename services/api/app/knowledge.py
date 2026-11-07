@@ -1,4 +1,7 @@
 from __future__ import annotations
+from semora_agent.prompts import KNOWLEDGE_RESEARCH, EVIDENCE
+from .model_outputs import KnowledgeAction, knowledge_action_schema
+from pydantic import ValidationError
 
 import json
 import os
@@ -381,6 +384,9 @@ class WeKnoraClient:
 
     async def research(self, query: str, kb_ids: list[str] | None = None) -> KnowledgeResearchResult:
         from semora_agent.model import structured_model
+        from semora_agent.progress import ProgressBudget,NoProgressError
+        from semora_agent.model import NoDeliveryError
+        from types import SimpleNamespace
         if not structured_model.configured:
             if structured_model.required:
                 raise KnowledgeCoreError('请先配置大模型，才能执行知识研究')
@@ -396,20 +402,40 @@ class WeKnoraClient:
         visited=set()
         answer=''
         scope_errors=0
+        budget=ProgressBudget(lambda *args:None)
+        def model_event(name,data):
+            if name=='agent.request.started':budget.state['http_attempts']+=1
+            if name in {'agent.request.timeout','agent.request.failed'}:budget.fail(data.get('timeout_kind') or 'model_request_failed')
+        def record_progress(name,value):
+            budget.pending=[{'name':name,'id':'knowledge-observation'}]
+            try:
+                budget.consume([SimpleNamespace(type='tool',tool_call_id='knowledge-observation',content=json.dumps(value),status='success')])
+                return True
+            except NoProgressError:return False
         for iteration in range(8):
-            decision=await structured_model.complete_json(
-                '''你是通用业务知识研究员。根据问题和已有观察决定下一步，只输出 JSON。
-不预设行业或业务口径，只使用用户问题、绑定知识库和实际检索内容，不引入其他业务域的默认定义。
-action 可选 wiki_search/wiki_read_page/read_source/finish；参数 kb_id、query、slug、document_id、page。
-先用关键词检索入口，再按证据缺口阅读全文、沿关联slug展开，重要口径回溯原始文档。知识库是可选辅助，找不到则finish并说明未命中，不能凭记忆编造来源。
-wiki_search 每次只传一个来自当前问题或观察的短关键词；不能用空格拼接多个业务主题作为一次查询。收到结果后再决定下次调用；零命中换短词/别名继续，命中后先阅读相关页。
-只有一个绑定知识库时可省略 kb_id；存在多个库时必须从给定kb_ids中选择准确ID，不能使用库名称、占位符或编造ID。观察中的参数错误需要修正后再调用。
-只允许使用给定kb_id和观察中实际出现的slug、document_id。finish时输出 summary，明确来源事实、冲突、未知项。不要输出隐藏思维链。最多8步，合理结束。''',
-                json.dumps({'question':query,'kb_ids':selected_ids,'observations':observations,'remaining_steps':8-iteration},ensure_ascii=False),
-            )
+            try:
+                decision=await structured_model.complete_json(
+                KNOWLEDGE_RESEARCH+'\n'+EVIDENCE,
+                json.dumps({'question':query,'kb_ids':selected_ids,'observations':observations,'remaining_steps':8-iteration,
+                    'no_progress_streak':budget.state['streak'],'must_finish':budget.must_deliver,
+                    'action_contract':knowledge_action_schema(must_finish=budget.must_deliver)},ensure_ascii=False),
+                on_request_event=model_event)
+            except (NoProgressError,NoDeliveryError) as exc:
+                raise KnowledgeCoreError(getattr(exc,'public_message',str(exc))) from exc
+            try:
+                decision=KnowledgeAction.model_validate(decision).model_dump()
+            except ValidationError as exc:
+                observations.append({'error':'invalid_action_contract','details':exc.errors(include_input=False,include_url=False)})
+                if not record_progress('invalid_action_contract',{'valid':False}):
+                    break
+                continue
             action=decision.get('action')
             if action=='finish':
                 answer=str(decision.get('summary') or '')
+                break
+            if budget.must_deliver:
+                answer='连续尝试未取得新证据，已停止知识研究；保留已有证据，未知业务口径由需求分析阶段向用户澄清。'
+                steps.append(KnowledgeResearchStep(kind='validation',tool='progress_budget',status='stopped',summary=answer))
                 break
             kb_id=str(decision.get('kb_id') or '').strip()
             if not kb_id and len(selected_ids)==1:
@@ -420,6 +446,7 @@ wiki_search 每次只传一个来自当前问题或观察的短关键词；不�
                     raise KnowledgeCoreError('模型连续3次提交无效知识库ID，未访问未选择的知识库；请选择准确的知识库后重试')
                 observations.append({'action':action,'error':'invalid_knowledge_base','allowed_kb_ids':selected_ids,'message':'kb_id缺失或不在当前选择范围，请使用allowed_kb_ids中的准确ID重新调用。未访问其他知识库。'})
                 steps.append(KnowledgeResearchStep(kind='validation',tool=action,summary='知识库参数无效，已拦截并要求模型修正，未访问其他知识库'))
+                record_progress(action,{'valid':False})
                 continue
             scope_errors=0
             if action=='wiki_search':
@@ -428,6 +455,7 @@ wiki_search 每次只传一个来自当前问题或观察的短关键词；不�
                 if not term or len(term)>64 or len(terms)!=1 or re.search(r'[\s,，、;；|]',term):
                     observations.append({'action':action,'error':'single_keyword_required','suggested_keywords':terms[:6],'message':'一次只允许一个短关键词，请选一个词重新调用；本次没有发出检索请求。'})
                     steps.append(KnowledgeResearchStep(kind='validation',tool=action,summary='多词或无效检索表达式已拦截，要求模型逐词检索'))
+                    record_progress(action,{'valid':False})
                     continue
                 rows=await self._wiki_search(kb_id,re.escape(term))
                 for row in rows:
@@ -439,6 +467,7 @@ wiki_search 每次只传一个来自当前问题或观察的短关键词；不�
                 if (kb_id,slug) not in allowed_pages: raise KnowledgeCoreError('模型请求了未经检索发现的 Wiki 页面')
                 if (kb_id,slug) in visited:
                     observations.append({'action':action,'message':'该页已阅读，请继续研究其他缺口或结束'})
+                    record_progress(action,{'unchanged':True})
                     continue
                 visited.add((kb_id,slug))
                 page=await self._wiki_page(kb_id,slug)
@@ -461,6 +490,11 @@ wiki_search 每次只传一个来自当前问题或观察的短关键词；不�
                 raise KnowledgeCoreError('模型返回了不支持的知识研究操作')
             observations.append(observation)
             steps.append(KnowledgeResearchStep(kind='tool_result',tool=action,summary=summary))
+            progress_name={'wiki_search':'search_wiki','wiki_read_page':'read_wiki','read_source':'read_source'}[action]
+            progress_value={'pages':observation.get('pages',[])} if action=='wiki_search' else {'page':observation} if action=='wiki_read_page' else {'chunks':observation.get('chunks',[])}
+            if not record_progress(progress_name,progress_value):
+                answer='连续尝试未取得新证据，已停止知识研究；保留已有证据供需求分析使用。'
+                break
         evidence=[self._page_evidence(kb,page) for kb,page in pages]
         steps.append(KnowledgeResearchStep(kind='completed',summary=f'研究完成，{len(evidence)} 条辅助证据；未获得证据时继续需求分析'))
         return KnowledgeResearchResult(provider=self.provider,agent_id='semora-llm-wiki-researcher',session_id='',answer=answer or '已完成受限知识研究，请结合证据继续分析需求。',steps=steps,evidence=evidence)

@@ -38,19 +38,36 @@ func projectWren(ontology Ontology) (map[string]any, []ValidationIssue) {
     equality := regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*$`)
     for index, relation := range ontology.Relations {
         if objectSource(objects[relation.From], ontology) == objectSource(objects[relation.To], ontology) { continue }
-        match := equality.FindStringSubmatch(relation.Condition)
-        valid := len(match) == 5
-        if valid {
-            valid = (match[1] == relation.From && match[3] == relation.To) || (match[1] == relation.To && match[3] == relation.From)
+        terms := regexp.MustCompile(`(?i)\s+AND\s+`).Split(strings.TrimSpace(relation.Condition), -1)
+        valid := len(terms) > 0 && len(terms) <= 16
+        seen := map[string]bool{}
+        for _, term := range terms {
+            match := equality.FindStringSubmatch(term)
+            if len(match) != 5 { valid = false; continue }
+            valid = valid && ((match[1] == relation.From && match[3] == relation.To) || (match[1] == relation.To && match[3] == relation.From))
+            families := []string{}
+            normalized := []string{}
             for _, pair := range [][2]string{{match[1], match[2]}, {match[3], match[4]}} {
                 found := false
                 for _, property := range objects[pair[0]].Properties {
-                    if pair[1] == property.Name || pair[1] == property.Column { found = true }
+                    if pair[1] == property.Name || pair[1] == property.Column {
+                        found = true
+                        family := crossKeyFamily(property.Type)
+                        families = append(families, family)
+                        normalized = append(normalized, pair[0] + "." + property.Column)
+                    }
                 }
                 valid = valid && found
             }
+            if len(families) != 2 || families[0] == "" || families[0] != families[1] { valid = false }
+            if len(normalized) == 2 {
+                key := normalized[0] + "=" + normalized[1]
+                reverse := normalized[1] + "=" + normalized[0]
+                if seen[key] || seen[reverse] { valid = false }
+                seen[key] = true
+            }
         }
-        if !valid { issues = append(issues, ValidationIssue{fmt.Sprintf("relations[%d]", index), "跨源关系必须使用两个对象已发布属性的单键等值条件"}) }
+        if !valid { issues = append(issues, ValidationIssue{fmt.Sprintf("relations[%d]", index), "跨源关系必须是类型兼容的已发布属性等值映射，复合键使用AND连接且不能重复"}) }
         edges = append(edges, relation)
     }
     for index, metric := range ontology.Metrics {
@@ -93,4 +110,13 @@ func projectWren(ontology Ontology) (map[string]any, []ValidationIssue) {
         projects[source] = project
     }
     return map[string]any{"sourceProjects": projects, "crossSourceRelations": edges, "execution": "sequential_sources"}, issues
+}
+
+func crossKeyFamily(value string) string {
+    switch strings.ToLower(strings.SplitN(value, "(", 2)[0]) {
+    case "string", "text", "varchar", "char", "varchar2": return "text"
+    case "int", "integer", "bigint", "smallint": return "integer"
+    case "decimal", "numeric", "number", "float", "double": return "number"
+    }
+    return ""
 }

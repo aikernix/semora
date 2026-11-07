@@ -16,6 +16,7 @@ class AgentState(TypedDict, total=False):
     initial_clarification: dict[str, Any]
     needs_revision: bool
     internal_repair: bool
+    task_superseded: bool
 
 
 AsyncNode = Callable[[AgentState], Awaitable[dict[str, Any]]]
@@ -52,8 +53,11 @@ def build_query_graph(
     graph.add_conditional_edges("retrieve", route_after_step, {"continue": "analyse", "end": END})
     graph.add_conditional_edges("analyse", route_after_step, {"continue": "align", "end": END})
     graph.add_conditional_edges("align", route_after_step, {"continue": "compile", "end": END})
-    graph.add_conditional_edges("compile", route_after_step, {"continue": "gate_and_review", "end": END})
     if revise is not None:
+        def after_compile(state):
+            if route_after_step(state)=='end':return 'end'
+            return 'revise' if state.get('needs_revision') else 'continue'
+        graph.add_conditional_edges('compile',after_compile,{'continue':'gate_and_review','revise':'revise','end':END})
         def after_review(state):
             if route_after_step(state) == 'end':
                 return 'end'
@@ -65,6 +69,7 @@ def build_query_graph(
             return 'compile' if state.get('internal_repair') else 'align'
         graph.add_conditional_edges('revise', after_revision, {'compile': 'compile', 'align': 'align', 'end': END})
     else:
+        graph.add_conditional_edges('compile',route_after_step,{'continue':'gate_and_review','end':END})
         graph.add_conditional_edges("gate_and_review", route_after_step, {"continue": "approval", "end": END})
     graph.add_conditional_edges("approval", route_after_step, {"continue": "execute", "end": END})
     graph.add_conditional_edges("execute", route_after_step, {"continue": "explain", "end": END})
