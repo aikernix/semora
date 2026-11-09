@@ -64,15 +64,15 @@ class OntologyCoreClient:
     async def publish(self, domain: str) -> dict[str, Any]:
         return await self._request("POST", "/api/v1/ontology/publish", json={"domain": domain})
 
-    async def latest_snapshot(self, domain: str = "retail_credit") -> OntologySnapshotRef:
+    async def latest_snapshot(self, domain: str) -> OntologySnapshotRef:
         reference, _ = await self.latest_snapshot_bundle(domain)
         return reference
 
-    async def latest_snapshot_bundle(self, domain: str = "retail_credit") -> tuple[OntologySnapshotRef, dict[str, Any]]:
+    async def latest_snapshot_bundle(self, domain: str) -> tuple[OntologySnapshotRef, dict[str, Any]]:
+        if not domain:
+            raise OntologyCoreError('请先选择业务域，不能读取未指定业务域的本体')
         value = await self._request("GET", "/api/v1/ontology/snapshots/latest", params={"domain": domain})
         ontology = self._normalize_collections(value["ontology"])
-        ontology["_wrenArtifact"] = value.get("wrenArtifact")
-        ontology["_wrenArtifactVersion"] = value.get("artifactVersion")
         reference = OntologySnapshotRef(
             domain=value["domain"],
             version=value["version"],

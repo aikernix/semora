@@ -1,12 +1,11 @@
 from __future__ import annotations
-from .prompts import FINAL_DELIVERY, SCHEMA_RETRY, COMPACT_REVIEW
+from .prompts import FINAL_DELIVERY, SCHEMA_RETRY, COMPACT_OUTPUT
 
 import asyncio
 import json
 import os
 from collections.abc import Callable
 from typing import Any
-from uuid import uuid4
 
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
@@ -15,7 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage, messages_from_dict,
 from langchain_core.messages.utils import convert_to_openai_messages
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.utils.function_calling import convert_to_openai_tool
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError
 
 from .model import ModelError, PlanValidationError
 from .context_budget import prepare_context,ContextBudgetError
@@ -25,16 +24,14 @@ from .tool_protocol import parse_calls,tool_name,ToolProtocolError
 
 
 class AgentSubmission(BaseModel):
-    """Deliver the final public analysis or review; never include hidden reasoning."""
+    """Deliver the final public analysis; never include hidden reasoning."""
 
-    payload: dict[str, Any] = Field(description='结构化需求分析或复核决定，必须满足任务约定')
+    payload: dict[str, Any] = Field(description='结构化分析结果，必须满足当前输出契约')
 
 
 class ToolCallingModel(BaseChatModel):
     """Adapt the existing configured provider without another SDK or credentials store."""
 
-    _canonical_delivery: Any = PrivateAttr(default=None)
-    _tool_policy: Any = PrivateAttr(default=None)
     _client: Any = PrivateAttr()
     _event: Callable = PrivateAttr()
     _models: int = PrivateAttr(default=0)
@@ -47,8 +44,9 @@ class ToolCallingModel(BaseChatModel):
     _protocol_repairs: int = PrivateAttr(default=0)
     _progress: Any = PrivateAttr(default=None)
     _bounded_protocol: bool = PrivateAttr(default=False)
+    _track_progress: bool = PrivateAttr(default=False)
+    _submission_repairs: int = PrivateAttr(default=0)
     _task_guard: Any = PrivateAttr(default=None)
-    _context_limit: Any = PrivateAttr(default=None)
 
     def __init__(self, client, event: Callable, max_models=16, max_tools=12):
         super().__init__()
@@ -69,22 +67,16 @@ class ToolCallingModel(BaseChatModel):
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
         if self._task_guard:self._task_guard()
-        if self._bounded_protocol:
+        if self._bounded_protocol and not self._track_progress:
             # This controller permits only bounded preparation/validation;
             # repeated metadata is not a semantic failure signal here.
             self._progress.pending=None
         else:self._progress.consume(messages)
         self._progress.check()
-        delivery = self._canonical_delivery(messages) if self._canonical_delivery else None
-        if delivery is not None:
-            summary=('程序确认当前能力或配置缺口，停止模型循环；未执行查询' if delivery.get('blocked_reason')
-                     else '程序交付已校验候选ID，继续最终重验与独立复核；未调用模型重新抄写方案')
-            self._event('agent.delivery.canonical', {'summary': summary, 'source': 'deterministic_service'})
-            return ChatResult(generations=[ChatGeneration(message=AIMessage(content='', tool_calls=[{'name':'AgentSubmission','args':{'payload':delivery},'id':'canonical_'+uuid4().hex,'type':'tool_call'}]))])
         if self._models >= self._max_models:
             reason='最后一次交付未满足结构化协议，尚无有效结果'
             for message in reversed(messages):
-                if getattr(message,'type',None)=='tool' and getattr(message,'name',None) in {'AgentSubmission','validate_plan','patch_plan'}:
+                if getattr(message,'type',None)=='tool' and getattr(message,'name',None) in {'AgentSubmission'}:
                     reason=str(message.content)[:1000];break
             raise PlanValidationError(f'当前阶段已完成 {self._max_models} 次模型调用，停止继续循环；未解决问题：{reason}')
         self._models += 1
@@ -95,16 +87,16 @@ class ToolCallingModel(BaseChatModel):
         if self._force_submission or self._models >= self._max_models or self._tools >= self._max_tools:
             choice = {'type': 'function', 'function': {'name': 'AgentSubmission'}}
             self._force_submission = False
-        request_tools = self._tool_policy(kwargs.get('tools', [])) if self._tool_policy else kwargs.get('tools', [])
+        request_tools = kwargs.get('tools', [])
         if self._bounded_protocol and self._models>=self._max_models:
             request_tools=[t for t in request_tools if t['function']['name']=='AgentSubmission']
             messages=[*messages,HumanMessage(content=FINAL_DELIVERY)]
-        if self._progress.must_deliver and not self._bounded_protocol:
+        if self._progress.must_deliver and (not self._bounded_protocol or self._track_progress):
             request_tools=[t for t in request_tools if t['function']['name']=='AgentSubmission']
             choice={'type':'function','function':{'name':'AgentSubmission'}}
             messages=[*messages,HumanMessage(content=FINAL_DELIVERY)]
         try:
-            request_messages, context_stats = prepare_context(convert_to_openai_messages(messages), request_tools,self._context_limit)
+            request_messages, context_stats = prepare_context(convert_to_openai_messages(messages), request_tools)
         except ContextBudgetError as exc:
             self._event('agent.context.exceeded',{**exc.stats,'summary':'请求超过上下文预算，尚未发起模型HTTP请求'})
             raise
@@ -119,7 +111,7 @@ class ToolCallingModel(BaseChatModel):
             self._output_repairs += 1
             self._force_submission = True
             self._event('agent.delivery.repair', {'failure_kind':'public_output_limit','summary':'复核交付超限，丢弃未终止内容；仅允许一次精简交付，仍须完整校验'})
-            return await self._agenerate(messages+[HumanMessage(content=COMPACT_REVIEW)],stop,run_manager,**kwargs)
+            return await self._agenerate(messages+[HumanMessage(content=COMPACT_OUTPUT)],stop,run_manager,**kwargs)
         proposed = raw.get('tool_calls') or []
         if isinstance(proposed,list) and len(proposed) > 1:
             # Some compatible providers ignore parallel_tool_calls=False.
@@ -159,19 +151,38 @@ class ToolCallingModel(BaseChatModel):
 async def run_agent(client, system: str, context: dict, tools: list, memory: list,
                     event: Callable, validate: Callable | None = None,
                     submission_schema: type[AgentSubmission] = AgentSubmission,
-                    max_models: int = 16, max_tools: int = 12, tool_policy=None, canonical_delivery=None, max_tool_argument_chars=None, progress_state=None, bounded_protocol=False, task_guard=None) -> tuple[dict, list]:
+                    max_models: int = 16, max_tools: int = 12, max_tool_argument_chars=None, progress_state=None, bounded_protocol=False, task_guard=None, track_progress=False) -> tuple[dict, list]:
     model = ToolCallingModel(client, event, max_models, max_tools)
-    model._tool_policy = tool_policy
-    model._canonical_delivery = canonical_delivery
     model._argument_limit = max_tool_argument_chars
     model._progress=ProgressBudget(lambda n,d:model._event(n,d),progress_state)
     model._bounded_protocol=bounded_protocol
+    model._track_progress=track_progress
     model._task_guard=task_guard
-    model._context_limit=(context.get('task_contract') or {}).get('max_request_bytes')
     # The outer workflow owns durable checkpoints. Keep the transient tool
     # graph isolated; only JSON-safe, provider-filtered messages go into Run.
+    def repair_submission(error):
+        # Format repair is distinct from exploratory progress. A first schema
+        # error must not exhaust a budget previously spent on empty lookups.
+        model._progress.pending = None
+        model._submission_repairs += 1
+        cause = getattr(error, 'source', error)
+        seen = set()
+        while not isinstance(cause, ValidationError) and id(cause) not in seen:
+            seen.add(id(cause))
+            nested = getattr(cause, '__cause__', None) or getattr(cause, '__context__', None)
+            if nested is None: break
+            cause = nested
+        errors = [{'path': '.'.join(map(str, e['loc'])), 'type': e['type'], 'message': e['msg']}
+                  for e in cause.errors(include_input=False, include_url=False)][:12] if isinstance(cause, ValidationError) else [
+                      {'path': 'payload', 'type': type(cause).__name__, 'message': '结构化交付不满足输出契约'}]
+        model._event('agent.submission.invalid', {'summary': '结构化交付格式未通过，正在按具体字段补正',
+            'errors': errors, 'repair_attempt': model._submission_repairs})
+        if model._submission_repairs > 2 or model._models >= model._max_models:
+            raise PlanValidationError('结构化交付格式补正仍未完成：'+'；'.join(e['path']+': '+e['message'] for e in errors))
+        model._force_submission = True
+        return json.dumps({'schema_errors': errors, 'action': '按当前AgentSubmission Schema补正格式，保留已取得的资料与方案，不重新检索。'}, ensure_ascii=False)
     agent = create_agent(model=model, tools=tools, system_prompt=system, checkpointer=False,
-                         response_format=ToolStrategy(submission_schema, handle_errors=True))
+                         response_format=ToolStrategy(submission_schema, handle_errors=repair_submission if track_progress else True))
     messages = messages_from_dict(memory) if memory else []
     messages.append(HumanMessage(content=json.dumps(context, ensure_ascii=False, default=str)))
     timeout_seconds = float(os.getenv('AGENT_TIMEOUT_SECONDS', '900'))
@@ -191,15 +202,17 @@ async def run_agent(client, system: str, context: dict, tools: list, memory: lis
     model._event = observe
     try:
         async with asyncio.timeout(timeout_seconds):
-            for attempt in range(3):
-                result = await agent.ainvoke({'messages': messages}, config={'recursion_limit': 40})
+            validation_seen = set()
+            validation_streak = 0
+            for attempt in range(max_models if track_progress else 3):
+                result = await agent.ainvoke({'messages': messages}, config={'recursion_limit': max(40, 2 * (max_models + max_tools) + 10)})
                 submission = result.get('structured_response')
                 if not isinstance(submission, AgentSubmission):
                     try:
                         model._progress.consume(result.get('messages',messages))
                     except NoProgressError as stopped:
                         raise NoProgressError(f'模型连续 {model._progress.limit} 次未按结构化交付协议提交结果，已停止后续步骤；已调用过工具不代表最终交付一定合规') from stopped
-                    if attempt == 2:
+                    if not track_progress and attempt == 2:
                         raise ModelError('模型连续 3 次未按结构化交付协议提交结果，已停止后续步骤；已调用过工具不代表最终交付一定合规')
                     event('agent.output.retry', {'summary': '模型尚未提交结构化结果，保留已取得的工具观察并要求重新提交', 'attempt': attempt + 1})
                     model._force_submission = True
@@ -217,13 +230,24 @@ async def run_agent(client, system: str, context: dict, tools: list, memory: lis
                     if model._models >= model._max_models:
                         raise PlanValidationError(f'本轮修订预算已用尽，尚未通过校验：{exc}。需求与已确认口径已保留；未执行无效方案。') from exc
                     event('agent.validation.failed', {'summary': f'方案校验未通过，正在修正：{str(exc)[:1000]}', 'attempt': attempt + 1})
-                    try:
-                        model._progress.reject_submission()
-                    except NoProgressError as stopped:
-                        raise PlanValidationError(f'连续无进展，停止分析：{exc}') from stopped
-                    if attempt == 2:
+                    if track_progress:
+                        model._progress.pending = None
+                        model._force_submission = True
+                        signature = str(exc)
+                        validation_streak = validation_streak + 1 if signature in validation_seen else 0
+                        validation_seen.add(signature)
+                        if validation_streak >= model._progress.limit:
+                            raise PlanValidationError('同一类方案问题反复未修正，已停止重复处理：'+str(exc)) from exc
+                    else:
+                        try:
+                            model._progress.reject_submission()
+                        except NoProgressError as stopped:
+                            raise PlanValidationError(f'连续无进展，停止分析：{exc}') from stopped
+                    if not track_progress and attempt == 2:
                         raise PlanValidationError(f'Agent 连续 3 次提交无效方案：{exc}') from exc
                     messages = result['messages'] + [HumanMessage(content=json.dumps({'validation_error':str(exc)[:1200],'action':'correct_current_submission'},ensure_ascii=False))]
+            else:
+                raise PlanValidationError('当前交付预算内未能形成有效结构化结论；已有需求与资料已保留。')
     except TimeoutError as exc:
         summary = (f'Agent 达到 {timeout_seconds:g} 秒总时限；已发起 {model._models} 轮模型调用、'
                    f'{model._tools} 次工具调用，模型请求超时 {request_stats["timeouts"]} 次、'

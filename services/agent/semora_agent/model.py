@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from .model_diagnostics import RequestDiagnostics, read_response, await_public_delivery, NoDeliveryTimeoutError
+from .model_diagnostics import RequestDiagnostics, read_response, await_public_delivery, NoDeliveryTimeoutError, debug_payload,log_context,next_http_round
 
 import json
 import os
@@ -20,16 +20,10 @@ class ModelServiceError(ModelError):
     """Provider/transport failure, distinct from application configuration bugs."""
 
 
-class ReviewBudgetExhaustedError(ModelError):
-    pass
 
 
-class ReviewTimeoutError(ModelError):
-    pass
 
 
-class ReviewOutputError(ModelError):
-    pass
 
 
 class TaskSupersededError(ModelError):
@@ -40,10 +34,6 @@ class NoDeliveryError(ModelError):
     public_message='模型在交付截止时间内未返回答案或工具参数，已停止本次分析；需求与已确认口径已保留。'
 
 
-class AnalysisBlockedError(ModelError):
-    def __init__(self,reason):
-        self.public_message='当前需求尚不能形成可执行方案：'+reason
-        super().__init__(self.public_message)
 
 
 class PlanValidationError(ModelError):
@@ -83,7 +73,7 @@ class StructuredModel:
             raise ModelError("LLM 未配置")
         from .context_budget import prepare_context
         messages,_=prepare_context([{'role':'system','content':system},{'role':'user','content':user}],[])
-        raw = await self._request({'model':self.model,'temperature':0,'response_format':{'type':'json_object'},
+        raw = await self._request({'model':self.model,'temperature':0.3,'response_format':{'type':'json_object'},
             'messages':messages},on_request_event)
         content = raw.get('content')
         if not isinstance(content, str):
@@ -101,7 +91,7 @@ class StructuredModel:
         """Native tool calling; do not request or forward model-private reasoning."""
         if not self.configured:
             raise ModelError('LLM 未配置')
-        body = {'model': self.model, 'temperature': 0, 'messages': messages, 'tools': tools}
+        body = {'model': self.model, 'temperature': 0.3, 'messages': messages, 'tools': tools}
         if kwargs.get('tool_choice') is not None:
             body['tool_choice'] = kwargs['tool_choice']
         if kwargs.get('parallel_tool_calls') is not None:
@@ -136,7 +126,9 @@ class StructuredModel:
                   'max_tool_argument_chars':argument_limit}
         metadata['no_delivery_seconds']=delivery_seconds
         for attempt in range(self.request_retries+1):
-            diagnostic=RequestDiagnostics({**metadata,'attempt':attempt+1},callback)
+            diagnostic=RequestDiagnostics({**metadata,**log_context(),'http_round':next_http_round(),'attempt':attempt+1},callback)
+            debug_payload('model.http.request',{'request_id':diagnostic.data['diagnostic_id'],
+                'http_round':diagnostic.data['http_round'],'attempt':attempt+1,'body':body},secrets=[self.api_key])
             diagnostic.emit('agent.request.started',f'正在请求模型，第 {attempt+1} 次尝试；约 {metadata["request_bytes"]} 字节')
             heartbeat=asyncio.create_task(diagnostic.heartbeat())
             try:
@@ -150,6 +142,8 @@ class StructuredModel:
                                 return await read_response(response,diagnostic)
                     result=await await_public_delivery(send_and_read(),diagnostic,delivery_seconds)
                 diagnostic.data['stage']='completed'
+                debug_payload('model.http.response',{'request_id':diagnostic.data['diagnostic_id'],
+                    'http_round':diagnostic.data['http_round'],'duration_ms':diagnostic.elapsed(),'body':result},secrets=[self.api_key])
                 diagnostic.emit('agent.request.completed',f'模型请求完成：总耗时 {diagnostic.elapsed()/1000:.1f} 秒；首个响应事件 {diagnostic.data.get("first_event_ms", "未知")} ms；推理字符 {diagnostic.data["reasoning_chars"]}，输出字符 {diagnostic.data["output_chars"]}，工具参数字符 {diagnostic.data["tool_argument_chars"]}；推理token {diagnostic.data.get("reasoning_tokens", "服务未返回")}，输出token {diagnostic.data.get("completion_tokens", "服务未返回")}')
                 return result
             except NoDeliveryTimeoutError as exc:
@@ -179,6 +173,9 @@ class StructuredModel:
                 diagnostic.emit('agent.request.failed','模型响应格式无效或流未完整结束；部分输出不执行')
                 raise ModelError(f'模型响应格式无效（{type(exc).__name__}），未取得有效的消息结构') from exc
             finally:
+                if diagnostic.data['stage']!='completed':
+                    debug_payload('model.http.incomplete',{'request_id':diagnostic.data['diagnostic_id'],
+                        'http_round':diagnostic.data['http_round'],'diagnostics':diagnostic.data})
                 heartbeat.cancel()
                 with suppress(asyncio.CancelledError):await heartbeat
 

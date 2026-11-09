@@ -261,12 +261,14 @@ def execute_query(body: QueryInput, x_semora_internal_token: str | None = Header
                     cursor.execute("SELECT set_config('statement_timeout', %s, true)", (f"{timeout_ms}ms",))
                 cursor.execute(body.sql, body.parameters)
                 columns = [column[0] for column in cursor.description or []]
+                from .result_types import column_types, encode_scalar
                 rows = cursor.fetchmany(max_rows + 1)
+                result_types = column_types(cursor.description, body.datasource.type == 'mysql', rows)
                 truncated = len(rows) > max_rows
                 rows = rows[:max_rows]
                 sensitive_columns = {item.lower() for item in body.sensitive_columns}
                 serialized_rows = [
-                    [mask_sensitive(columns[index], value, sensitive_columns) for index, value in enumerate(row)]
+                    [encode_scalar(mask_sensitive(columns[index], value, sensitive_columns)) for index, value in enumerate(row)]
                     for row in rows
                 ]
                 payload_bytes = len(json.dumps(serialized_rows, ensure_ascii=False, default=str).encode())
@@ -284,6 +286,7 @@ def execute_query(body: QueryInput, x_semora_internal_token: str | None = Header
     duration_ms = int((time.perf_counter() - started) * 1000)
     return {
         "columns": columns,
+        "column_types": result_types,
         "rows": serialized_rows,
         "row_count": len(serialized_rows),
         "duration_ms": duration_ms,

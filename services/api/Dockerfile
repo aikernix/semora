@@ -3,7 +3,6 @@ WORKDIR /app
 COPY services/api/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 COPY packages/contracts/python /app/packages/contracts/python
-COPY packages/query-core/python/semora_query_core /app/semora_query_core
 COPY packages/telemetry/python/semora_telemetry /app/semora_telemetry
 COPY services/agent/semora_agent /app/semora_agent
 COPY services/api/app /app/app

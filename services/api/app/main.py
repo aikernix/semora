@@ -1,7 +1,6 @@
 from __future__ import annotations
 from semora_agent.prompts import PROBE_JSON, PROBE_TOOL
 
-import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
@@ -22,7 +21,6 @@ from semora_contracts import (
     CandidateExtractionResult,
     OntologyCandidate,
     QueryRun,
-    RunStatus,
     SystemSettings,
 )
 
@@ -78,7 +76,7 @@ async def oidc_authentication(request: Request, call_next):
 
 class SessionCreate(BaseModel):
     title: str = "新查询"
-    domain: str = Field(default="retail_credit", pattern=r"^[a-z][a-z0-9_]{1,99}$")
+    domain: str = Field(pattern=r"^[a-z][a-z0-9_]{1,99}$")
     requirement_form: dict[str, str] = Field(default_factory=dict)
 
 
@@ -182,19 +180,6 @@ def require_run_access(run_id: str, request: Request) -> QueryRun:
     run = store.runs.get(run_id)
     if run is None or not can_access_run(run, request_principal(request)):
         raise HTTPException(404, "run not found")
-    return run
-
-
-def can_access_audit(run: QueryRun, principal: Principal | None) -> bool:
-    if principal is None or principal.roles.intersection({"auditor", "admin"}):
-        return True
-    return False
-
-
-def require_audit_access(run_id: str, request: Request) -> QueryRun:
-    run = store.runs.get(run_id)
-    if run is None or not can_access_audit(run, request_principal(request)):
-        raise HTTPException(404, "audit run not found")
     return run
 
 
@@ -378,30 +363,17 @@ async def run_events(
     run_id: str,
     request: Request,
     after: int = Query(default=0, ge=0),
+    heartbeat: bool = Query(default=False),
 ) -> StreamingResponse:
     require_run_access(run_id, request)
 
-    async def generate():
-        cursor = after
-        terminal = {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CLARIFYING, RunStatus.AWAITING_APPROVAL}
-        heartbeat = 0
-        while True:
-            run = store.runs[run_id]
-            while cursor < len(run.events):
-                item = run.events[cursor]
-                cursor += 1
-                yield f"id: {cursor}\nevent: {item.event}\ndata: {item.model_dump_json()}\n\n"
-            if run.status in terminal:
-                yield f"event: stream.closed\ndata: {{\"status\":\"{run.status.value}\",\"cursor\":{cursor}}}\n\n"
-                break
-            if await request.is_disconnected():
-                break
-            heartbeat += 1
-            if heartbeat % 50 == 0:
-                yield ": keep-alive\n\n"
-            await asyncio.sleep(0.1)
+    from .events_stream import stream_events
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return StreamingResponse(
+        stream_events(store, run_id, after, request.is_disconnected, with_heartbeat=heartbeat),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 def raise_knowledge_error(exc: KnowledgeCoreError) -> None:
@@ -533,7 +505,7 @@ async def download_knowledge_content(knowledge_id: str) -> Response:
     response_model=CandidateExtractionResult,
     status_code=201,
 )
-async def extract_ontology_candidates(knowledge_id: str, domain: str = "retail_credit") -> dict:
+async def extract_ontology_candidates(knowledge_id: str, domain: str = Query(...,pattern=r"^[a-z][a-z0-9_]{1,99}$")) -> dict:
     try:
         bundle = await knowledge_service.get_document_chunks(knowledge_id)
         draft = await ontology_service.get_draft(domain)
@@ -624,7 +596,7 @@ async def decide_ontology_candidate(candidate_id: str, request: Request) -> dict
 
 
 @app.post("/api/v1/ontology/publish")
-async def publish_ontology(domain: str = "retail_credit") -> dict:
+async def publish_ontology(domain: str = Query(...,pattern=r"^[a-z][a-z0-9_]{1,99}$")) -> dict:
     try:
         draft = await ontology_service.get_draft(domain)
         sources = {str(o.get('dataSourceId') or draft.get('dataSourceId') or '') for o in draft.get('objects', [])}
@@ -641,7 +613,7 @@ async def publish_ontology(domain: str = "retail_credit") -> dict:
 
 
 @app.get("/api/v1/ontology/paths")
-async def ontology_path(source: str, target: str, domain: str = "retail_credit") -> dict:
+async def ontology_path(source: str, target: str, domain: str = Query(...,pattern=r"^[a-z][a-z0-9_]{1,99}$")) -> dict:
     try:
         return await ontology_service.find_path(domain, source, target)
     except OntologyCoreError as exc:
@@ -678,24 +650,6 @@ async def scan_datasource(datasource_id: str, tables: list[str] | None = Query(d
         raise HTTPException(502, str(exc)) from exc
 
 
-@app.get("/api/v1/approvals")
-def approvals() -> list[dict]:
-    return [item.model_dump(mode="json") for item in store.approvals.values()]
-
-
-@app.post("/api/v1/approvals/{approval_id}/decision", response_model=QueryRun)
-async def decide_approval(approval_id: str, body: ApprovalInput, request: Request) -> QueryRun:
-    approval = store.approvals.get(approval_id)
-    if not approval:
-        raise HTTPException(404, "approval not found")
-    principal = getattr(request.state, "principal", None)
-    actor = principal.username if principal is not None else "demo.approver"
-    try:
-        return await workflow.approve(store.runs[approval.run_id], actor, body.approved, body.reason)
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
-
-
 @app.post("/api/v1/executions/{run_id}/cancel")
 async def cancel_execution(run_id: str, request: Request) -> dict:
     require_run_access(run_id, request)
@@ -703,60 +657,3 @@ async def cancel_execution(run_id: str, request: Request) -> dict:
         return await workflow.cancel(run_id)
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"Executor 取消失败：{type(exc).__name__}") from exc
-
-
-@app.get("/api/v1/audits")
-def audit_run_index(
-    request: Request,
-    q: str = Query(default="", max_length=200),
-    status: RunStatus | None = None,
-    limit: int = Query(default=50, ge=1, le=200),
-) -> list[dict]:
-    # Authentication middleware limits this collection to auditor/admin. Keep
-    # the explicit principal check so direct invocation cannot bypass the role.
-    principal = request_principal(request)
-    if principal is not None and not principal.roles.intersection({"auditor", "admin"}):
-        raise HTTPException(403, "auditor or admin role required")
-    return store.list_audit_runs(q, status.value if status else "", limit)
-
-
-@app.get("/api/v1/audits/{run_id}")
-def audit_events(run_id: str, request: Request) -> list[dict]:
-    require_audit_access(run_id, request)
-    return [item.model_dump(mode="json") for item in store.audit.list(run_id)]
-
-
-@app.get("/api/v1/audits/{run_id}/verify")
-def verify_audit(run_id: str, request: Request) -> dict:
-    require_audit_access(run_id, request)
-    valid, invalid_sequence = store.audit.verify(run_id)
-    return {"run_id": run_id, "valid": valid, "invalid_sequence": invalid_sequence, "algorithm": "sha256-chain"}
-
-
-async def audit_archive_request(run_id: str, suffix: str = "") -> dict:
-    url = os.getenv("AUDIT_EXPORTER_URL", "http://localhost:8004").rstrip("/")
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.get(
-                f"{url}/internal/v1/archives/{quote(run_id, safe='')}{suffix}",
-                headers={"X-Semora-Internal-Token": os.getenv("INTERNAL_TOKEN", "semora-dev-internal")},
-            )
-        if response.status_code == 404:
-            return {"run_id": run_id, "archived": False, "valid": False}
-        response.raise_for_status()
-        return response.json()
-    except httpx.HTTPError as exc:
-        raise HTTPException(503, f"审计归档服务不可用：{type(exc).__name__}") from exc
-
-
-@app.get("/api/v1/audits/{run_id}/archive")
-async def audit_archive(run_id: str, request: Request) -> dict:
-    require_audit_access(run_id, request)
-    return await audit_archive_request(run_id)
-
-
-@app.get("/api/v1/audits/{run_id}/archive/verify")
-async def verify_audit_archive(run_id: str, request: Request) -> dict:
-    require_audit_access(run_id, request)
-    return await audit_archive_request(run_id, "/verify")
-

@@ -1,10 +1,13 @@
-"""Bounded operational metadata. Never log prompts, output or reasoning text."""
+"""Operational metadata and opt-in public request/response debugging."""
 import asyncio
 import json
 import logging
 import re
 import time
 import hashlib
+import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from uuid import uuid4
 
 logger = logging.getLogger('semora.model')
@@ -12,6 +15,48 @@ logger.setLevel(logging.INFO)
 if not logger.handlers:
     logger.addHandler(logging.StreamHandler())
 logger.propagate = False
+
+_run_log=ContextVar('semora_run_log',default=None)
+
+
+@contextmanager
+def bind_run_log(run,state):
+    token=_run_log.set({'run_id':run.id,'trace_id':run.trace_id,'session_id':run.session_id,'domain':run.domain,'counter':state})
+    try:yield
+    finally:_run_log.reset(token)
+
+
+def log_context():
+    return {k:v for k,v in (_run_log.get() or {}).items() if k!='counter'}
+
+
+def next_http_round():
+    context=_run_log.get()
+    if context is None:return None
+    counter=context['counter']
+    counter['request_count']=counter.get('request_count',0)+1
+    return counter['request_count']
+
+
+def debug_payload(event,data,*,secrets=()):
+    """Docker stdout only: never add large payloads to Agent memory/events."""
+    if os.getenv('SEMORA_DEBUG_PAYLOADS','false').lower()!='true' or _run_log.get() is None:return
+    known=set(s for s in secrets if isinstance(s,str) and s)
+    known.update(v for k,v in os.environ.items() if len(v)>=8 and re.search(r'(PASSWORD|API_KEY|TOKEN|SECRET|DATABASE_URL|DATASOURCE.*URL)',k))
+    hidden={'authorization','api_key','password','passwd','access_token','client_secret','connection_string','dsn'}
+    def clean(value):
+        if isinstance(value,dict):
+            return {k:('[REDACTED]' if str(k).lower().replace('-','_') in hidden else clean(v))
+                    for k,v in value.items() if k not in {'reasoning_content','reasoning_details'}}
+        if isinstance(value,(list,tuple)):return [clean(v) for v in value]
+        if isinstance(value,str):
+            for secret in sorted(known,key=len,reverse=True):value=value.replace(secret,'[REDACTED]')
+            return re.sub(r'([a-zA-Z][a-zA-Z0-9+.-]*://[^\s/:@]+:)[^\s@]+@',r'\1[REDACTED]@',value)
+        return value
+    try:
+        logger.info(json.dumps(clean({'event':event,**log_context(),'data':data}),ensure_ascii=False,default=str))
+    except Exception:
+        logger.warning('semora.debug_payload.unavailable')
 
 
 class PublicOutputLimitError(RuntimeError):

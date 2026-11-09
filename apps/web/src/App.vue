@@ -2,8 +2,8 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  BrowseIcon, BookIcon, RelationIcon, DataBaseIcon, TaskCheckedIcon,
-  HistoryIcon, SettingIcon, ChevronLeftIcon, ChevronRightIcon,
+  BrowseIcon, BookIcon, RelationIcon, DataBaseIcon,
+  SettingIcon, ChevronLeftIcon, ChevronRightIcon,
 } from 'tdesign-icons-vue-next'
 import { authState, hasRole, logout } from './auth'
 
@@ -16,8 +16,6 @@ const items = computed(() => [
   { path: '/knowledge', label: '知识库', icon: BookIcon, visible: hasRole('business_user', 'analyst', 'data_steward', 'admin') },
   { path: '/ontology', label: '本体工作室', icon: RelationIcon, visible: hasRole('analyst', 'data_steward', 'admin') },
   { path: '/datasources', label: '数据源', icon: DataBaseIcon, visible: hasRole('analyst', 'data_steward', 'admin') },
-  { path: '/approvals', label: '审批中心', icon: TaskCheckedIcon, visible: hasRole('approver', 'admin') },
-  { path: '/audit', label: '审计回放', icon: HistoryIcon, visible: hasRole('auditor', 'admin') },
   { path: '/settings', label: '模型与设置', icon: SettingIcon, visible: hasRole('admin') },
 ].filter(item => item.visible))
 const roleLabel = computed(() => authState.roles.filter(role => ['analyst', 'approver', 'auditor', 'data_steward', 'admin'].includes(role)).join(' · ') || '业务用户')

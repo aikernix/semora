@@ -4,6 +4,7 @@ uvicorn[standard]==0.54.0
 pydantic==2.11.4
 httpx==0.28.1
 sqlglot==26.16.4
+duckdb==1.5.6
 psycopg[binary]==3.2.9
 langgraph==1.2.19
 langchain==1.4.8

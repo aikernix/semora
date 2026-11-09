@@ -7,13 +7,13 @@ def test_settings_policy_is_versioned_and_hashed():
     repository = SettingsRepository(dsn=None)
     original = repository.get()
     changed = original.model_copy(deep=True)
-    changed.approval_mode = "all"
+    changed.query_timeout_seconds = 20
 
     saved = repository.update(changed, "security.admin")
 
     assert saved.version == original.version + 1
     assert saved.policy_version != original.policy_version
-    assert saved.policy_version.startswith(f"approval-policy-v{saved.version}-")
+    assert saved.policy_version.startswith(f"query-policy-v{saved.version}-")
     assert saved.updated_by == "security.admin"
 
 

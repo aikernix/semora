@@ -3,43 +3,43 @@ package main
 import "time"
 
 type Property struct {
-    Description string `json:"description,omitempty"`
-    Metadata map[string]any `json:"metadata,omitempty"`
-	Name      string   `json:"name"`
-	Label     string   `json:"label,omitempty"`
-	Aliases   []string `json:"aliases,omitempty"`
-	Column    string   `json:"column"`
-	Type      string   `json:"type"`
-	Sensitive bool     `json:"sensitive"`
-	Nullable  bool     `json:"nullable,omitempty"`
+	Description string         `json:"description,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+	Name        string         `json:"name"`
+	Label       string         `json:"label,omitempty"`
+	Aliases     []string       `json:"aliases,omitempty"`
+	Column      string         `json:"column"`
+	Type        string         `json:"type"`
+	Sensitive   bool           `json:"sensitive"`
+	Nullable    bool           `json:"nullable,omitempty"`
 }
 
 type ObjectProjection struct {
-    Distinct bool `json:"distinct"`
+	Distinct bool `json:"distinct"`
 }
 
 type ObjectClass struct {
-    Projection *ObjectProjection `json:"projection,omitempty"`
-    DataSourceID string `json:"dataSourceId,omitempty"`
-    Metadata map[string]any `json:"metadata,omitempty"`
-	Name       string     `json:"name"`
-	Label      string     `json:"label"`
-	Aliases    []string   `json:"aliases,omitempty"`
-	Table      string     `json:"table"`
-	PrimaryKey string     `json:"primaryKey"`
-	Properties []Property `json:"properties"`
+	Projection   *ObjectProjection `json:"projection,omitempty"`
+	DataSourceID string            `json:"dataSourceId,omitempty"`
+	Metadata     map[string]any    `json:"metadata,omitempty"`
+	Name         string            `json:"name"`
+	Label        string            `json:"label"`
+	Aliases      []string          `json:"aliases,omitempty"`
+	Table        string            `json:"table"`
+	PrimaryKey   string            `json:"primaryKey"`
+	Properties   []Property        `json:"properties"`
 }
 
 type RelationClass struct {
-    Metadata map[string]any `json:"metadata,omitempty"`
-	Name        string `json:"name"`
-	Label       string `json:"label,omitempty"`
-	From        string `json:"from"`
-	To          string `json:"to"`
-	JoinType    string `json:"joinType"`
-	Condition   string `json:"condition"`
-	Cardinality string `json:"cardinality"`
-	Optional    bool   `json:"optional,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+	Name        string         `json:"name"`
+	Label       string         `json:"label,omitempty"`
+	From        string         `json:"from"`
+	To          string         `json:"to"`
+	JoinType    string         `json:"joinType"`
+	Condition   string         `json:"condition"`
+	Cardinality string         `json:"cardinality"`
+	Optional    bool           `json:"optional,omitempty"`
 }
 
 type Metric struct {
@@ -59,20 +59,20 @@ type DefaultFilter struct {
 }
 
 type Ontology struct {
-    SourceScopes map[string]string `json:"sourceScopes,omitempty"`
-    Metadata map[string]any `json:"metadata,omitempty"`
-	Domain           string          `json:"domain"`
-	Name             string          `json:"name"`
-	Version          string          `json:"version"`
-	Description      string          `json:"description,omitempty"`
-	ScopeField       string          `json:"scopeField,omitempty"`
-	TimeField        string          `json:"timeField,omitempty"`
-	DataSourceID     string          `json:"dataSourceId"`
-	KnowledgeBaseIDs []string        `json:"knowledgeBaseIds"`
-	Objects          []ObjectClass   `json:"objects"`
-	Relations        []RelationClass `json:"relations"`
-	Metrics          []Metric        `json:"metrics"`
-	DefaultFilters   []DefaultFilter `json:"defaultFilters,omitempty"`
+	SourceScopes     map[string]string `json:"sourceScopes,omitempty"`
+	Metadata         map[string]any    `json:"metadata,omitempty"`
+	Domain           string            `json:"domain"`
+	Name             string            `json:"name"`
+	Version          string            `json:"version"`
+	Description      string            `json:"description,omitempty"`
+	ScopeField       string            `json:"scopeField,omitempty"`
+	TimeField        string            `json:"timeField,omitempty"`
+	DataSourceID     string            `json:"dataSourceId"`
+	KnowledgeBaseIDs []string          `json:"knowledgeBaseIds"`
+	Objects          []ObjectClass     `json:"objects"`
+	Relations        []RelationClass   `json:"relations"`
+	Metrics          []Metric          `json:"metrics"`
+	DefaultFilters   []DefaultFilter   `json:"defaultFilters,omitempty"`
 }
 
 type Snapshot struct {
@@ -83,7 +83,7 @@ type Snapshot struct {
 	ContentHash     string         `json:"contentHash"`
 	ArtifactVersion string         `json:"artifactVersion"`
 	PublishedAt     time.Time      `json:"publishedAt"`
-	WrenArtifact    map[string]any `json:"wrenArtifact"`
+	WrenArtifact    map[string]any `json:"wrenArtifact,omitempty"`
 }
 
 type DraftSummary struct {

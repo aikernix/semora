@@ -17,7 +17,7 @@ def _policy_version(settings: SystemSettings) -> str:
     digest = hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()[:12]
-    return f"approval-policy-v{settings.version}-{digest}"
+    return f"query-policy-v{settings.version}-{digest}"
 
 
 class SettingsRepository:

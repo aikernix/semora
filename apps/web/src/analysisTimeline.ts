@@ -1,7 +1,7 @@
 import type { RunEvent } from './api'
 
 export interface AnalysisOutcome {
-  key: string; title: string; summary: string; details: string[]
+  key: string; created_at: string; title: string; summary: string; details: string[]
   changes?: { path: string; before: unknown; after: unknown }[]
 }
 const text = (value: unknown) => typeof value === 'string' ? value : ''
@@ -17,11 +17,12 @@ export function analysisOutcomes(events: RunEvent[]): AnalysisOutcome[] {
   const goals = new Map<string, string>()
   const add = (event: RunEvent, title: string, summary: string, details: string[] = [], changes?: AnalysisOutcome['changes']) => {
     if (!summary) return
-    const signature = JSON.stringify([title, summary, details, changes])
-    // Keep successive plan/review revisions in order, but collapse identical lookup results.
-    if (event.event === 'agent.tool.completed' && seen.has(signature)) return
+    const signature = JSON.stringify([event.event, event.data.step, event.data.attempt,
+      event.data.requirement?.version, title, summary, details, changes])
+    // Preserve different conclusions and steps, collapse exact replayed output.
+    if (seen.has(signature)) return
     seen.add(signature)
-    rows.push({ key: `${event.created_at}-${rows.length}`, title, summary, details, changes })
+    rows.push({ created_at: event.created_at, key: `${event.created_at}-${rows.length}`, title, summary, details, changes })
   }
   for (const e of events) {
     const d = e.data || {}, o = d.observation || {}
@@ -43,7 +44,21 @@ export function analysisOutcomes(events: RunEvent[]): AnalysisOutcome[] {
       }
       continue
     }
-    if (e.event === 'plan.candidate.validated') {
+    if (e.event === 'knowledge.prepared' && d.knowledge_pages > 0) {
+      add(e, '取得辅助定义', `取得 ${d.knowledge_pages} 个相关知识页面，已用于选择本体对象`)
+    } else if (e.event === 'query.repair.completed') {
+      add(e, '已修正查询方案', d.summary || '候选修订已通过程序检查', (d.changed_paths || []).map((path: string) => `调整 ${path}`))
+    } else if (e.event === 'sql.repaired' || e.event === 'sql.semantic.corrected') {
+      add(e, '修正 SQL', text(d.summary), [d.step ? `步骤：${d.step}` : ''].filter(Boolean))
+    } else if (e.event === 'rehearsal.ready') {
+      add(e, '完成查询方案预演', `${d.questions || 0} 项待确认，${d.conditional_questions || 0} 个条件问题，${d.technical_gaps || 0} 项配置缺口`, d.skeleton || [])
+    } else if (e.event === 'rehearsal.finalized') {
+      add(e, '确认口径已落实到方案', text(d.summary), d.skeleton || [])
+    } else if (e.event === 'rehearsal.answers.applied') {
+      add(e, '答案已填入预演方案', text(d.summary))
+    } else if (e.event === 'rehearsal.configuration_required') {
+      add(e, '需要补齐具体配置', text(d.summary), (d.gaps || []).map((g: any) => g.summary))
+    } else if (e.event === 'plan.candidate.validated') {
       add(e, d.revision ? '修订查询方案' : '形成候选方案', text(d.summary),
         [...(d.conclusions || []), ...(d.additional_changes ? [`另有 ${d.additional_changes} 处变化，完整记录见审计。`] : [])], d.changes || [])
     } else if (e.event === 'plan.preflight.completed' || e.event === 'review.completed') {
@@ -56,20 +71,10 @@ export function analysisOutcomes(events: RunEvent[]): AnalysisOutcome[] {
       const questions = (req.clarifications || []).map((q: any) => q.question)
       if (questions.length) add(e, '需要你补充', questions.join('；'), (req.clarifications || []).map((q: any) => q.reason).filter(Boolean))
     } else if (e.event === 'source.step.completed') {
-      add(e, '完成数据查询', `${d.step || '查询步骤'}已完成${d.row_count !== undefined ? `，返回 ${d.row_count} 行` : ''}`)
+      add(e, '完成数据查询', `${text(d.summary) || '已取得所需信息'}${d.row_count !== undefined ? `，找到 ${d.row_count} 条记录` : ''}`)
     } else if (e.event === 'plan.revision.stalled') {
       add(e, '修订未取得进展', text(d.summary), d.finding_ids || [])
     }
   }
   return rows
-}
-
-export function activeAnalysisStatus(status: string, events: RunEvent[]): string {
-  if (['completed', 'failed', 'clarifying', 'awaiting_approval'].includes(status)) return ''
-  const stage = ({ compiling: '正在生成 SQL…', executing: '正在执行查询…', explaining: '正在整理结果说明…', retrieving: '正在检索相关知识…' } as Record<string, string>)[status]
-  if (stage) return stage
-  const latest = [...events].reverse().find(e => e.event === 'agent.tool.started' || e.event === 'agent.model.started')
-  if (latest?.event === 'agent.tool.started' && latest.data.analysis_goal) return `正在核验：${latest.data.analysis_goal}`
-  if (latest?.data.agent === 'reviewer' || status === 'reviewing') return '正在复核查询方案与需求是否一致…'
-  return ({ compiling: '正在生成 SQL…', executing: '正在执行查询…', explaining: '正在整理结果说明…', retrieving: '正在检索相关知识…' } as Record<string, string>)[status] || '正在分析需求，形成下一项结论…'
 }

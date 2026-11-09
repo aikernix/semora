@@ -112,6 +112,9 @@ class DataSourceRepository:
         item = self.get(datasource_id)
         item.status = "healthy" if result.get("read_only") else "unsafe"
         item.access = "read_only" if result.get("read_only") else "write_capable"
+        if result.get("version"):
+            item.scan_result = {**item.scan_result, "connection": {
+                **(item.scan_result.get("connection") or {}), "version": result["version"]}}
         return self.save(item)
 
     def record_scan(self, datasource_id: str, result: dict[str, Any]) -> DataSourceRecord:
@@ -120,7 +123,8 @@ class DataSourceRepository:
         item.access = "read_only"
         item.objects = len(result.get("tables", []))
         item.last_scan_at = utc_now()
-        item.scan_result = result
+        item.scan_result = {**result, "connection": {
+            **(item.scan_result.get("connection") or {}), **(result.get("connection") or {})}}
         return self.save(item)
 
 

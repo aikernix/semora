@@ -17,6 +17,54 @@ def client_with_transport(monkeypatch, handler):
     return client
 
 
+def test_opt_in_logs_capture_actual_public_requests_and_responses_with_run_correlation(monkeypatch):
+    from semora_agent.model_diagnostics import bind_run_log,logger
+    from semora_contracts import QueryRun
+    monkeypatch.setenv('SEMORA_DEBUG_PAYLOADS','true')
+    lines=[];seen=[]
+    monkeypatch.setattr(logger,'info',lines.append)
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(200,json={'choices':[{'message':{'content':'{"ok":true}',
+            'reasoning_content':'PRIVATE_REASONING'},'finish_reason':'stop'}]})
+    client=client_with_transport(monkeypatch,handler)
+    run=QueryRun(session_id='test',domain='generic',question='Public question')
+    counter={}
+    async def scenario():
+        with bind_run_log(run,counter):
+            await client.complete_json('Public instructions','Public question')
+        with bind_run_log(run,counter):
+            await client.complete_messages([{'role':'user','content':'Follow-up'}],[])
+    asyncio.run(scenario())
+    records=[json.loads(line) for line in lines]
+    requests=[r for r in records if r['event']=='model.http.request']
+    responses=[r for r in records if r['event']=='model.http.response']
+    assert [r['data']['body'] for r in requests]==seen
+    assert [r['data']['http_round'] for r in requests]==[1,2]
+    assert all(r['run_id']==run.id and r['trace_id']==run.trace_id for r in requests+responses)
+    assert requests[0]['data']['request_id']==responses[0]['data']['request_id']
+    assert responses[0]['data']['body']['content']=='{"ok":true}'
+    assert 'PRIVATE_KEY' not in ''.join(lines) and 'PRIVATE_REASONING' not in ''.join(lines)
+    assert counter['request_count']==2
+
+
+def test_payload_logging_is_off_by_default_and_scrubs_credentials_when_enabled(monkeypatch):
+    from semora_agent.model_diagnostics import bind_run_log,debug_payload,logger
+    from semora_contracts import QueryRun
+    monkeypatch.delenv('SEMORA_DEBUG_PAYLOADS',raising=False)
+    lines=[];monkeypatch.setattr(logger,'info',lines.append)
+    run=QueryRun(session_id='test',question='Test')
+    with bind_run_log(run,{}):
+        debug_payload('test',{'question':'public'})
+        assert not lines
+        monkeypatch.setenv('SEMORA_DEBUG_PAYLOADS','true')
+        debug_payload('test',{'password':'PRIVATE_PASSWORD','api_key':'PRIVATE_KEY',
+            'content':'postgresql://user:PRIVATE_DB_PASSWORD@host/db; PRIVATE_RUNTIME_KEY',
+            'reasoning_content':'PRIVATE_REASONING'},secrets=['PRIVATE_RUNTIME_KEY'])
+    assert len(lines)==1
+    assert not any(secret in lines[0] for secret in ['PRIVATE_PASSWORD','PRIVATE_KEY','PRIVATE_DB_PASSWORD','PRIVATE_RUNTIME_KEY','PRIVATE_REASONING'])
+
+
 @pytest.mark.parametrize('mode,expected',[('',None),('false',False),('true',True)])
 @pytest.mark.parametrize('json_completion',[False,True])
 def test_thinking_control_applies_to_all_model_request_paths(monkeypatch,mode,expected,json_completion):

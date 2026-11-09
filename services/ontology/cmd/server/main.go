@@ -251,7 +251,7 @@ func main() {
 				"candidate-review",
 				"immutable-snapshots",
 				"relationship-paths",
-				"semantic-artifacts",
+				"ontology-validation",
 			},
 		})
 	})

@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -91,9 +89,6 @@ func (s *Store) initialize(ctx context.Context, seedDemo bool) error {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
 			return err
 		}
-	}
-	if err := s.upgradeWrenArtifacts(ctx); err != nil {
-		return err
 	}
 	if !seedDemo {
 		return nil
@@ -183,31 +178,22 @@ func (s *Store) publish(ctx context.Context, domain string) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if issues := validateOntology(ontology); len(issues) > 0 {
-		return Snapshot{}, &validationError{issues: issues}
-	}
-	canonical := canonicalOntology(ontology)
-	payload, err := json.Marshal(canonical)
+	snapshot, err := preparePublication(ontology)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	digest := sha256.Sum256(payload)
-	contentHash := "sha256:" + hex.EncodeToString(digest[:])
-	artifact, projectionIssues := projectWren(canonical)
-	if len(projectionIssues) > 0 {
-		return Snapshot{}, &validationError{issues: projectionIssues}
-	}
-	artifactPayload, err := json.Marshal(artifact)
+	payload, err := json.Marshal(snapshot.Ontology)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	var snapshot Snapshot
 	var storedPayload, storedArtifact []byte
+	// The legacy NOT NULL column remains for existing databases. New publications
+	// contain no MDL; a repeated content hash preserves the original snapshot.
 	err = s.db.QueryRowContext(ctx, `INSERT INTO ontology_core.snapshots(domain,version,content_hash,artifact_version,payload,wren_artifact)
-	VALUES($1,$2,$3,$4,$5::jsonb,$6::jsonb)
-	ON CONFLICT(content_hash) DO UPDATE SET artifact_version=excluded.artifact_version,wren_artifact=excluded.wren_artifact
-	RETURNING id::text,domain,version,content_hash,artifact_version,published_at,payload,wren_artifact`,
-		canonical.Domain, canonical.Version, contentHash, wrenArtifactVersion, payload, artifactPayload,
+    VALUES($1,$2,$3,$4,$5::jsonb,'{}'::jsonb)
+    ON CONFLICT(content_hash) DO UPDATE SET content_hash=excluded.content_hash
+    RETURNING id::text,domain,version,content_hash,artifact_version,published_at,payload,wren_artifact`,
+		snapshot.Domain, snapshot.Version, snapshot.ContentHash, snapshot.ArtifactVersion, payload,
 	).Scan(&snapshot.ID, &snapshot.Domain, &snapshot.Version, &snapshot.ContentHash, &snapshot.ArtifactVersion, &snapshot.PublishedAt, &storedPayload, &storedArtifact)
 	if err != nil {
 		return Snapshot{}, err
@@ -219,49 +205,6 @@ func (s *Store) publish(ctx context.Context, domain string) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	return snapshot, nil
-}
-
-func (s *Store) upgradeWrenArtifacts(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT id::text,payload FROM ontology_core.snapshots WHERE artifact_version<>$1`, wrenArtifactVersion)
-	if err != nil {
-		return err
-	}
-	type pendingArtifact struct {
-		id       string
-		ontology Ontology
-	}
-	pending := []pendingArtifact{}
-	for rows.Next() {
-		var id string
-		var payload []byte
-		if err := rows.Scan(&id, &payload); err != nil {
-			rows.Close()
-			return err
-		}
-		var ontology Ontology
-		if err := json.Unmarshal(payload, &ontology); err != nil {
-			rows.Close()
-			return err
-		}
-		pending = append(pending, pendingArtifact{id: id, ontology: ontology})
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	for _, item := range pending {
-		artifact, issues := projectWren(item.ontology)
-		if len(issues) > 0 {
-			return &validationError{issues: issues}
-		}
-		payload, err := json.Marshal(artifact)
-		if err != nil {
-			return err
-		}
-		if _, err := s.db.ExecContext(ctx, `UPDATE ontology_core.snapshots SET artifact_version=$1,wren_artifact=$2::jsonb WHERE id=$3::uuid`, wrenArtifactVersion, payload, item.id); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (s *Store) latestSnapshot(ctx context.Context, domain string) (Snapshot, error) {

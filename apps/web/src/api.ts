@@ -27,15 +27,29 @@ export interface ClarificationQuestion {
   options: ClarificationOption[]
   allow_free_text: boolean
   blocking: boolean
+  depends_on?: Array<{ question_id: string; values: string[] }>
+}
+export interface QueryConfigurationGap {
+  kind: 'relation' | 'field' | 'definition' | 'capability'
+  summary: string
+  required_for: string
+  objects: string[]
+  field_refs: string[]
+  evidence_refs: string[]
+  resolution: string
+  depends_on?: Array<{ question_id: string; values: string[] }>
 }
 export interface RequirementDraft {
+  clarification_stage?: 'direction' | 'business'
+  clarification_round?: number
+  technical_gaps?: QueryConfigurationGap[]
   source_steps?: any[]
   version: number
   summary: string
   analysis_steps: string[]
   subject: string
-  metrics: string[]
-  dimensions: string[]
+  metrics?: string[]
+  dimensions?: string[]
   filters: Array<{ field: string; operator: string; value: unknown }>
   time_semantics?: string
   grain?: string
@@ -60,7 +74,9 @@ export interface KnowledgeResearchResult {
   evidence: any[]
 }
 export interface QueryRun {
-  delivery?: { kind: 'result' | 'clarification' | 'blocked' | 'cancelled' | 'interrupted'; title: string; summary: string; warnings: string[]; next_action: string; result_verified: boolean }
+  created_at?: string
+  query_rehearsal?: { summary: string; target_state: 'known' | 'needs_direction'; skeleton: string[]; questions: ClarificationQuestion[]; technical_gaps: QueryConfigurationGap[]; confidence?: {level: 'high' | 'medium' | 'low'; reason: string} }
+  delivery?: { kind: 'sql' | 'result' | 'clarification' | 'blocked' | 'cancelled' | 'interrupted'; title: string; summary: string; warnings: string[]; next_action: string; result_verified: boolean }
   delivery_warnings?: string[]
   source_artifacts?: Record<string, any>
   id: string
@@ -99,19 +115,10 @@ export interface QuerySession {
 }
 
 export interface SystemSettings {
-  delivery_mode?: 'strict' | 'best_effort'
-  require_plan_confirmation?: boolean
-  approval_mode: 'disabled' | 'all' | 'risk_based'
-  approve_sensitive_detail: boolean
-  approve_large_result: boolean
-  approve_cross_organization: boolean
-  large_result_threshold: number
   query_timeout_seconds: number
   max_result_rows: number
   max_result_mb: number
   preview_rows: number
-  reviewer_isolated_context: boolean
-  reasoning_display: 'structured' | 'hidden'
   version: number
   policy_version: string
   updated_at: string

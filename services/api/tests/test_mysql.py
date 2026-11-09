@@ -1,26 +1,9 @@
 import pytest
 from fastapi import HTTPException
-from semora_contracts import SQLArtifact
-from app.planner import adapt_mysql_artifact
 from services.executor.app.main import assert_readonly
 from services.executor.app.mysql_adapter import begin_readonly
 
 
-def test_mysql_compilation_preserves_bindings_and_translates_dates():
-    artifact = SQLArtifact(
-        semantic_sql='SELECT balance FROM loan',
-        physical_sql="SELECT ROUND(SUM(l.balance)::numeric, 2) AS balance FROM public.loans l WHERE l.branch_id IN (%(branch_id_0)s) AND l.as_of_date >= CURRENT_DATE - INTERVAL '3 months' LIMIT 1000",
-        parameters={'branch_id_0': 2}, artifact_hash='original',
-    )
-    result = adapt_mysql_artifact(artifact)
-    assert result.dialect == 'mysql'
-    assert '%(branch_id_0)s' in result.physical_sql
-    assert 'public.' not in result.physical_sql
-    assert 'MONTH' in result.physical_sql.upper()
-    assert 'DECIMAL(38, 10)' in result.physical_sql.upper()
-    assert result.parameters == artifact.parameters
-    assert result.artifact_hash != artifact.artifact_hash
-    assert_readonly(result.physical_sql, 'mysql')
 
 
 @pytest.mark.parametrize('sql', [

@@ -9,7 +9,7 @@ GRANT USAGE ON SCHEMA semora_meta TO :"api_role";
 CREATE TABLE IF NOT EXISTS semora_meta.sessions (
     id VARCHAR(64) PRIMARY KEY,
     title VARCHAR(200) NOT NULL,
-    domain VARCHAR(100) NOT NULL DEFAULT 'retail_credit',
+    domain VARCHAR(100) NOT NULL DEFAULT '',
     owner_subject VARCHAR(200),
     created_at TIMESTAMPTZ NOT NULL
 );
@@ -21,16 +21,6 @@ CREATE TABLE IF NOT EXISTS semora_meta.runs (
     payload JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS semora_meta.audit_events (
-    id VARCHAR(64) PRIMARY KEY,
-    run_id VARCHAR(64) NOT NULL,
-    sequence INTEGER NOT NULL,
-    event_hash CHAR(64) NOT NULL,
-    payload JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL,
-    UNIQUE(run_id, sequence)
 );
 
 CREATE TABLE IF NOT EXISTS semora_meta.datasources (
@@ -59,6 +49,5 @@ GRANT SELECT, INSERT, UPDATE ON semora_meta.sessions TO :"api_role";
 GRANT SELECT, INSERT, UPDATE ON semora_meta.runs TO :"api_role";
 GRANT SELECT, INSERT, UPDATE ON semora_meta.datasources TO :"api_role";
 GRANT SELECT, INSERT, UPDATE ON semora_meta.system_settings TO :"api_role";
-GRANT SELECT, INSERT ON semora_meta.audit_events TO :"api_role";
 
 COMMIT;

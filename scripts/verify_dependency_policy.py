@@ -82,12 +82,10 @@ def main() -> int:
     notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8").lower()
     for required in (
         "weknora",
-        "wren core python binding",
         "openbkn",
         "tdesign",
         "sqlglot",
         "langgraph",
-        "confluent kafka",
         "opentelemetry",
         "pgx",
     ):

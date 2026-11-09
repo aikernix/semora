@@ -1,29 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { MessagePlugin } from 'tdesign-vue-next'
-import { api, type SystemSettings } from '../api'
+import { api } from '../api'
 
-const form = ref<SystemSettings>({
-  delivery_mode: 'strict',
-  require_plan_confirmation: false,
-  approval_mode: 'disabled',
-  approve_sensitive_detail: true,
-  approve_large_result: true,
-  approve_cross_organization: true,
-  large_result_threshold: 100_000,
-  query_timeout_seconds: 30,
-  max_result_rows: 1_000,
-  max_result_mb: 10,
-  preview_rows: 100,
-  reviewer_isolated_context: true,
-  reasoning_display: 'structured',
-  version: 1,
-  policy_version: '',
-  updated_at: '',
-  updated_by: 'system',
-})
-const loading = ref(true)
-const saving = ref(false)
 const modelForm = ref({ base_url: '', model: '', api_key: '' })
 const modelStatus = ref({ configured: false, api_key_configured: false })
 const modelBusy = ref(false)
@@ -52,25 +30,7 @@ async function configureModel(testOnly: boolean) {
   finally { modelBusy.value = false }
 }
 
-function apply(value: SystemSettings) { Object.assign(form.value, value) }
-
-async function load() {
-  loading.value = true
-  try { apply((await api.get<SystemSettings>('/settings')).data) }
-  finally { loading.value = false }
-}
-
-async function save() {
-  saving.value = true
-  try {
-    apply((await api.put<SystemSettings>('/settings', form.value)).data)
-    await MessagePlugin.success('系统策略已发布；新的查询将使用该版本')
-  } catch (error: any) {
-    await MessagePlugin.error(error?.response?.data?.detail || '保存失败')
-  } finally { saving.value = false }
-}
-
-onMounted(async () => { await Promise.all([load(), loadModel()]) })
+onMounted(loadModel)
 </script>
 
 <template>
@@ -78,16 +38,14 @@ onMounted(async () => { await Promise.all([load(), loadModel()]) })
     <div class="page-header">
       <div>
         <h1>系统设置</h1>
-        <p>集中管理审批和执行边界。查询用户不能在工作台覆盖这些策略。</p>
+        <p>配置基础模型，用于需求理解、知识辅助分析和 SQL 生成。</p>
       </div>
-      <t-button theme="primary" :loading="saving" :disabled="loading" @click="save">发布配置</t-button>
     </div>
 
-    <section class="panel"><div class="panel-title">答案交付方式</div><t-radio-group v-model="form.delivery_mode"><t-radio value="best_effort">尽力交付：先给实际结果，复核意见供后续调整</t-radio><t-radio value="strict">严格复核：未通过时停止执行</t-radio></t-radio-group></section>
     <section id="model" class="panel model-config">
       <div class="panel-title">基础模型配置 <t-tag :theme="modelStatus.configured ? 'success' : 'warning'" variant="light">{{ modelStatus.configured ? '已配置' : '未配置' }}</t-tag></div>
       <div class="form">
-        <p class="hint">用于需求理解、逐轮澄清、知识研究和 SQL 复核。请配置支持结构化 JSON 输出的模型。</p>
+        <p class="hint">用于需求理解、逐轮澄清、知识研究和 SQL 说明。请配置支持结构化 JSON 输出的模型。</p>
         <div class="model-fields">
           <label>API 地址（OpenAI 兼容）<t-input v-model="modelForm.base_url" placeholder="https://your-provider.example/v1" /></label>
           <label>模型名称<t-input v-model="modelForm.model" placeholder="填写服务商提供的模型 ID" /></label>
@@ -99,83 +57,6 @@ onMounted(async () => { await Promise.all([load(), loadModel()]) })
       </div>
     </section>
 
-    <div class="policy-meta panel">
-      <div><small>当前策略版本</small><code>{{ form.policy_version || '加载中…' }}</code></div>
-      <div><small>配置版本</small><strong>v{{ form.version }}</strong></div>
-      <div><small>最后更新</small><strong>{{ form.updated_at ? new Date(form.updated_at).toLocaleString() : '—' }}</strong></div>
-      <div><small>发布人</small><strong>{{ form.updated_by }}</strong></div>
-    </div>
-
-    <t-loading :loading="loading" show-overlay>
-      <div class="settings-grid">
-        <section class="panel">
-          <div class="panel-title">审批策略</div>
-          <div class="form">
-            <label class="switch-row">口径明确后仍需人工确认方案<t-switch v-model="form.require_plan_confirmation"/></label>
-            <label>默认模式
-              <t-select v-model="form.approval_mode">
-                <t-option value="disabled" label="关闭审批"/>
-                <t-option value="all" label="全部审批"/>
-                <t-option value="risk_based" label="风险审批"/>
-              </t-select>
-            </label>
-            <label>风险触发条件
-              <div class="checks">
-                <t-checkbox v-model="form.approve_sensitive_detail">敏感字段明细</t-checkbox>
-                <t-checkbox v-model="form.approve_large_result">预估超过阈值</t-checkbox>
-                <t-checkbox v-model="form.approve_cross_organization">跨机构范围</t-checkbox>
-              </div>
-            </label>
-            <label>大结果集阈值
-              <t-input-number v-model="form.large_result_threshold" :min="1000" :max="100000000"/>
-            </label>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-title">查询硬限制</div>
-          <div class="form two">
-            <label>超时时间
-              <t-input-number v-model="form.query_timeout_seconds" :min="1" :max="30" suffix="秒"/>
-            </label>
-            <label>最大行数
-              <t-input-number v-model="form.max_result_rows" :min="1" :max="1000"/>
-            </label>
-            <label>最大结果
-              <t-input-number v-model="form.max_result_mb" :min="1" :max="10" suffix="MB"/>
-            </label>
-            <label>页面预览
-              <t-input-number v-model="form.preview_rows" :min="1" :max="form.max_result_rows" suffix="行"/>
-            </label>
-          </div>
-          <p class="hint">这些值只能收紧 Executor 的 30 秒、1,000 行和 10 MB 安全上限。</p>
-        </section>
-
-        <section class="panel">
-          <div class="panel-title">服务</div>
-          <div class="service-list">
-            <div><span><i class="status-dot"></i>WeKnora Wiki</span><t-tag variant="light">可选辅助</t-tag></div>
-            <div><span><i class="status-dot"></i>Semora Ontology Core</span><t-tag theme="success" variant="light">内建</t-tag></div>
-            <div><span><i class="status-dot"></i>Semantic Planner</span><t-tag theme="success" variant="light">内建</t-tag></div>
-            <div><span><i class="status-dot"></i>Keycloak OIDC</span><t-tag variant="light">身份服务</t-tag></div>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-title">模型与 Reviewer</div>
-          <div class="form">
-            <label>模型协议<t-input value="OpenAI-compatible" readonly/></label>
-            <label class="switch-row">Reviewer 隔离上下文<t-switch v-model="form.reviewer_isolated_context"/></label>
-            <label>推理展示
-              <t-radio-group v-model="form.reasoning_display">
-                <t-radio value="structured">结构化依据</t-radio>
-                <t-radio value="hidden">仅展示结论</t-radio>
-              </t-radio-group>
-            </label>
-          </div>
-        </section>
-      </div>
-    </t-loading>
   </div>
 </template>
 

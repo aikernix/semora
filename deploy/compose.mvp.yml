@@ -1,11 +1,16 @@
 # Use with: docker compose -f docker-compose.yml -f deploy/compose.mvp.yml up -d web
-# Six long-running services; migration jobs exit after preparing the database.
+# Five long-running services; migration jobs exit after preparing the database.
 services:
   api:
     environment:
       OTEL_EXPORTER_OTLP_ENDPOINT: ""
-      AUDIT_EXPORTER_URL: ""
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-300}
+      SEMORA_DEBUG_PAYLOADS: ${SEMORA_DEBUG_PAYLOADS:-false}
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     depends_on: !override
       migrate:
         condition: service_completed_successfully
@@ -14,8 +19,6 @@ services:
       postgres:
         condition: service_healthy
       executor:
-        condition: service_healthy
-      semantic-planner:
         condition: service_healthy
       ontology:
         condition: service_healthy
@@ -29,13 +32,6 @@ services:
       postgres:
         condition: service_healthy
 
-  semantic-planner:
-    environment:
-      OTEL_EXPORTER_OTLP_ENDPOINT: ""
-    depends_on: !reset {}
-
-  audit-exporter:
-    profiles: ["extended"]
   object-store:
     profiles: ["extended"]
   otel-collector:

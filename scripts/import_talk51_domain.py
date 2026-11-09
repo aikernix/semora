@@ -150,8 +150,6 @@ def main():
         if not issues and args.publish:
             snapshot=call('POST','/ontology/publish',params={'domain':'talk51'})
             save('snapshot.json',snapshot)
-            for source_id,artifact in snapshot['wrenArtifact']['sourceProjects'].items():
-                save('wren-'+source_id+'.json',artifact)
             report.update(published=True,contentHash=snapshot['contentHash'],artifactVersion=snapshot['artifactVersion'])
         after=call('GET','/ontology/publication-status',params={'domain':'bank_analysis'})
         bank_after=call('GET','/ontology/drafts/bank_analysis')

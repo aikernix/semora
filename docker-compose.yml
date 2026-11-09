@@ -37,7 +37,6 @@ services:
     environment:
       METADATA_DATABASE_URL: postgresql://semora:semora@postgres:5432/semora_business
       METADATA_API_ROLE: semora_api
-      AUDIT_EXPORTER_DATABASE_ROLE: semora_audit_exporter
     depends_on:
       postgres:
         condition: service_healthy
@@ -83,53 +82,6 @@ services:
     ports:
       - "8002:8002"
 
-  audit-exporter:
-    build:
-      context: .
-      dockerfile: services/audit-exporter/Dockerfile
-    environment:
-      AUDIT_EXPORTER_DATABASE_URL: postgresql://semora_audit_exporter:semora_audit_exporter@postgres:5432/semora_business
-      AUDIT_ARCHIVE_S3_ENDPOINT: http://object-store:8333
-      AUDIT_ARCHIVE_S3_BUCKET: semora-audit
-      AUDIT_ARCHIVE_S3_ACCESS_KEY: semora-knowledge-access
-      AUDIT_ARCHIVE_S3_SECRET_KEY: semora-object-store-dev
-      AUDIT_ARCHIVE_S3_REGION: us-east-1
-      AUDIT_ARCHIVE_S3_SSE_MODE: ${AUDIT_ARCHIVE_S3_SSE_MODE:-disabled}
-      AUDIT_ARCHIVE_S3_KMS_KEY_ID: ${AUDIT_ARCHIVE_S3_KMS_KEY_ID:-}
-      AUDIT_ARCHIVE_S3_REQUIRE_VERSIONING: ${AUDIT_ARCHIVE_S3_REQUIRE_VERSIONING:-false}
-      AUDIT_ARCHIVE_WORM_MODE: disabled
-      AUDIT_ARCHIVE_RETENTION_YEARS: "10"
-      AUDIT_ARCHIVE_POLL_SECONDS: "2"
-      AUDIT_KAFKA_BOOTSTRAP_SERVERS: ${AUDIT_KAFKA_BOOTSTRAP_SERVERS:-}
-      AUDIT_KAFKA_TOPIC: ${AUDIT_KAFKA_TOPIC:-semora.audit.archived}
-      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-semora-dev-internal}
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
-      SEMORA_ENVIRONMENT: demo
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-      object-store:
-        condition: service_healthy
-      otel-collector:
-        condition: service_started
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8004/healthz', timeout=10)",
-        ]
-      interval: 10s
-      timeout: 30s
-      retries: 30
-      start_period: 30s
-    restart: unless-stopped
-    ports:
-      - "8004:8004"
-
   langgraph-migrate:
     image: semora-api:dev
     build:
@@ -143,33 +95,6 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: "no"
-
-  semantic-planner:
-    build:
-      context: .
-      dockerfile: services/semantic-planner/Dockerfile
-    environment:
-      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-semora-dev-internal}
-      REQUIRE_INTERNAL_TOKEN: "true"
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
-      SEMORA_ENVIRONMENT: demo
-    depends_on:
-      otel-collector:
-        condition: service_started
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8001/healthz', timeout=10)",
-        ]
-      interval: 10s
-      timeout: 30s
-      retries: 30
-      start_period: 30s
-    ports:
-      - "8001:8001"
 
   ontology-migrate:
     image: semora-ontology:dev
@@ -362,9 +287,7 @@ services:
       WEKNORA_API_KEY: ${SEMORA_WEKNORA_API_KEY:-}
       WEKNORA_AGENT_ID: ${WEKNORA_AGENT_ID:-builtin-wiki-researcher}
       WEKNORA_AGENT_TIMEOUT_SECONDS: ${WEKNORA_AGENT_TIMEOUT_SECONDS:-180}
-      SEMANTIC_PLANNER_URL: http://semantic-planner:8001
       ONTOLOGY_URL: http://ontology:8081
-      AUDIT_EXPORTER_URL: http://audit-exporter:8004
       KNOWLEDGE_UPLOAD_MAX_BYTES: ${KNOWLEDGE_UPLOAD_MAX_BYTES:-26214400}
       OIDC_ISSUER: ${OIDC_ISSUER:-http://localhost:8088/realms/semora}
       OIDC_JWKS_URL: http://keycloak:8080/realms/semora/protocol/openid-connect/certs
@@ -384,15 +307,9 @@ services:
       LLM_ENABLE_THINKING: ${LLM_ENABLE_THINKING:-}
       LLM_NO_DELIVERY_SECONDS: ${LLM_NO_DELIVERY_SECONDS:-60}
       AGENT_MAX_NO_PROGRESS: ${AGENT_MAX_NO_PROGRESS:-3}
-      AGENT_QUERY_INTENT: ${AGENT_QUERY_INTENT:-true}
-      AGENT_BOUNDED_CONTEXT: ${AGENT_BOUNDED_CONTEXT:-false}
       AGENT_TIMEOUT_SECONDS: ${AGENT_TIMEOUT_SECONDS:-900}
-      REVIEW_TIMEOUT_SECONDS: ${REVIEW_TIMEOUT_SECONDS:-120}
       AGENT_CONTEXT_MAX_BYTES: ${AGENT_CONTEXT_MAX_BYTES:-256000}
       AGENT_ANALYST_CONTEXT_MAX_BYTES: ${AGENT_ANALYST_CONTEXT_MAX_BYTES:-131072}
-      AGENT_REVIEWER_CONTEXT_MAX_BYTES: ${AGENT_REVIEWER_CONTEXT_MAX_BYTES:-131072}
-      AGENT_STAGED_PROTOCOL: ${AGENT_STAGED_PROTOCOL:-false}
-      AGENT_TASK_MEMORY: ${AGENT_TASK_MEMORY:-false}
       SEMORA_DEMO_SEED: ${SEMORA_DEMO_SEED:-false}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       SEMORA_ENVIRONMENT: demo
@@ -406,10 +323,6 @@ services:
       postgres:
         condition: service_healthy
       executor:
-        condition: service_healthy
-      audit-exporter:
-        condition: service_healthy
-      semantic-planner:
         condition: service_healthy
       ontology:
         condition: service_healthy

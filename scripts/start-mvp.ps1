@@ -57,7 +57,7 @@ if (-not $ready) { throw 'Docker Engine is unavailable; no project containers we
 Write-Host "Docker Engine: $engineVersion"
 
 # Do not stop unrelated Compose projects or touch any volumes.
-$optional = @('keycloak', 'knowledge', 'knowledge-worker', 'audit-exporter', 'object-store', 'otel-collector')
+$optional = @('keycloak', 'knowledge', 'knowledge-worker', 'object-store', 'otel-collector')
 $containers = @(docker compose -f docker-compose.yml ps -a --format '{{.Service}}')
 if ($LASTEXITCODE -ne 0) { throw 'Cannot list Semora containers.' }
 $existingOptional = @($optional | Where-Object { $containers -contains $_ })
