@@ -25,7 +25,7 @@ def test_business_result_description_and_titles_preserve_sql_and_parameters(monk
     run = asyncio.run(workflow.start(session.id, "列出符合条件的对象", domain="test"))
     assert run.status.value == "completed", run.error
     assert run.result.rows == [[1]]
-    assert run.answer == "按您确认的范围列出符合条件的对象。 本次共找到 1 条结果。"
+    assert run.answer == "本次查询返回 1 条结果。"
     assert run.plan.sql_program.steps[-1].output_labels == {"id": "对象编号"}
     assert "active_flag" in run.plan.sql_program.steps[-1].parameters
     assert "flag" in execute.await_args.args[0]

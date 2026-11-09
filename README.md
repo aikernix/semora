@@ -13,12 +13,14 @@
 或：
 
 ```powershell
-docker compose -f docker-compose.yml -f deploy/compose.mvp.yml up -d --build web
+docker compose -f docker-compose.yml -f deploy/compose.mvp.yml up -d --build --remove-orphans web
 ```
 
 页面：<http://127.0.0.1:5173>。设置页配置模型；数据源页配置只读连接并扫描结构；本体页发布映射及关系；知识库可绑定外部 WeKnora，也可暂不绑定。
 
 常驻服务只有 Web、API、Ontology、Executor、PostgreSQL。`migrate`、`langgraph-migrate`、`ontology-migrate` 是一次性元数据迁移任务。业务数据库由 Executor 连接；模型和 API 不持有业务连接密码。内嵌 DuckDB 只处理本次查询的中间结果，不是另一个常驻服务。
+
+本地知识库 API、解析 Worker、对象存储、内置 Keycloak 和 OTEL Collector 已从部署中移除。知识能力统一通过外部 WeKnora API 提供；现有认证适配器可按需连接外部身份服务。启动命令会移除同一 Compose 项目的旧孤立容器，不删除数据卷；已有数据库和历史任务保留。
 
 ## 代码入口
 

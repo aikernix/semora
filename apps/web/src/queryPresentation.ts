@@ -41,7 +41,10 @@ export function resultDescription(run: QueryRun) {
   const answer = (run.answer || '').trim()
   const explanation = answer.replace(/\s*本次共找到\s*[\d,]+\s*条结果。?$/, '').trim()
   const scope = (run.requirement?.summary || run.requirement_draft?.summary || '').trim()
-  return !explanation || explanation === scope ? '' : answer
+  if (explanation && explanation !== scope) return answer
+  if (!run.result) return ''
+  if (!run.result.row_count) return '按已确认条件查询，未找到符合条件的记录。'
+  return `本次查询返回 ${run.result.row_count.toLocaleString()} 条结果。` + (run.result.truncated ? '结果已达到返回上限，可能还有符合条件的记录。' : '')
 }
 
 export function businessFailure(run: QueryRun) {

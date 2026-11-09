@@ -1,4 +1,5 @@
 """Confirmation replay must preserve facts without repeating finished analysis."""
+from helpers import query_model_calls
 
 import asyncio
 from copy import deepcopy
@@ -56,7 +57,7 @@ def test_direction_then_business_confirmation_survives_workflow_recreation(monke
     run = asyncio.run(scenario())
     assert run.status == RunStatus.COMPLETED, run.error
     assert runner.await_count == 2  # Finished direction analysis was replayed from cache.
-    assert model.complete_json.await_count == 1
+    assert len(query_model_calls(model)) == 1
     assert execute.await_count == 1
     assert len(run.alignment_rounds) == len(run.clarification_history) == 2
     cards = [e for e in run.events if e.event == "alignment.required"]
@@ -65,7 +66,7 @@ def test_direction_then_business_confirmation_survives_workflow_recreation(monke
         ("focus", "ALL_ITEMS"),
         ("period", "Only the current period"),
     ]
-    assert "Only the current period" in model.complete_json.await_args.args[1]
+    assert "Only the current period" in query_model_calls(model)[-1].args[1]
 
 
 def test_hidden_branch_answers_do_not_become_confirmed_facts(monkeypatch):
@@ -82,7 +83,7 @@ def test_hidden_branch_answers_do_not_become_confirmed_facts(monkeypatch):
     run = asyncio.run(scenario())
     assert run.status == RunStatus.COMPLETED, run.error
     assert [(f.question_id, f.value) for f in run.user_answers] == [("scope", "SOME_ITEMS")]
-    assert "stale hidden answer" not in model.complete_json.await_args.args[1]
+    assert "stale hidden answer" not in query_model_calls(model)[-1].args[1]
 
 
 def test_answers_are_saved_before_a_followup_model_failure(monkeypatch):

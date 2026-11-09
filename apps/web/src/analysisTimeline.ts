@@ -70,6 +70,8 @@ export function analysisOutcomes(events: RunEvent[]): AnalysisOutcome[] {
       const req = d.requirement || {}
       const questions = (req.clarifications || []).map((q: any) => q.question)
       if (questions.length) add(e, '需要你补充', questions.join('；'), (req.clarifications || []).map((q: any) => q.reason).filter(Boolean))
+    } else if (e.event === 'result.summary.completed') {
+      add(e, d.mode === 'model' ? '形成业务结论' : '整理基本结果说明', text(d.summary))
     } else if (e.event === 'source.step.completed') {
       add(e, '完成数据查询', `${text(d.summary) || '已取得所需信息'}${d.row_count !== undefined ? `，找到 ${d.row_count} 条记录` : ''}`)
     } else if (e.event === 'plan.revision.stalled') {

@@ -1,17 +1,6 @@
 name: semora
 
 services:
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.137.0
-    command: ["--config=/etc/otelcol-contrib/config.yaml"]
-    volumes:
-      - ./deploy/otel/collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
-    restart: unless-stopped
-    ports:
-      - "14317:4317"
-      - "14318:4318"
-      - "13133:13133"
-
   postgres:
     image: pgvector/pgvector:pg16
     environment:
@@ -49,20 +38,14 @@ services:
       BUSINESS_DATABASE_URL: postgresql://semora_reader:semora_reader@postgres:5432/semora_business
       DATASOURCE_RETAIL_CREDIT_PG_URL: postgresql://semora_reader:semora_reader@postgres:5432/semora_business
       DATASOURCE_BANK_MYSQL_URL: ${DATASOURCE_BANK_MYSQL_URL:-}
-      DATASOURCE_TALK51_CRM_URL: ${DATASOURCE_TALK51_CRM_URL:-}
-      DATASOURCE_TALK51_APPOINT_URL: ${DATASOURCE_TALK51_APPOINT_URL:-}
-      DATASOURCE_TALK51_LOG_URL: ${DATASOURCE_TALK51_LOG_URL:-}
-      DATASOURCE_TALK51_CONTENT_URL: ${DATASOURCE_TALK51_CONTENT_URL:-}
       QUERY_TIMEOUT_MS: "30000"
       MAX_RESULT_ROWS: "1000"
       MAX_RESULT_BYTES: "10485760"
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:-semora-dev-internal}
       REQUIRE_INTERNAL_TOKEN: "true"
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
       SEMORA_ENVIRONMENT: demo
     depends_on:
-      otel-collector:
-        condition: service_started
       migrate:
         condition: service_completed_successfully
       postgres:
@@ -132,147 +115,6 @@ services:
     ports:
       - "8081:8081"
 
-  knowledge-migrate:
-    profiles: ["native-knowledge"]
-    image: semora-knowledge:dev
-    build:
-      context: .
-      dockerfile: services/knowledge/Dockerfile
-    command: ["python", "-m", "app.migrate"]
-    environment:
-      KNOWLEDGE_DATABASE_URL: postgresql://semora:semora@postgres:5432/semora_business
-      KNOWLEDGE_DATA_DIR: /data/uploads
-      KNOWLEDGE_SEED_DIR: /app/seed
-      SEMORA_DEMO_SEED: ${SEMORA_DEMO_SEED:-false}
-      KNOWLEDGE_OBJECT_STORE: ${KNOWLEDGE_OBJECT_STORE:-s3}
-      KNOWLEDGE_S3_ENDPOINT: ${KNOWLEDGE_S3_ENDPOINT:-http://object-store:8333}
-      KNOWLEDGE_S3_BUCKET: ${KNOWLEDGE_S3_BUCKET:-semora-knowledge}
-      KNOWLEDGE_S3_ACCESS_KEY: ${KNOWLEDGE_S3_ACCESS_KEY:-semora-knowledge-access}
-      KNOWLEDGE_S3_SECRET_KEY: ${KNOWLEDGE_S3_SECRET_KEY:-semora-object-store-dev}
-      KNOWLEDGE_S3_REGION: ${KNOWLEDGE_S3_REGION:-us-east-1}
-      KNOWLEDGE_S3_SSE_MODE: ${KNOWLEDGE_S3_SSE_MODE:-disabled}
-      KNOWLEDGE_S3_KMS_KEY_ID: ${KNOWLEDGE_S3_KMS_KEY_ID:-}
-      KNOWLEDGE_S3_REQUIRE_VERSIONING: ${KNOWLEDGE_S3_REQUIRE_VERSIONING:-false}
-      OCR_MODE: ${OCR_MODE:-tesseract}
-      OCR_LANG: ${OCR_LANG:-chi_sim+eng}
-      OCR_TIMEOUT_SECONDS: ${OCR_TIMEOUT_SECONDS:-60}
-      OCR_PDF_SCALE: ${OCR_PDF_SCALE:-2.0}
-      OCR_MAX_PIXELS: ${OCR_MAX_PIXELS:-50000000}
-      OCR_MAX_PDF_PAGES: ${OCR_MAX_PDF_PAGES:-200}
-      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
-      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
-      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      object-store:
-        condition: service_healthy
-    volumes:
-      - semora-knowledge:/data/uploads
-    restart: "no"
-
-  knowledge:
-    profiles: ["native-knowledge"]
-    image: semora-knowledge:dev
-    build:
-      context: .
-      dockerfile: services/knowledge/Dockerfile
-    environment:
-      KNOWLEDGE_DATABASE_URL: postgresql://semora:semora@postgres:5432/semora_business
-      KNOWLEDGE_DATA_DIR: /data/uploads
-      KNOWLEDGE_SEED_DIR: /app/seed
-      KNOWLEDGE_UPLOAD_MAX_BYTES: ${KNOWLEDGE_UPLOAD_MAX_BYTES:-26214400}
-      KNOWLEDGE_OBJECT_STORE: ${KNOWLEDGE_OBJECT_STORE:-s3}
-      KNOWLEDGE_S3_ENDPOINT: ${KNOWLEDGE_S3_ENDPOINT:-http://object-store:8333}
-      KNOWLEDGE_S3_BUCKET: ${KNOWLEDGE_S3_BUCKET:-semora-knowledge}
-      KNOWLEDGE_S3_ACCESS_KEY: ${KNOWLEDGE_S3_ACCESS_KEY:-semora-knowledge-access}
-      KNOWLEDGE_S3_SECRET_KEY: ${KNOWLEDGE_S3_SECRET_KEY:-semora-object-store-dev}
-      KNOWLEDGE_S3_REGION: ${KNOWLEDGE_S3_REGION:-us-east-1}
-      KNOWLEDGE_S3_SSE_MODE: ${KNOWLEDGE_S3_SSE_MODE:-disabled}
-      KNOWLEDGE_S3_KMS_KEY_ID: ${KNOWLEDGE_S3_KMS_KEY_ID:-}
-      KNOWLEDGE_S3_REQUIRE_VERSIONING: ${KNOWLEDGE_S3_REQUIRE_VERSIONING:-false}
-      OCR_MODE: ${OCR_MODE:-tesseract}
-      OCR_LANG: ${OCR_LANG:-chi_sim+eng}
-      OCR_TIMEOUT_SECONDS: ${OCR_TIMEOUT_SECONDS:-60}
-      OCR_PDF_SCALE: ${OCR_PDF_SCALE:-2.0}
-      OCR_MAX_PIXELS: ${OCR_MAX_PIXELS:-50000000}
-      OCR_MAX_PDF_PAGES: ${OCR_MAX_PDF_PAGES:-200}
-      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
-      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
-      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
-      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-semora-dev-internal}
-      REQUIRE_INTERNAL_TOKEN: "true"
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
-      SEMORA_ENVIRONMENT: demo
-    depends_on:
-      otel-collector:
-        condition: service_started
-      knowledge-migrate:
-        condition: service_completed_successfully
-    volumes:
-      - semora-knowledge:/data/uploads
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8003/healthz', timeout=10)",
-        ]
-      interval: 10s
-      timeout: 30s
-      retries: 30
-      start_period: 30s
-    restart: unless-stopped
-    ports:
-      - "8003:8003"
-
-  knowledge-worker:
-    profiles: ["native-knowledge"]
-    image: semora-knowledge:dev
-    build:
-      context: .
-      dockerfile: services/knowledge/Dockerfile
-    command: ["python", "-m", "app.worker"]
-    environment:
-      KNOWLEDGE_DATABASE_URL: postgresql://semora:semora@postgres:5432/semora_business
-      KNOWLEDGE_DATA_DIR: /data/uploads
-      KNOWLEDGE_OBJECT_STORE: ${KNOWLEDGE_OBJECT_STORE:-s3}
-      KNOWLEDGE_S3_ENDPOINT: ${KNOWLEDGE_S3_ENDPOINT:-http://object-store:8333}
-      KNOWLEDGE_S3_BUCKET: ${KNOWLEDGE_S3_BUCKET:-semora-knowledge}
-      KNOWLEDGE_S3_ACCESS_KEY: ${KNOWLEDGE_S3_ACCESS_KEY:-semora-knowledge-access}
-      KNOWLEDGE_S3_SECRET_KEY: ${KNOWLEDGE_S3_SECRET_KEY:-semora-object-store-dev}
-      KNOWLEDGE_S3_REGION: ${KNOWLEDGE_S3_REGION:-us-east-1}
-      KNOWLEDGE_S3_SSE_MODE: ${KNOWLEDGE_S3_SSE_MODE:-disabled}
-      KNOWLEDGE_S3_KMS_KEY_ID: ${KNOWLEDGE_S3_KMS_KEY_ID:-}
-      KNOWLEDGE_S3_REQUIRE_VERSIONING: ${KNOWLEDGE_S3_REQUIRE_VERSIONING:-false}
-      OCR_MODE: ${OCR_MODE:-tesseract}
-      OCR_LANG: ${OCR_LANG:-chi_sim+eng}
-      OCR_TIMEOUT_SECONDS: ${OCR_TIMEOUT_SECONDS:-60}
-      OCR_PDF_SCALE: ${OCR_PDF_SCALE:-2.0}
-      OCR_MAX_PIXELS: ${OCR_MAX_PIXELS:-50000000}
-      OCR_MAX_PDF_PAGES: ${OCR_MAX_PDF_PAGES:-200}
-      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
-      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
-      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
-      KNOWLEDGE_WORKER_POLL_SECONDS: ${KNOWLEDGE_WORKER_POLL_SECONDS:-1}
-      KNOWLEDGE_JOB_LEASE_SECONDS: ${KNOWLEDGE_JOB_LEASE_SECONDS:-900}
-    depends_on:
-      knowledge-migrate:
-        condition: service_completed_successfully
-    volumes:
-      - semora-knowledge:/data/uploads
-    healthcheck:
-      test: ["CMD", "python", "-m", "app.worker", "healthcheck"]
-      interval: 10s
-      timeout: 30s
-      retries: 30
-      start_period: 30s
-    restart: unless-stopped
-
   api:
     image: semora-api:dev
     build:
@@ -282,20 +124,18 @@ services:
       EXECUTOR_URL: http://executor:8002
       METADATA_DATABASE_URL: postgresql://semora_api:semora_api@postgres:5432/semora_business
       LANGGRAPH_DATABASE_URL: postgresql://semora_api:semora_api@postgres:5432/semora_business?options=-csearch_path%3Dsemora_meta
-      KNOWLEDGE_PROVIDER: ${KNOWLEDGE_PROVIDER:-weknora}
       WEKNORA_BASE_URL: ${SEMORA_WEKNORA_BASE_URL:-}
       WEKNORA_API_KEY: ${SEMORA_WEKNORA_API_KEY:-}
       WEKNORA_AGENT_ID: ${WEKNORA_AGENT_ID:-builtin-wiki-researcher}
       WEKNORA_AGENT_TIMEOUT_SECONDS: ${WEKNORA_AGENT_TIMEOUT_SECONDS:-180}
       ONTOLOGY_URL: http://ontology:8081
       KNOWLEDGE_UPLOAD_MAX_BYTES: ${KNOWLEDGE_UPLOAD_MAX_BYTES:-26214400}
-      OIDC_ISSUER: ${OIDC_ISSUER:-http://localhost:8088/realms/semora}
-      OIDC_JWKS_URL: http://keycloak:8080/realms/semora/protocol/openid-connect/certs
-      OIDC_AUDIENCE: semora-web
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_JWKS_URL: ${OIDC_JWKS_URL:-}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:-semora-web}
       AUTH_REQUIRED: ${AUTH_REQUIRED:-false}
       CORS_ORIGINS: http://localhost:5173
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:-semora-dev-internal}
-      ALLOW_LOCAL_PLANNER_FALLBACK: "false"
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
@@ -311,11 +151,9 @@ services:
       AGENT_CONTEXT_MAX_BYTES: ${AGENT_CONTEXT_MAX_BYTES:-256000}
       AGENT_ANALYST_CONTEXT_MAX_BYTES: ${AGENT_ANALYST_CONTEXT_MAX_BYTES:-131072}
       SEMORA_DEMO_SEED: ${SEMORA_DEMO_SEED:-false}
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
       SEMORA_ENVIRONMENT: demo
     depends_on:
-      otel-collector:
-        condition: service_started
       migrate:
         condition: service_completed_successfully
       langgraph-migrate:
@@ -358,49 +196,6 @@ services:
     ports:
       - "5173:8080"
 
-  keycloak:
-    image: quay.io/keycloak/keycloak:26.0
-    command: ["start-dev", "--import-realm"]
-    environment:
-      KC_BOOTSTRAP_ADMIN_USERNAME: admin
-      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
-      KC_HEALTH_ENABLED: "true"
-    volumes:
-      - ./deploy/keycloak/semora-realm.json:/opt/keycloak/data/import/semora-realm.json:ro
-    ports:
-      - "8088:8080"
-
-  object-store:
-    image: chrislusf/seaweedfs:4.51
-    command:
-      [
-        "server",
-        "-dir=/data",
-        "-ip=object-store",
-        "-ip.bind=0.0.0.0",
-        "-filer",
-        "-volume.max=0",
-        "-master.volumeSizeLimitMB=100",
-        "-s3",
-        "-s3.port=8333",
-        "-s3.config=/etc/seaweedfs/s3.json",
-      ]
-    volumes:
-      - semora-object-store:/data
-      - ./deploy/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9333/cluster/status"]
-      interval: 10s
-      timeout: 30s
-      retries: 30
-      start_period: 30s
-    restart: unless-stopped
-    ports:
-      - "${SEMORA_OBJECT_STORE_PORT:-19100}:8333"
-      - "${SEMORA_OBJECT_STORE_ADMIN_PORT:-19101}:9333"
-
 volumes:
   semora-postgres:
-  semora-knowledge:
-  semora-object-store:
 

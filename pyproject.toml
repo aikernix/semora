@@ -1,5 +1,5 @@
 [tool.pytest.ini_options]
-pythonpath = ["services/api", "services/agent", "packages/contracts/python", "packages/telemetry/python", "packages/s3-security/python"]
+pythonpath = ["services/api", "services/agent", "packages/contracts/python", "packages/telemetry/python"]
 testpaths = ["services/api/tests"]
 addopts = "-q"
 

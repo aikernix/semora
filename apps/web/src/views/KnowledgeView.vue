@@ -90,8 +90,8 @@ async function bindDomain() {
   }
 }
 
-async function testAgent() {
-  if (!query.value.trim() || !selectedKb.value) return
+async function testRetrieval() {
+  if (testing.value || !query.value.trim() || !selectedKb.value) return
   testing.value = true
   research.value = null
   error.value = ''
@@ -101,7 +101,7 @@ async function testAgent() {
       knowledge_base_ids: [selectedKb.value],
     }, { timeout: 200_000 })).data
   } catch (reason: any) {
-    error.value = reason?.response?.data?.detail || 'Wiki Agent 测试失败'
+    error.value = reason?.response?.data?.detail || '知识检索测试失败'
   } finally {
     testing.value = false
   }
@@ -117,7 +117,7 @@ onMounted(load)
 <template>
   <div class="page">
     <div class="page-header">
-      <div><h1>知识库配置</h1><p>Semora 不重复解析文档；知识管理、Wiki 图谱和溯源检索由外部 WeKnora Wiki Researcher 完成。</p></div>
+      <div><h1>知识库配置</h1><p>知识由 WeKnora 维护；检索测试与查询工作台共用知识准备流程。</p></div>
       <div class="header-actions">
         <t-button variant="outline" :loading="loading" @click="load"><RefreshIcon />刷新连接</t-button>
         <t-button theme="primary" :disabled="!status.instance_url" @click="openWeKnora"><LinkIcon />打开 WeKnora</t-button>
@@ -130,7 +130,7 @@ onMounted(load)
     <section class="connection panel">
       <div><small>连接状态</small><strong><i class="status-dot"></i>{{ status.status === 'ready' ? '已连接' : status.status }}</strong></div>
       <div><small>WeKnora 实例</small><code>{{ status.instance_url || '未配置' }}</code></div>
-      <div><small>Wiki Agent</small><code>{{ status.agent_id || 'builtin-wiki-researcher' }}</code></div>
+      <div><small>检索流程</small><strong>与查询工作台共用</strong></div>
       <div><small>API Key</small><strong>{{ status.api_key_configured ? '已安全配置' : '未配置' }}</strong></div>
       <div><small>可访问知识库</small><strong>{{ bases.length }}</strong></div>
     </section>
@@ -162,10 +162,10 @@ onMounted(load)
       </section>
 
       <section class="panel test-panel">
-        <div class="panel-title">Wiki Agent ReAct 测试</div>
-        <div class="searchbar"><SearchIcon /><input v-model="query" placeholder="输入一个业务口径问题" @keydown.enter="testAgent" /><t-button :loading="testing" :disabled="!selectedKb" @click="testAgent">开始研究</t-button></div>
+        <div class="panel-title">知识检索测试</div>
+        <div class="searchbar"><SearchIcon /><input v-model="query" placeholder="输入需求，测试相关知识检索" aria-label="知识检索测试输入" @keydown.enter="testRetrieval" /><t-button :loading="testing" :disabled="!selectedKb || !query.trim()" @click="testRetrieval">开始检索</t-button></div>
         <div v-if="research" class="research">
-          <div class="answer"><small>Agent 结论</small><p>{{ research.answer || 'Agent 未返回文字结论' }}</p></div>
+          <div class="answer"><small>检索概况</small><p>{{ research.answer }}</p></div>
           <div class="trace">
             <article v-for="(step, index) in research.steps" :key="`${step.kind}-${index}`"><span>{{ index + 1 }}</span><div><strong>{{ step.tool || step.kind }}</strong><p>{{ step.summary }}</p></div></article>
           </div>
@@ -173,14 +173,13 @@ onMounted(load)
             <h3>可溯源证据（{{ research.evidence.length }}）</h3>
             <article v-for="item in research.evidence" :key="item.chunk_id"><strong>{{ item.title }}</strong><small>{{ item.locator }} · {{ item.revision }}</small><p>{{ item.summary }}</p></article>
           </div>
-          <small class="session">WeKnora Session：{{ research.session_id }}</small>
         </div>
-        <div v-else class="empty-hint">测试会创建 WeKnora Agent 会话，沿 Wiki/图谱检索，并验证是否返回可引用来源。</div>
+        <div v-else class="empty-hint">与查询工作台使用相同流程：生成最多5个检索词，逐词搜索并读取相关页面，展示检索记录与来源。</div>
       </section>
     </div>
   </div>
 </template>
 
 <style scoped>
-.header-actions{display:flex;gap:10px}.connection{display:grid;grid-template-columns:.8fr 1.5fr 1.4fr .9fr .7fr;margin-bottom:16px;overflow:hidden}.connection>div{padding:15px 17px;border-right:1px solid var(--semora-line);min-width:0}.connection>div:last-child{border:0}.connection small,.connection strong,.connection code{display:block}.connection small{color:var(--semora-muted);margin-bottom:7px}.connection code{font-size:12px;overflow-wrap:anywhere}.layout{display:grid;grid-template-columns:minmax(340px,.8fr) minmax(520px,1.4fr);gap:16px}.config-panel,.test-panel{overflow:hidden;height:max-content}.form{display:grid;gap:17px;padding:20px}.form label{display:grid;gap:8px;color:var(--semora-muted)}.kb-card{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:start;border:1px solid var(--semora-line);border-radius:10px;padding:14px}.kb-card>svg{color:var(--semora-green)}.kb-card small{display:block;color:var(--semora-muted);margin-top:4px;font-size:11px;overflow-wrap:anywhere}.kb-card p{margin:9px 0 0;color:var(--semora-muted);line-height:1.55;font-size:12px}.hint,.session{color:var(--semora-muted);font-size:12px;margin:0;line-height:1.55}.searchbar{display:flex;gap:10px;align-items:center;padding:16px;border-bottom:1px solid var(--semora-line)}.searchbar input{flex:1;border:0;background:var(--semora-page);border-radius:8px;padding:11px;outline:0;color:inherit}.research{padding:17px;display:grid;gap:15px}.answer{border-left:3px solid var(--semora-green);padding:2px 12px}.answer small{color:var(--semora-muted)}.answer p{line-height:1.7;margin:6px 0 0}.trace{display:grid;gap:8px}.trace article{display:flex;gap:10px;border:1px solid var(--semora-line);border-radius:8px;padding:10px}.trace article>span{width:22px;height:22px;display:grid;place-items:center;flex:none;border-radius:50%;background:var(--semora-green-soft);color:var(--semora-green-dark);font-size:11px}.trace p,.evidence p{margin:4px 0 0;color:var(--semora-muted);font-size:12px;line-height:1.55}.evidence h3{font-size:14px}.evidence article{border-top:1px solid var(--semora-line);padding:12px 0}.evidence small{display:block;color:var(--semora-muted);margin-top:4px}.empty-hint{padding:42px 24px;text-align:center;color:var(--semora-muted)}@media(max-width:1100px){.connection{grid-template-columns:1fr 1fr}.layout{grid-template-columns:1fr}}
+.header-actions{display:flex;gap:10px}.connection{display:grid;grid-template-columns:.8fr 1.5fr 1.4fr .9fr .7fr;margin-bottom:16px;overflow:hidden}.connection>div{padding:15px 17px;border-right:1px solid var(--semora-line);min-width:0}.connection>div:last-child{border:0}.connection small,.connection strong,.connection code{display:block}.connection small{color:var(--semora-muted);margin-bottom:7px}.connection code{font-size:12px;overflow-wrap:anywhere}.layout{display:grid;grid-template-columns:minmax(340px,.8fr) minmax(520px,1.4fr);gap:16px}.config-panel,.test-panel{overflow:hidden;height:max-content}.form{display:grid;gap:17px;padding:20px}.form label{display:grid;gap:8px;color:var(--semora-muted)}.kb-card{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:start;border:1px solid var(--semora-line);border-radius:10px;padding:14px}.kb-card>svg{color:var(--semora-green)}.kb-card small{display:block;color:var(--semora-muted);margin-top:4px;font-size:11px;overflow-wrap:anywhere}.kb-card p{margin:9px 0 0;color:var(--semora-muted);line-height:1.55;font-size:12px}.hint{color:var(--semora-muted);font-size:12px;margin:0;line-height:1.55}.searchbar{display:flex;gap:10px;align-items:center;padding:16px;border-bottom:1px solid var(--semora-line)}.searchbar input{flex:1;border:0;background:var(--semora-page);border-radius:8px;padding:11px;outline:0;color:inherit}.research{padding:17px;display:grid;gap:15px}.answer{border-left:3px solid var(--semora-green);padding:2px 12px}.answer small{color:var(--semora-muted)}.answer p{line-height:1.7;margin:6px 0 0}.trace{display:grid;gap:8px}.trace article{display:flex;gap:10px;border:1px solid var(--semora-line);border-radius:8px;padding:10px}.trace article>span{width:22px;height:22px;display:grid;place-items:center;flex:none;border-radius:50%;background:var(--semora-green-soft);color:var(--semora-green-dark);font-size:11px}.trace p,.evidence p{margin:4px 0 0;color:var(--semora-muted);font-size:12px;line-height:1.55}.evidence h3{font-size:14px}.evidence article{border-top:1px solid var(--semora-line);padding:12px 0}.evidence small{display:block;color:var(--semora-muted);margin-top:4px}.empty-hint{padding:42px 24px;text-align:center;color:var(--semora-muted)}@media(max-width:1100px){.connection{grid-template-columns:1fr 1fr}.layout{grid-template-columns:1fr}}
 </style>

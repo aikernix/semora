@@ -1,4 +1,5 @@
 """Generic SQL-native contracts, real relational execution, and bounded repair."""
+from helpers import query_model_calls
 import asyncio
 from copy import deepcopy
 from decimal import Decimal
@@ -149,7 +150,7 @@ def test_full_graph_uses_sql_authoring_not_intent_compiler(monkeypatch):
     assert not hasattr(w, '_compile')
     assert run.plan.sql_program
     assert run.requirement.analysis_steps and run.sql.dialect=='postgres'
-    assert 'SQLProgram' in model.complete_json.await_args.args[1]
+    assert 'SQLProgram' in query_model_calls(model)[-1].args[1]
     assert run.gate is run.review is run.approval is None
     from app.control_state import restore_run,run_payload
     restored=restore_run(run_payload(run))
@@ -197,7 +198,7 @@ def test_explain_error_repaired_with_concrete_diagnostic(monkeypatch):
     from semora_contracts import QueryRun
     restored=QueryRun.model_validate({**run.model_dump(mode='json'),'agent_memory':run.agent_memory})
     assert restored.agent_memory['sql_repair_count']==[{'attempts':1}]
-    assert '42703' in model.complete_json.await_args.args[1] and 'bad' in model.complete_json.await_args.args[1]
+    assert '42703' in query_model_calls(model)[-1].args[1] and 'bad' in query_model_calls(model)[-1].args[1]
     assert run.result.rows==[[1],[2]]
     assert estimate.await_count==2 and execute.await_count==1
 
@@ -210,8 +211,8 @@ def test_invalid_local_scope_is_corrected_as_program_before_sql_repair(monkeypat
     model.complete_json.side_effect=[invalid,correct]
     run=asyncio.run(w.start(session.id,'List items',domain='test'))
     assert run.status==RunStatus.COMPLETED,run.error
-    assert model.complete_json.await_count==2 and not run.agent_memory.get('sql_repair_count')
-    assert 'local不能访问物理表' in model.complete_json.await_args.args[1]
+    assert len(query_model_calls(model))==2 and not run.agent_memory.get('sql_repair_count')
+    assert 'local不能访问物理表' in query_model_calls(model)[-1].args[1]
     assert estimate.await_count==1 and execute.await_count==1
 
 
@@ -220,7 +221,7 @@ def test_connection_error_does_not_consume_model_repair(monkeypatch):
     estimate.side_effect=ExecutorOperationError('connect',2003)
     run=asyncio.run(w.start(session.id,'List items',domain='test'))
     assert run.status==RunStatus.FAILED and run.sql
-    assert model.complete_json.await_count==1 and not run.agent_memory.get('sql_repair_count')
+    assert len(query_model_calls(model))==1 and not run.agent_memory.get('sql_repair_count')
     execute.assert_not_called()
 
 
@@ -274,7 +275,7 @@ def test_repair_budget_shared_and_result_not_fabricated(monkeypatch):
         {'sql':'SELECT id*1 AS id FROM items','change_summary':'Second correction'}]
     run=asyncio.run(w.start(session.id,'List items',domain='test'))
     assert run.status==RunStatus.FAILED and run.result is None
-    assert model.complete_json.await_count==3 and estimate.await_count==3
+    assert len(query_model_calls(model))==3 and estimate.await_count==3
     assert run.agent_memory['sql_repair_count']==[{'attempts':2}]
     execute.assert_not_called()
 
@@ -290,8 +291,8 @@ def test_one_business_confirmation_then_author_without_reanalysis(monkeypatch):
         return run
     run=asyncio.run(scenario())
     assert run.status==RunStatus.COMPLETED,run.error
-    assert runner.await_count==1 and model.complete_json.await_count==1
-    assert 'Include all items' in model.complete_json.await_args.args[1]
+    assert runner.await_count==1 and len(query_model_calls(model))==1
+    assert 'Include all items' in query_model_calls(model)[-1].args[1]
 
 
 def test_prompts_are_industry_neutral_and_describe_only_role_contract():

@@ -1,40 +1,11 @@
-# Use with: docker compose -f docker-compose.yml -f deploy/compose.mvp.yml up -d web
-# Five long-running services; migration jobs exit after preparing the database.
+# MVP override; the base Compose now contains only the five runtime services
+# and three one-shot migration jobs.
 services:
   api:
     environment:
-      OTEL_EXPORTER_OTLP_ENDPOINT: ""
-      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-300}
       SEMORA_DEBUG_PAYLOADS: ${SEMORA_DEBUG_PAYLOADS:-false}
     logging:
       driver: json-file
       options:
         max-size: "50m"
         max-file: "5"
-    depends_on: !override
-      migrate:
-        condition: service_completed_successfully
-      langgraph-migrate:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-      executor:
-        condition: service_healthy
-      ontology:
-        condition: service_healthy
-
-  executor:
-    environment:
-      OTEL_EXPORTER_OTLP_ENDPOINT: ""
-    depends_on: !override
-      migrate:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-
-  object-store:
-    profiles: ["extended"]
-  otel-collector:
-    profiles: ["extended"]
-  keycloak:
-    profiles: ["extended"]

@@ -111,6 +111,7 @@ export interface QuerySession {
   domain: string
   created_at: string
   run_count: number
+  latest_status?: RunStatus | null
   requirement_form?: Record<string, string>
 }
 

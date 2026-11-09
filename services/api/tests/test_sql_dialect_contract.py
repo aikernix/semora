@@ -1,4 +1,5 @@
 """Dialect boundaries across authoring, review, conversion and bounded repair."""
+from helpers import query_model_calls
 
 import asyncio
 import json
@@ -61,7 +62,7 @@ def test_review_receives_baseline_contract_and_target_profile(monkeypatch):
     model.complete_json.side_effect = [program, {"edits": []}]
     run = asyncio.run(w.start(session.id, "Total amounts", domain="test"))
     assert run.status == RunStatus.COMPLETED, run.error
-    for call in model.complete_json.await_args_list:
+    for call in query_model_calls(model):
         payload = json.loads(call.args[1])
         assert payload["sql_contract"] == {"authoring_dialect": "postgres", "parameter_style": ":name"}
         assert payload["data_sources"][0]["version"] == "16.1"
@@ -77,8 +78,8 @@ def test_explain_repair_edits_baseline_then_recompiles(monkeypatch):
     assert run.status == RunStatus.COMPLETED, run.error
     # Technical repair notes are persisted verbatim, without another model call
     # to turn them into business copy.
-    assert model.complete_json.await_count == 2
-    payload = json.loads(model.complete_json.await_args.args[1])
+    assert len(query_model_calls(model)) == 2
+    payload = json.loads(query_model_calls(model)[-1].args[1])
     assert "actual_sql" not in payload and "error" not in payload
     assert payload["editable_baseline"]["dialect"] == "postgres"
     assert payload["editable_baseline"]["sql"] == "SELECT id FROM items ORDER BY id"
@@ -101,7 +102,7 @@ def test_compile_repair_does_not_expose_stale_target_as_current(monkeypatch):
     run.plan.sql_program.steps[0].sql = "SELECT missing FROM items"
     model.complete_json.return_value = {"sql": "SELECT id FROM items", "change_summary": "Correct reference"}
     asyncio.run(sql_authoring.repair_step(w, run, "q", {"error_type": "sql", "error_stage": "baseline_validation"}))
-    payload = json.loads(model.complete_json.await_args.args[1])
+    payload = json.loads(query_model_calls(model)[-1].args[1])
     assert payload["editable_baseline"]["sql"] == "SELECT missing FROM items"
     assert payload["execution_diagnostic"]["target_sql"] is None
     assert payload["execution_diagnostic"]["target_dialect"] == "postgres"

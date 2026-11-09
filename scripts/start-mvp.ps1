@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $projectRoot
 $env:DOCKER_HOST = 'npipe:////./pipe/dockerDesktopLinuxEngine'
@@ -29,7 +29,8 @@ if (-not (Test-Path '\\.\pipe\dockerDesktopLinuxEngine')) {
 }
 $ready = $false
 Write-Host 'Waiting for Docker Engine...'
-for ($attempt = 0; $attempt -lt 30; $attempt++) {
+$engineReadyDeadline = (Get-Date).AddMinutes(10)
+while ((Get-Date) -lt $engineReadyDeadline) {
     $probeInfo = New-Object System.Diagnostics.ProcessStartInfo
     $probeInfo.FileName = (Get-Command docker).Source
     $probeInfo.Arguments = 'version --format "{{.Server.Version}}"'
@@ -56,23 +57,7 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
 if (-not $ready) { throw 'Docker Engine is unavailable; no project containers were started.' }
 Write-Host "Docker Engine: $engineVersion"
 
-# Do not stop unrelated Compose projects or touch any volumes.
-$optional = @('keycloak', 'knowledge', 'knowledge-worker', 'object-store', 'otel-collector')
-$containers = @(docker compose -f docker-compose.yml ps -a --format '{{.Service}}')
-if ($LASTEXITCODE -ne 0) { throw 'Cannot list Semora containers.' }
-$existingOptional = @($optional | Where-Object { $containers -contains $_ })
-if ($existingOptional.Count -gt 0) {
-    docker compose -f docker-compose.yml --profile native-knowledge stop $existingOptional
-    if ($LASTEXITCODE -ne 0) { throw 'Cannot stop optional Semora services.' }
-    # Keep them stopped when Docker Desktop is launched again.
-    foreach ($service in $existingOptional) {
-        $ids = @(docker compose -f docker-compose.yml --profile native-knowledge ps -a -q $service)
-        foreach ($id in $ids) {
-            docker update --restart=no $id | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "Cannot disable automatic restart for $service." }
-        }
-    }
-}
-docker compose -f docker-compose.yml -f deploy/compose.mvp.yml up -d --no-build web
+# Remove retired containers of this Compose project; keep all data volumes.
+docker compose -f docker-compose.yml -f deploy/compose.mvp.yml up -d --no-build --remove-orphans web
 if ($LASTEXITCODE -ne 0) { throw 'Semora MVP startup failed.' }
 Write-Host 'Semora: http://127.0.0.1:5173'

@@ -13,6 +13,13 @@ from app import datasources
 from app.datasources import DataSourceRecord, DataSourceRepository
 
 
+def query_model_calls(model):
+    """Planning/repair assertions exclude the optional post-execution narrator."""
+    from semora_agent.sql_prompts import RESULT_SUMMARY
+
+    return [call for call in model.complete_json.await_args_list if call.args[0] != RESULT_SUMMARY]
+
+
 def harness(monkeypatch, *, validation_error=None):
     monkeypatch.delenv('METADATA_DATABASE_URL', raising=False)
     ont = {'domain': 'test', 'version': '1', 'dataSourceId': 'source',

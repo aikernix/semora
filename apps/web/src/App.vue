@@ -9,7 +9,7 @@ import { authState, hasRole, logout } from './auth'
 
 const route = useRoute()
 const router = useRouter()
-const collapsed = ref(false)
+const collapsed = ref(true)
 const dark = ref(false)
 const items = computed(() => [
   { path: '/workbench', label: '查询工作台', icon: BrowseIcon, visible: hasRole('business_user', 'analyst', 'admin') },
@@ -35,7 +35,7 @@ function toggleDark() {
         <span v-if="!collapsed" class="brand-word">SEMORA</span>
       </div>
       <nav>
-        <button v-for="item in items" :key="item.path" :class="{ active: active === item.path }" @click="navigate(item.path)">
+        <button v-for="item in items" :key="item.path" :class="{ active: active === item.path }" :title="item.label" :aria-label="item.label" @click="navigate(item.path)">
           <component :is="item.icon" size="22px" />
           <span v-if="!collapsed">{{ item.label }}</span>
         </button>

@@ -198,6 +198,7 @@ def list_sessions(request: Request) -> list[dict]:
             "domain": item.domain,
             "created_at": item.created_at,
             "run_count": len(item.run_ids),
+            "latest_status": next((store.runs[run_id].status for run_id in reversed(item.run_ids) if run_id in store.runs), None),
             "requirement_form": item.requirement_form,
         }
         for item in sorted(store.sessions.values(), key=lambda value: value.created_at, reverse=True)

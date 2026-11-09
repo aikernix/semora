@@ -371,9 +371,12 @@ class Workflow:
         run = self._run(state)
         run.error = None
         if run.result is not None:
-            run.answer = (
-                run.sql_explanation or "已按您确认的条件完成查询。"
-            ) + f" 本次共找到 {run.result.row_count} 条结果。"
+            from .result_summary import summarize_result
+
+            try:
+                run.answer = await summarize_result(self, run)
+            except TaskSupersededError:
+                return self._discard_superseded_task(run)
             self.emit(
                 run,
                 "answer.completed",

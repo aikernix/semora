@@ -36,5 +36,15 @@ const signalLabel = computed(() => {
 </template>
 
 <style scoped>
-.task-status{position:sticky;top:0;z-index:4;background:var(--semora-card);display:flex;align-items:center;justify-content:space-between;gap:16px;padding:15px 0;color:var(--semora-green-dark)}.status-heading{display:flex;align-items:center;gap:9px}.status-heading strong{font-size:14px;font-weight:600}.status-symbol{display:grid;place-items:center;width:19px;height:19px;font-size:14px}.status-spinner{width:15px;height:15px;border:2px solid var(--semora-line);border-top-color:var(--semora-green);border-radius:50%;animation:status-spin 1s linear infinite}.status-meta{display:flex;gap:14px;flex-wrap:wrap;color:var(--semora-muted);font-size:12px;font-variant-numeric:tabular-nums}.failed{color:#c24951}.waiting,.reconnecting{color:#a26a1b}@keyframes status-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.status-spinner{animation:none}}@media(max-width:800px){.task-status{align-items:flex-start;flex-direction:column;gap:6px}.status-meta{padding-left:28px}}
+.task-status{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;margin-top:12px;color:var(--semora-green-dark)}
+.status-heading{display:flex;align-items:center;gap:6px}
+.status-heading strong{font-size:12px;font-weight:500}
+.status-symbol{display:grid;place-items:center;width:14px;height:14px;font-size:11px}
+.status-spinner{width:12px;height:12px;border:2px solid var(--semora-line);border-top-color:var(--semora-green);border-radius:50%;animation:status-spin 1s linear infinite}
+.status-meta{display:flex;gap:8px 14px;flex-wrap:wrap;align-items:center;color:var(--semora-muted);font-size:11px;font-variant-numeric:tabular-nums}
+.status-meta>span{border-left:1px solid var(--semora-line);padding-left:14px}
+.failed{color:#c24951}
+.waiting,.reconnecting{color:#a26a1b}
+@keyframes status-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.status-spinner{animation:none}}
 </style>

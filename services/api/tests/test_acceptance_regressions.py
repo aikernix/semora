@@ -1,4 +1,5 @@
 """Generic regressions from real query acceptance; no business-specific schema."""
+from helpers import query_model_calls
 
 import asyncio
 from copy import deepcopy
@@ -74,8 +75,8 @@ def test_known_unsupported_construct_is_corrected_before_database_call(monkeypat
     model.complete_json.side_effect = [invalid, correct]
     run = asyncio.run(w.start(session.id, "List identifiers", domain="test"))
     assert run.status.value == "completed", run.error
-    assert model.complete_json.await_count == 2
-    assert "5.7.21-log" in model.complete_json.await_args.args[1]
+    assert len(query_model_calls(model)) == 2
+    assert "5.7.21-log" in query_model_calls(model)[-1].args[1]
     assert estimate.await_count == execute.await_count == 1
 
 
@@ -107,7 +108,7 @@ def test_free_text_answers_rebuild_context_and_allow_supplement(monkeypatch):
     prepared_context.confirmed_fact_context(w, run)
     second = asyncio.run(prepared_context.prepare_context(w, run, run.question, ontology, {}))
     assert first["binding"] != second["binding"]
-    assert w.model.complete_json.await_count == 2
+    assert len(query_model_calls(w.model)) == 2
     supplement = prepared_context.supplement_context(
         w, run, ontology, second, ["event"], "output", "Need related records", {}
     )
@@ -197,7 +198,7 @@ def test_explicit_ownership_use_is_loaded_even_if_missing_from_object_list(monke
     )
     saved = asyncio.run(prepared_context.prepare_context(w, run, run.question, ontology, {}))
     assert set(saved["packet"]["selected_objects"]) == {"item", "group"}
-    request = json.loads(w.model.complete_json.await_args.args[1])
+    request = json.loads(query_model_calls(w.model)[-1].args[1])
     assert request["relation_catalog"]["rows"] == [["owned_by", "item", "group"]]
     assert all("properties" not in item for item in request["object_catalog"])
 
@@ -240,7 +241,7 @@ def test_sql_role_does_not_inherit_unconfirmed_draft_as_a_fact(monkeypatch):
     )
     run = asyncio.run(w.start(session.id, "All records of matching entities", domain="test"))
     assert run.status.value == "completed"
-    payload = json.loads(model.complete_json.await_args.args[1])
+    payload = json.loads(query_model_calls(model)[-1].args[1])
     assert payload["request"] == "All records of matching entities"
     assert not {"confirmed_understanding", "proposed_understanding"} & payload.keys()
     assert "UNCONFIRMED WRONG SCOPE" not in json.dumps(payload)
@@ -290,8 +291,8 @@ def test_independent_coverage_correction_preserves_all_records_of_selected_entit
     )
     assert run.status.value == "completed", run.error
     assert run.result.rows == [[1, 12]]
-    assert model.complete_json.await_count == 2
-    assert model.complete_json.await_args.args[0] == COVERAGE
+    assert len(query_model_calls(model)) == 2
+    assert query_model_calls(model)[-1].args[0] == COVERAGE
     assert not run.agent_memory.get("sql_repair_count")
 
 
@@ -315,7 +316,7 @@ def test_unavailable_consistency_check_does_not_discard_executable_sql(monkeypat
     run = asyncio.run(w.start(session.id, "Total amount", domain="test"))
     assert run.status.value == "completed", run.error
     assert run.result.rows == [[25]] and run.delivery_warnings
-    assert model.complete_json.await_count == 2
+    assert len(query_model_calls(model)) == 2
 
 
 def test_light_identity_catalog_keeps_entity_keys_separate_from_selected_fields(monkeypatch):

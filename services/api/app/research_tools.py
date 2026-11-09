@@ -14,7 +14,8 @@ from semora_agent.model_diagnostics import debug_payload
 from semora_contracts import KnowledgeResearchResult, KnowledgeResearchStep
 
 from .knowledge import knowledge_service
-from .prepared_context import supplement_context, knowledge_excerpt
+from .prepared_context import supplement_context
+from .knowledge_retrieval import knowledge_excerpt
 
 
 class ResearchTools:

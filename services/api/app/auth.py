@@ -17,13 +17,18 @@ class Principal:
 
 class OIDCVerifier:
     def __init__(self) -> None:
-        self.issuer = os.getenv("OIDC_ISSUER", "http://localhost:8088/realms/semora").rstrip("/")
+        self.issuer = (os.getenv("OIDC_ISSUER") or "").rstrip("/")
         self.audience = os.getenv("OIDC_AUDIENCE", "semora-web")
-        self._client = jwt.PyJWKClient(os.getenv("OIDC_JWKS_URL", f"{self.issuer}/protocol/openid-connect/certs"), cache_keys=True)
+        jwks_url = os.getenv("OIDC_JWKS_URL") or (
+            f"{self.issuer}/protocol/openid-connect/certs" if self.issuer else None
+        )
+        self._client = jwt.PyJWKClient(jwks_url, cache_keys=True) if jwks_url else None
 
     def verify(self, authorization: str | None) -> Principal:
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(401, "missing bearer token")
+        if not self.issuer or self._client is None:
+            raise HTTPException(503, "身份认证未配置，请设置外部OIDC服务后重试")
         token = authorization.removeprefix("Bearer ").strip()
         try:
             key = self._client.get_signing_key_from_jwt(token)
