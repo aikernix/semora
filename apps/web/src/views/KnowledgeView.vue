@@ -129,7 +129,6 @@ onMounted(load)
 
     <section class="connection panel">
       <div><small>连接状态</small><strong><i class="status-dot"></i>{{ status.status === 'ready' ? '已连接' : status.status }}</strong></div>
-      <div><small>WeKnora 实例</small><code>{{ status.instance_url || '未配置' }}</code></div>
       <div><small>检索流程</small><strong>与查询工作台共用</strong></div>
       <div><small>API Key</small><strong>{{ status.api_key_configured ? '已安全配置' : '未配置' }}</strong></div>
       <div><small>可访问知识库</small><strong>{{ bases.length }}</strong></div>
