@@ -8,11 +8,13 @@ from typing import Literal
 from urllib.parse import quote
 
 import httpx
+from fastapi.exceptions import RequestValidationError
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from uuid import uuid4
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from semora_telemetry import configure_telemetry
 
@@ -30,9 +32,13 @@ from .auth import Principal, enforce_roles, oidc_verifier
 from .knowledge import KnowledgeCoreError, knowledge_service
 from .ontology import OntologyCoreError, ontology_service
 from .datasources import datasource_service
+from .datasources import DataSourceRecord
+from semora_contracts.database import DatabaseConnection, PRODUCTS
+from .knowledge_settings import KnowledgeConfigInput, knowledge_settings
 from .settings import settings_service
 from .model_settings import model_settings, ModelConfigInput
 from .candidate_extraction import CandidateExtractionError, candidate_extractor
+from .database_routes import router as database_router
 
 
 @asynccontextmanager
@@ -52,6 +58,11 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Semora API", version="0.1.0", lifespan=lifespan)
+@app.exception_handler(RequestValidationError)
+async def private_validation_error(request, exc):
+    # Pydantic root-validator errors can otherwise echo the full password-bearing input.
+    return JSONResponse(status_code=422, content={"detail":[{k:e[k] for k in ("loc","msg","type") if k in e} for e in exc.errors()]})
+
 configure_telemetry(app, "semora-api")
 app.add_middleware(
     CORSMiddleware,
@@ -60,6 +71,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(database_router)
 workflow = Workflow(store)
 
 
@@ -110,9 +122,46 @@ class ApprovalInput(BaseModel):
 
 
 class DataSourceCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     name: str = Field(min_length=1, max_length=200)
-    type: Literal["postgresql", "oracle", "mysql", "sqlserver", "trino"] = "postgresql"
-    secret_ref: str = Field(pattern=r"^DATASOURCE_[A-Z0-9_]+_URL$", max_length=200)
+    type: Literal["postgresql", "oracle", "mysql", "sqlserver", "oceanbase", "goldendb", "vastbase", "jdbc"] = "postgresql"
+    secret_ref: str | None = Field(default=None, pattern=r"^DATASOURCE_[A-Z0-9_]+_URL$", max_length=200)
+    connection: "DataSourceConnection | None" = None
+
+
+DataSourceConnection = DatabaseConnection
+
+DataSourceCreate.model_rebuild()
+
+
+def connection_payload(body: DataSourceCreate):
+    if body.connection is None or body.connection.type != body.type:
+        raise HTTPException(422, "请填写与数据库类型一致的连接参数")
+    return {**body.connection.model_dump(exclude={"password"}),
+            "password": body.connection.password.get_secret_value()}
+
+
+@app.get("/api/v1/settings/knowledge")
+def get_knowledge_config():
+    return knowledge_settings.public()
+
+
+@app.put("/api/v1/settings/knowledge")
+def save_knowledge_config(body: KnowledgeConfigInput):
+    try:
+        return knowledge_settings.save(body)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/v1/settings/knowledge/test")
+async def test_knowledge_config(body: KnowledgeConfigInput):
+    try:
+        return await knowledge_settings.candidate(body).status()
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except KnowledgeCoreError as exc:
+        raise HTTPException(502, str(exc)) from exc
 
 
 def authorization_context(request: Request) -> AuthorizationContext:
@@ -536,6 +585,54 @@ async def ontology_drafts() -> list[dict]:
         raise_ontology_error(exc)
 
 
+class DomainCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    domain: str = Field(pattern=r"^[a-z][a-z0-9_]{1,99}$")
+    name: str = Field(min_length=1, max_length=200)
+
+
+@app.post("/api/v1/ontology/domains", status_code=201)
+async def create_ontology_domain(body: DomainCreate):
+    try:
+        return await ontology_service.create_domain(body.domain, body.name)
+    except OntologyCoreError as exc:
+        raise_ontology_error(exc)
+
+
+@app.get("/api/v1/ontology/configurations")
+async def ontology_configurations():
+    try:
+        return await ontology_service.list_drafts()
+    except OntologyCoreError as exc:
+        raise_ontology_error(exc)
+
+
+@app.get("/api/v1/ontology/configurations/{domain}")
+async def ontology_configuration(domain: str):
+    try:
+        return await ontology_service.get_configuration(domain)
+    except OntologyCoreError as exc:
+        raise_ontology_error(exc)
+
+
+@app.put("/api/v1/ontology/configurations/{domain}")
+async def save_ontology_configuration(domain: str, body: dict):
+    objects = body.get("objects")
+    if not isinstance(objects, list) or not objects or any(not isinstance(obj, dict) for obj in objects):
+        raise HTTPException(422, "请至少配置一个对象，并为对象选择数据源")
+    for identifier in {str(obj.get("dataSourceId") or body.get("dataSourceId") or "") for obj in objects}:
+        try:
+            source = datasource_service.repository.get(identifier)
+        except KeyError as exc:
+            raise HTTPException(422, "对象引用了未登记的数据源，请重新选择数据源") from exc
+        if source.status != "healthy" or source.access != "read_only":
+            raise HTTPException(422, f"请先完成数据源连接测试：{source.name}")
+    try:
+        return await ontology_service.save_configuration(domain, body)
+    except OntologyCoreError as exc:
+        raise_ontology_error(exc)
+
+
 @app.get('/api/v1/ontology/publication-status')
 async def ontology_publication_status(domain: str) -> dict:
     try:
@@ -568,6 +665,26 @@ async def ontology_draft(domain: str) -> dict:
 async def save_ontology_draft(domain: str, request: Request) -> dict:
     try:
         return await ontology_service.save_draft(domain, await request.json())
+    except OntologyCoreError as exc:
+        raise_ontology_error(exc)
+
+
+class KnowledgeBindingInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    knowledgeBaseIds: list[str] = Field(max_length=20)
+
+
+@app.patch("/api/v1/ontology/drafts/{domain}/knowledge-bases")
+async def bind_knowledge_bases(domain: str, body: KnowledgeBindingInput):
+    ids = list(dict.fromkeys(body.knowledgeBaseIds))
+    try:
+        if ids:
+            accessible = {item["id"] for item in await knowledge_service.list_knowledge_bases()}
+            if any(identifier not in accessible for identifier in ids):
+                raise HTTPException(422, "所选知识库不在当前 WeKnora 账号可访问列表中，请刷新后重新选择")
+        return await ontology_service.bind_knowledge_bases(domain, ids)
+    except KnowledgeCoreError as exc:
+        raise_knowledge_error(exc)
     except OntologyCoreError as exc:
         raise_ontology_error(exc)
 
@@ -627,8 +744,66 @@ def datasources() -> list[dict]:
 
 
 @app.post("/api/v1/datasources", status_code=201)
-def create_datasource(body: DataSourceCreate) -> dict:
-    return datasource_service.repository.create(body.name, body.type, body.secret_ref).public()
+async def create_datasource(body: DataSourceCreate) -> dict:
+    if body.connection is None and body.secret_ref:
+        return datasource_service.repository.create(body.name, body.type, body.secret_ref).public()
+    identifier = str(uuid4())
+    item = DataSourceRecord(id=identifier, name=body.name, type=body.type,
+                            secret_ref=f"DATASOURCE_{identifier.replace('-', '').upper()}_URL")
+    try:
+        await datasource_service.executor.configuration(item, connection_payload(body))
+        return datasource_service.repository.save(item).public()
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.get("/api/v1/datasources/{datasource_id}/connection")
+async def get_datasource_connection(datasource_id: str):
+    try:
+        return await datasource_service.executor.configuration(datasource_service.repository.get(datasource_id))
+    except KeyError as exc:
+        raise HTTPException(404, "数据源不存在") from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.put("/api/v1/datasources/{datasource_id}")
+async def update_datasource(datasource_id: str, body: DataSourceCreate):
+    try:
+        item = datasource_service.repository.get(datasource_id)
+        if body.type != item.type:
+            raise HTTPException(422, "数据库类型不可直接更改，请新增数据源")
+        old = await datasource_service.executor.configuration(item)
+        payload = connection_payload(body)
+        await datasource_service.executor.configuration(item, payload)
+        item.name = body.name
+        item.status = "unverified"
+        item.scan_result.pop("capabilities",None)
+        item.scan_result.get("connection",{}).pop("probes",None)
+        if any(old.get(key) != payload.get(key) for key in ("host", "port", "database", "username", "schema_name", "catalog", "driver_id", "jdbc_url", "properties", "compatibility_mode", "service_kind")):
+            item.objects = 0
+            item.scan_result = {}
+            item.last_scan_at = None
+        return datasource_service.repository.save(item).public()
+    except KeyError as exc:
+        raise HTTPException(404, "数据源不存在") from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.post("/api/v1/datasource-connection-test")
+async def test_datasource_configuration(body: DataSourceCreate, datasource_id: str | None = None):
+    try:
+        item = (datasource_service.repository.get(datasource_id) if datasource_id else
+                DataSourceRecord(id="connection-preview", name=body.name, type=body.type,
+                                 secret_ref="DATASOURCE_CONNECTION_PREVIEW_URL"))
+        if item.type != body.type:
+            raise HTTPException(422, "数据库类型不一致")
+        return await datasource_service.executor.configuration(item, connection_payload(body), test=True)
+    except KeyError as exc:
+        raise HTTPException(404, "数据源不存在") from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
 
 
 @app.post("/api/v1/datasources/{datasource_id}/test")

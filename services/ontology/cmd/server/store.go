@@ -168,7 +168,11 @@ func (s *Store) listDrafts(ctx context.Context) ([]DraftSummary, error) {
 		if err := json.Unmarshal(payload, &ontology); err != nil {
 			return nil, err
 		}
-		result = append(result, DraftSummary{domain, name, version, "draft", len(ontology.Objects), len(ontology.Relations), len(ontology.Metrics), updatedAt})
+		status := "configured"
+		if len(ontology.Objects) == 0 {
+			status = "unconfigured"
+		}
+		result = append(result, DraftSummary{domain, name, version, status, len(ontology.Objects), len(ontology.Relations), len(ontology.Metrics), updatedAt})
 	}
 	return result, rows.Err()
 }

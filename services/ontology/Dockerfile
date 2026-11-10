@@ -5,7 +5,7 @@ ARG GOPROXY=https://proxy.golang.org,direct
 ENV GOPROXY=$GOPROXY
 RUN go mod download
 COPY services/ontology/cmd ./cmd
-RUN --mount=type=cache,target=/root/.cache/go-build go test ./cmd/server && CGO_ENABLED=0 go build -o /ontology ./cmd/server
+RUN --mount=type=cache,target=/root/.cache/go-build go test ./cmd/server && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /ontology ./cmd/server
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /ontology /ontology

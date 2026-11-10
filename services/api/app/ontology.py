@@ -61,6 +61,19 @@ class OntologyCoreClient:
     async def save_draft(self, domain: str, draft: dict[str, Any]) -> dict[str, Any]:
         return await self._request("PUT", f"/api/v1/ontology/drafts/{domain}", json=draft)
 
+    async def create_domain(self, domain: str, name: str) -> dict[str, Any]:
+        return await self._request("POST", "/api/v1/ontology/domains", json={"domain": domain, "name": name})
+
+    async def get_configuration(self, domain: str) -> dict[str, Any]:
+        return self._normalize_collections(await self._request("GET", f"/api/v1/ontology/configurations/{domain}"))
+
+    async def save_configuration(self, domain: str, value: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("PUT", f"/api/v1/ontology/configurations/{domain}", json=value)
+
+    async def bind_knowledge_bases(self, domain: str, ids: list[str]) -> dict[str, Any]:
+        return await self._request("PATCH", f"/api/v1/ontology/drafts/{domain}/knowledge-bases",
+                                   json={"knowledgeBaseIds": ids})
+
     async def publish(self, domain: str) -> dict[str, Any]:
         return await self._request("POST", "/api/v1/ontology/publish", json={"domain": domain})
 
@@ -71,7 +84,12 @@ class OntologyCoreClient:
     async def latest_snapshot_bundle(self, domain: str) -> tuple[OntologySnapshotRef, dict[str, Any]]:
         if not domain:
             raise OntologyCoreError('请先选择业务域，不能读取未指定业务域的本体')
-        value = await self._request("GET", "/api/v1/ontology/snapshots/latest", params={"domain": domain})
+        try:
+            value = await self._request("GET", "/api/v1/ontology/snapshots/latest", params={"domain": domain})
+        except OntologyCoreError as exc:
+            if exc.status_code == 404:
+                raise OntologyCoreError('该业务域尚未配置可用本体，请先添加对象和关系并保存', 404) from exc
+            raise
         ontology = self._normalize_collections(value["ontology"])
         reference = OntologySnapshotRef(
             domain=value["domain"],

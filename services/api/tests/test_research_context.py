@@ -90,7 +90,7 @@ def test_retired_compiler_and_policy_routes_are_not_importable():
     from app.main import app
     for module in ['app.agentic','app.planner','app.gate','app.audit','semora_agent.roles']:
         assert importlib.util.find_spec(module) is None
-    assert not any(r.path.startswith(('/api/v1/audits','/api/v1/approvals')) for r in app.routes)
+    assert not any(path.startswith(('/api/v1/audits','/api/v1/approvals')) for path in app.openapi()['paths'])
 
 
 def test_source_readback_survives_isolated_sql_role_context(monkeypatch):

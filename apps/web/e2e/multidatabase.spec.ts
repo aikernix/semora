@@ -1,0 +1,35 @@
+import { test, expect } from '@playwright/test'
+
+test.setTimeout(45_000)
+
+test('database products expose their real connection options', async ({ page }) => {
+  await page.goto('/datasources')
+  await expect(page.getByRole('heading', { name: '数据源', exact: true })).toBeVisible()
+  await expect(page.locator('.capabilities').first()).toContainText('连接')
+  await page.getByRole('button', { name: '添加数据源', exact: true }).click()
+  const dialog = page.locator('.t-dialog:visible').filter({ hasText: '添加数据源' })
+  const products = dialog.locator('label').filter({ hasText: '数据库类型' }).locator('.t-select')
+  await products.click()
+  await page.getByText('Oracle', { exact: true }).last().click()
+  await expect(dialog.locator('label').filter({ hasText: '连接方式' })).toBeVisible()
+  await dialog.getByText('高级连接与扫描范围（可选）', { exact: true }).click()
+  await expect(dialog.getByText('高级 JDBC 连接串（可选，不含账号密码）', { exact: true })).toBeVisible()
+  await products.click()
+  await page.getByText('OceanBase', { exact: true }).last().click()
+  await expect(dialog.locator('label').filter({ hasText: '租户模式' })).toBeVisible()
+  await expect(dialog.getByText('不限版本配置；实际能力通过连接、扫描和查询分别验证。未配置方言及只读策略时仅开放扫描。', { exact: true })).toBeVisible()
+  await products.click()
+  await page.getByText('自定义 JDBC', { exact: true }).last().click()
+  await expect(dialog.locator('label').filter({ hasText: 'JDBC 驱动' }).first()).toBeVisible()
+})
+
+test('driver management rejects a corrupt bundle without publishing it', async ({ page }) => {
+  await page.goto('/datasources')
+  await page.getByRole('button', { name: '驱动管理', exact: true }).click()
+  const dialog = page.locator('.t-dialog:visible').filter({ hasText: '管理员 JDBC 驱动与高级适配' })
+  await expect(dialog.getByText(/ojdbc11-23\.6\.0\.24\.10/)).toBeVisible()
+  await dialog.locator('textarea').fill(JSON.stringify({ name: 'invalid fixture', driver_class: 'fixture.Driver', enabled: false }))
+  await dialog.locator('input[type=file]').setInputFiles({ name: 'corrupt.jar', mimeType: 'application/java-archive', buffer: Buffer.from('not a jar') })
+  await dialog.getByRole('button', { name: '上传驱动包', exact: true }).click()
+  await expect(dialog.getByText(/无效 JAR 文件/)).toBeVisible()
+})

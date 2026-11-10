@@ -29,6 +29,10 @@ class DataSourceRecord:
     created_at: datetime = field(default_factory=utc_now)
 
     def public(self) -> dict[str, Any]:
+        from semora_contracts.database import SQL_BASELINE_ID
+        capabilities=dict(self.scan_result.get("capabilities",{}))
+        if self.type not in {"mysql","postgresql"} and capabilities.get("sql_baseline")!=SQL_BASELINE_ID:
+            capabilities["query"]="pending"
         return {
             "id": self.id,
             "name": self.name,
@@ -39,6 +43,9 @@ class DataSourceRecord:
             "objects": self.objects,
             "last_scan_at": self.last_scan_at,
             "created_at": self.created_at,
+            "connection": self.scan_result.get("connection", {}),
+            "capabilities": capabilities,
+            "scan_job": self.scan_result.get("scan_job"),
         }
 
 
@@ -108,21 +115,51 @@ class DataSourceRepository:
         except KeyError as exc:
             raise KeyError("data source not found") from exc
 
+    @staticmethod
+    def invalidate_changed_metadata(item, fresh):
+        previous=item.scan_result.get("connection",{})
+        if any(previous.get(k) is not None and fresh.get(k) is not None and previous[k]!=fresh[k]
+               for k in ("product","version","driver_version","compatibility_mode")):
+            item.scan_result["connection"]={k:v for k,v in previous.items() if k!="probes"}
+            item.scan_result["capabilities"]={}
+            item.scan_result["scan_stale"]=True
+
     def record_test(self, datasource_id: str, result: dict[str, Any]) -> DataSourceRecord:
         item = self.get(datasource_id)
+        self.invalidate_changed_metadata(item,result)
         item.status = "healthy" if result.get("read_only") else "unsafe"
         item.access = "read_only" if result.get("read_only") else "write_capable"
-        if result.get("version"):
-            item.scan_result = {**item.scan_result, "connection": {
-                **(item.scan_result.get("connection") or {}), "version": result["version"]}}
+        if item.type not in {"mysql","postgresql"} and not result.get("read_only"):
+            item.status="scan_only"
+            item.access="scan_only"
+        item.scan_result = {**item.scan_result, "connection": {
+            **item.scan_result.get("connection", {}), **{k:v for k,v in result.items() if k not in {"capabilities", "datasource_id"}}}}
+        capabilities=dict(item.scan_result.get("capabilities",{}))
+        capabilities["connection"]="verified"
+        if "capabilities" in result:
+            capabilities.update({k:v for k,v in result["capabilities"].items() if v!="pending" or k not in capabilities})
+        else:
+            capabilities.setdefault("query","partial" if result.get("read_only") else "pending")
+            dialect={"mysql":"mysql","postgresql":"postgres"}.get(item.type)
+            if dialect:capabilities["dialect"]=dialect
+        if not result.get("read_only"):capabilities["query"]="pending"
+        item.scan_result["capabilities"]=capabilities
         return self.save(item)
 
     def record_scan(self, datasource_id: str, result: dict[str, Any]) -> DataSourceRecord:
         item = self.get(datasource_id)
+        self.invalidate_changed_metadata(item,result.get("connection",{}))
         item.status = "healthy"
         item.access = "read_only"
+        if result.get("connection",{}).get("read_only") is False:
+            item.status="scan_only"
+            item.access="scan_only"
         item.objects = len(result.get("tables", []))
         item.last_scan_at = utc_now()
+        from .mdl_export import merge_snapshot
+        if item.type in {"mysql","postgresql"} and item.scan_result.get("capabilities",{}).get("query")=="verified":
+            result.setdefault("capabilities",{})["query"]="verified"
+        result = merge_snapshot(item.scan_result, result)
         item.scan_result = {**result, "connection": {
             **(item.scan_result.get("connection") or {}), **(result.get("connection") or {})}}
         return self.save(item)
@@ -132,6 +169,23 @@ class ExecutorDataSourceClient:
     def __init__(self, base_url: str | None = None, token: str | None = None) -> None:
         self.base_url = (base_url or os.getenv("EXECUTOR_URL", "http://localhost:8002")).rstrip("/")
         self.token = token or os.getenv("INTERNAL_TOKEN", "semora-dev-internal")
+
+    async def configuration(self, item: DataSourceRecord, connection=None, *, test=False):
+        endpoint = "test-configuration" if test else "configuration"
+        method = "PUT" if connection is not None and not test else "POST"
+        payload = {"datasource_id": item.id, "type": item.type, "secret_ref": item.secret_ref}
+        if connection is not None:
+            payload["connection"] = connection
+        async with httpx.AsyncClient(timeout=35) as client:
+            try:
+                response = await client.request(method, f"{self.base_url}/internal/v1/datasources/{endpoint}",
+                    headers={"X-Semora-Internal-Token": self.token}, json=payload)
+                if not response.is_success:
+                    detail = response.json().get("detail", "Executor 配置请求失败")
+                    raise RuntimeError(detail if isinstance(detail, str) else "连接参数无效，请检查各项输入")
+                return response.json()
+            except httpx.HTTPError as exc:
+                raise RuntimeError(f"Executor 配置请求失败：{type(exc).__name__}") from exc
 
     async def request(self, endpoint: str, item: DataSourceRecord, tables: list[str] | None = None) -> dict[str, Any]:
         try:
@@ -162,7 +216,13 @@ class DataSourceService:
 
     async def test(self, datasource_id: str) -> dict[str, Any]:
         item = self.repository.get(datasource_id)
-        result = await self.executor.request("test", item)
+        try:
+            result = await self.executor.request("test", item)
+        except RuntimeError:
+            item.status="failed"
+            item.scan_result.setdefault("capabilities",{}).update(connection="failed",query="pending")
+            self.repository.save(item)
+            raise
         self.repository.record_test(datasource_id, result)
         return result
 

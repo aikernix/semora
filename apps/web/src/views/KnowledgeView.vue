@@ -18,6 +18,43 @@ const error = ref('')
 const message = ref('')
 const bindingLoaded = ref(false)
 const selectionChanged = ref(false)
+const configOpen = ref(false)
+const configBusy = ref(false)
+const configMessage = ref('')
+const config = ref({ base_url: '', api_key: '', api_key_configured: false })
+
+async function openConfig() {
+  error.value = ''
+  try {
+    config.value = { ...(await api.get('/settings/knowledge')).data, api_key: '' }
+    configMessage.value = ''
+    configOpen.value = true
+  } catch (reason: any) { error.value = reason.response?.data?.detail || '无法读取连接配置' }
+}
+
+async function configureKnowledge(test = false) {
+  configBusy.value = true
+  configMessage.value = ''
+  try {
+    const body = { base_url: config.value.base_url, api_key: config.value.api_key }
+    if (test) {
+      const result = (await api.post('/settings/knowledge/test', body)).data
+      configMessage.value = `连接成功，可访问 ${result.knowledge_bases} 个知识库。`
+    } else {
+      const saved = (await api.put('/settings/knowledge', body)).data
+      status.value = { provider: 'weknora', status: 'loading', instance_url: saved.base_url.replace(/\/api\/v1$/, ''), api_key_configured: saved.api_key_configured }
+      config.value.api_key = ''
+      research.value = null
+      bases.value = []
+      selectedKb.value = ''
+      bindingLoaded.value = false
+      configOpen.value = false
+      message.value = '连接配置已保存并生效，请核对当前业务域的知识库绑定。'
+      await load()
+    }
+  } catch (reason: any) { configMessage.value = reason.response?.data?.detail || '连接配置操作失败' }
+  finally { configBusy.value = false }
+}
 let bindingVersion = 0
 
 const selectedBase = computed(() => bases.value.find(item => item.id === selectedKb.value))
@@ -48,6 +85,7 @@ async function loadDomainBinding() {
 
 async function load() {
   loading.value = true
+  status.value = { ...status.value, status: 'loading' }
   error.value = ''
   try {
     const [statusResponse, baseResponse, domainResponse] = await Promise.all([
@@ -61,6 +99,7 @@ async function load() {
     }
     await loadDomainBinding()
   } catch (reason: any) {
+    status.value = { ...status.value, status: 'unavailable' }
     error.value = reason?.response?.data?.detail || 'WeKnora 连接失败'
   } finally {
     loading.value = false
@@ -77,12 +116,12 @@ async function bindDomain() {
   error.value = ''
   message.value = ''
   try {
-    const draft = (await api.get(`/ontology/drafts/${selectedDomain.value}`)).data
-    draft.knowledgeBaseIds = selectedKb.value ? [selectedKb.value] : []
-    await api.put(`/ontology/drafts/${selectedDomain.value}`, draft)
-    boundIds.value = draft.knowledgeBaseIds
+    const result = (await api.patch(`/ontology/drafts/${selectedDomain.value}/knowledge-bases`, {
+      knowledgeBaseIds: selectedKb.value ? [selectedKb.value] : [],
+    })).data
+    boundIds.value = result.knowledgeBaseIds
     selectionChanged.value = false
-    message.value = selectedKb.value ? `已将“${selectedBase.value?.name}”绑定到业务域 ${selectedDomain.value}，发布本体后生效。` : '已取消知识库绑定。发布本体后，直接基于需求和本体分析。'
+    message.value = selectedKb.value ? `已将“${selectedBase.value?.name}”绑定到业务域 ${selectedDomain.value}，新查询立即使用。` : '已取消知识库绑定，新查询将直接基于需求和本体分析。'
   } catch (reason: any) {
     error.value = reason?.response?.data?.detail || '业务域绑定失败'
   } finally {
@@ -119,10 +158,24 @@ onMounted(load)
     <div class="page-header">
       <div><h1>知识库配置</h1><p>知识由 WeKnora 维护；检索测试与查询工作台共用知识准备流程。</p></div>
       <div class="header-actions">
+        <t-button variant="outline" @click="openConfig">连接配置</t-button>
         <t-button variant="outline" :loading="loading" @click="load"><RefreshIcon />刷新连接</t-button>
         <t-button theme="primary" :disabled="!status.instance_url" @click="openWeKnora"><LinkIcon />打开 WeKnora</t-button>
       </div>
     </div>
+
+    <t-dialog v-model:visible="configOpen" header="WeKnora 连接配置" :footer="false" width="560px">
+      <div class="form">
+        <label>服务地址<t-input v-model="config.base_url" placeholder="例如：http://服务器地址:8088" /></label>
+        <label>API Key<t-input v-model="config.api_key" type="password" autocomplete="new-password" :placeholder="config.api_key_configured ? '已配置，留空保留原值；更换实例时须重新填写' : '填写 WeKnora API Key'" /></label>
+        <t-alert v-if="configMessage" :message="configMessage" />
+        <p>更换实例不会自动替换业务域已绑定的知识库，请保存后核对并重新选择。</p>
+        <div class="header-actions">
+          <t-button variant="outline" :loading="configBusy" :disabled="!config.base_url" @click="configureKnowledge(true)">测试连接</t-button>
+          <t-button theme="primary" :loading="configBusy" :disabled="!config.base_url" @click="configureKnowledge(false)">保存配置</t-button>
+        </div>
+      </div>
+    </t-dialog>
 
     <t-alert v-if="error" theme="error" :message="error" closable @close="error = ''" style="margin-bottom:14px" />
     <t-alert v-if="message" theme="success" :message="message" closable @close="message = ''" style="margin-bottom:14px" />
@@ -156,7 +209,7 @@ onMounted(load)
             <t-tag :theme="isBound ? 'success' : 'default'" variant="light">{{ isBound ? '当前已绑定' : '尚未绑定' }}</t-tag>
           </article>
           <t-button theme="primary" :loading="binding" :disabled="!selectedDomain || !bindingLoaded || !selectionChanged || isBound" @click="bindDomain">保存知识库绑定</t-button>
-          <p class="hint">绑定写入本体草稿；发布本体后，查询运行会锁定该知识库 ID，避免跨业务域误检索。</p>
+          <p class="hint">绑定保存后供新查询使用，已开始的查询继续使用原配置。</p>
         </div>
       </section>
 

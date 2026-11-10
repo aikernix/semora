@@ -22,7 +22,7 @@ def sources(monkeypatch):
     monkeypatch.delenv('METADATA_DATABASE_URL', raising=False)
     repo=DataSourceRepository()
     for name,kind in [('a','postgresql'),('b','mysql')]:
-        repo.save(DataSourceRecord(name,name,kind,'NOT_A_CREDENTIAL'))
+        repo.save(DataSourceRecord(name,name,kind,'NOT_A_CREDENTIAL',scan_result={'capabilities':{'cte':{'status':'verified'},'window_functions':{'status':'verified'}}}))
     monkeypatch.setattr(datasources.datasource_service,'repository',repo)
     return {'dataSourceId':'a','objects':[
         {'name':'item','table':'items','primaryKey':'id','properties':[{'name':'id','type':'integer'}]},

@@ -6,6 +6,8 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.optimizer.scope import traverse_scope
 from semora_contracts import SQLArtifact
+from semora_contracts.database import SQL_BASELINE_ID, baseline_pagination
+from semora_contracts.sql_compat import apply_pagination
 from .datasources import datasource_service
 from .sql_errors import SQLIssue
 
@@ -13,6 +15,12 @@ from .sql_errors import SQLIssue
 def dialect_for(source_id):
     source = datasource_service.repository.get(source_id)
     dialect = {"postgresql": "postgres", "postgres": "postgres", "mysql": "mysql"}.get(source.type)
+    if not dialect:
+        capabilities = source.scan_result.get("capabilities", {})
+        if capabilities.get("query") == "verified" and capabilities.get("sql_baseline") != SQL_BASELINE_ID:
+            raise SQLIssue("SQL能力基线已更新，请重新验证数据源查询能力："+source.name,kind="adapter")
+        if capabilities.get("query") == "verified":
+            dialect = capabilities.get("dialect")
     if not dialect:
         raise SQLIssue("尚未配置该数据库的方言与校验适配器：" + source.type, kind="adapter")
     return dialect
@@ -247,6 +255,13 @@ def compile_step(step, ontology, results=None, *, template=False, row_limit=1000
                         else n
                     ),
                 )
+    pagination_strategy="sqlglot"
+    if step.engine=="source" and dialect=="oracle":
+        pagination_strategy=datasource_service.repository.get(step.data_source_id).scan_result.get("capabilities",{}).get("pagination_strategy",baseline_pagination(dialect))
+    try:
+        tree=apply_pagination(tree,dialect,pagination_strategy)
+    except ValueError as exc:
+        raise SQLIssue(str(exc),kind="adapter",stage="dialect_conversion") from exc
     try:
         sql = tree.sql(dialect=dialect, unsupported_level=sqlglot.ErrorLevel.RAISE)
         # Round-trip parser check. Database EXPLAIN remains authoritative.
@@ -283,6 +298,7 @@ def compile_step(step, ontology, results=None, *, template=False, row_limit=1000
         artifact_hash=digest,
         compilation={
             "engine": "sql-native-v1",
+            "sql_baseline": SQL_BASELINE_ID,
             "baseline_hash": hashlib.sha256(step.sql.encode()).hexdigest(),
             "source_dialect": "postgres",
             "target_dialect": dialect,

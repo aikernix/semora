@@ -1,3 +1,5 @@
+> 2026-11-10 多数据库扩展：新增 JDBC 产品入口、驱动管理、统一结构快照、异步扫描和 MDL 导出。当前在线查询使用 SQLProgram / SQLGlot / Executor；下文历史 Semantic Planner 描述不代表当前部署。实际接入边界、验收与回退见 [MULTIDATABASE.md](MULTIDATABASE.md)。
+
 # 实施状态
 
 > 历史实施记录：以下描述对应早期完整系统，包含已移除的组件，不作为当前部署说明。当前服务与启动方式以仓库 README 和 `docs/sql-generation-mvp.md` 为准。
@@ -28,12 +30,12 @@
 - Analyst 支持 OpenAI-compatible 的结构化模型输出，并以发布本体做白名单校验；未配置模型时使用确定性分析，模型越界输出不会进入 SQL 编译。
 - Reviewer 已实现执行前与执行后两次独立复核：前者只接收不可变 QueryPlan、Gate 和 SQLArtifact，后者只接收 QueryPlan 与已脱敏的结果样本/摘要；Reviewer 无执行权限、无 Analyst 会话上下文且不能覆盖阻断门禁。可选结构化模型失败时按配置安全失败或回退确定性规则。
 - Semantic Planner 固定使用 `wren-core-py==0.8.2`，直接消费本体发布的不可变 MDL，动态展开表、字段、关联和绑定参数，再由 SQLGlot 转成 PostgreSQL 方言；不再依赖固定零售信贷 SQL 模板，也不持有数据库凭据。
-- Executor 只接收数据源标识与密钥引用，由自身环境解析实际连接信息；API/Agent 不传递也不持有业务数据库 DSN。
+- 执行链路只向 Executor 传递数据源标识与密钥引用；连接配置由 API 转发到 Executor 加密持久化，兼容原环境变量，数据库凭据不进入 Agent 上下文。
 - 本体属性的 `sensitive` 标记会进入 `SQLArtifact.sensitive_columns`，由 SQL Gate 触发审批，并由隔离 Executor 在结果离开服务前执行通用脱敏。
 - 审计账本已改为 PostgreSQL 权威源：按 Run 使用事务级 advisory lock 原子分配连续序号，插入触发器校验前序哈希与不可变列，API 账号仅有 SELECT/INSERT 权限，UPDATE/DELETE/TRUNCATE 被撤销并由触发器二次阻断；哈希链回放和数据库篡改测试均已通过。
 - Docker Compose 健康依赖和自动重启策略；已通过聚合查询、风险审批、敏感字段脱敏、真实 PostgreSQL 执行及审计链验证。
 - 已验证 Knowledge Core 文档上传到解析完成、本体无效关系阻断、本体重启持久化、候选审核、两跳关系路径和完整查数回放。
-- 数据源登记已持久化；API 仅保存 Executor 密钥引用，Executor 负责真实连接测试、默认只读/危险角色能力校验，以及表、列、主键、外键和敏感等级扫描。
+- 数据源登记已持久化；页面支持新增、编辑连接参数，密码不回显且留空保留。Executor 负责加密保存凭据、真实连接测试、默认只读/危险角色能力校验，以及表、列、主键、外键和敏感等级扫描。WeKnora 地址与 API Key 可在知识库页配置并即时生效。
 - 查询生命周期已迁移到真实 LangGraph 状态图，使用 PostgreSQL Checkpointer；已验证敏感查询在审批中断后重启 API，仍能从同一 `run_id/thread_id` 恢复并只执行一次。
 - 系统设置已由静态页面升级为 PostgreSQL 持久化策略中心，保存审批模式、触发条件、查询限制、Reviewer 展示配置、版本哈希和发布人；查询接口不能覆盖管理员审批策略。
 - 审批现已绑定 SQL/参数产物、本体快照、权限范围和策略版本；任一绑定项变化后旧审批自动过期。查询级限制可动态传入 Executor，但只能收紧容器硬上限。

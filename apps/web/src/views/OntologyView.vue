@@ -1,241 +1,215 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { RelationIcon } from 'tdesign-icons-vue-next'
 import { api } from '../api'
 
-const drafts = ref<any[]>([])
+const domains = ref<any[]>([])
 const selectedDomain = ref('')
-const draft = ref<any>(null)
-const candidates = ref<any[]>([])
-const publishing = ref(false)
-const saving = ref(false)
-const published = ref<any>(null)
-const publication = ref<any>(null)
-const error = ref('')
-const reviewMessage = ref('')
-const editorVisible = ref(false)
-const editorText = ref('')
+const ontology = ref<any>(null)
 const dataSources = ref<any[]>([])
-const mappingsDirty = ref(false)
+const saving = ref(false)
+const error = ref('')
+const message = ref('')
+const relationVisible = ref(false)
+const relationIndex = ref(-1)
+const relationDraft = ref<any>({})
+const relationError = ref('')
+const deletingRelation = ref<any>(null)
+const createVisible = ref(false)
+const creating = ref(false)
+const createError = ref('')
+const newDomain = ref({ name: '', domain: '' })
+let loadVersion = 0
 
-const pendingCount = computed(() => candidates.value.filter(item => item.status === 'pending_review').length)
-
+function mapped(value: any) {
+  return { ...value, relations: value.relations || [], objects: (value.objects || []).map((object: any) => ({
+    ...object, dataSourceId: object.dataSourceId || value.dataSourceId || '',
+  })) }
+}
+function editable(value: any) {
+  const { knowledgeBaseIds, version, dataSourceId, ...configuration } = value
+  return configuration
+}
 async function loadDomains() {
-  drafts.value = (await api.get('/ontology/drafts')).data
-  const sources = (await api.get('/datasources')).data
-  dataSources.value = Array.isArray(sources) ? sources : []
-  if (!selectedDomain.value && drafts.value.length) selectedDomain.value = drafts.value[0].domain
+  const [items, sources] = await Promise.all([api.get('/ontology/configurations'), api.get('/datasources')])
+  domains.value = items.data
+  dataSources.value = sources.data
+  if (!domains.value.some(item => item.domain === selectedDomain.value)) selectedDomain.value = domains.value[0]?.domain || ''
 }
-
 async function loadDomain() {
-  if (!selectedDomain.value) return
+  const domain = selectedDomain.value
+  const version = ++loadVersion
+  ontology.value = null
+  relationVisible.value = false
+  deletingRelation.value = null
+  message.value = ''
   error.value = ''
-  publication.value = null
-  try {
-    const [draftResponse, candidateResponse, publicationResponse] = await Promise.all([
-      api.get(`/ontology/drafts/${selectedDomain.value}`),
-      api.get('/ontology/candidates', { params: { domain: selectedDomain.value } }),
-      api.get('/ontology/publication-status', { params: { domain: selectedDomain.value } }),
-    ])
-    draft.value = draftResponse.data
-    mappingsDirty.value = false
-    candidates.value = candidateResponse.data
-    publication.value = publicationResponse.data
-  } catch (reason: any) {
-    error.value = reason?.response?.data?.detail || 'Ontology Core 不可用'
-  }
-}
-
-async function load() {
-  await loadDomains()
-  await loadDomain()
-}
-
-async function publish() {
-  if (!selectedDomain.value) return
-  publishing.value = true
-  error.value = ''
-  try {
-    published.value = (await api.post('/ontology/publish', null, { params: { domain: selectedDomain.value } })).data
-    await load()
-  } catch (reason: any) {
-    error.value = reason?.response?.data?.detail || '发布失败'
-  } finally {
-    publishing.value = false
-  }
-}
-
-async function decide(item: any, decision: 'accepted' | 'rejected') {
-  const note = window.prompt('请输入审核意见', decision === 'accepted' ? '证据与结构化映射已核对' : '证据不足或口径不适用')
-  if (note === null) return
-  try {
-    const response = await api.post(`/ontology/candidates/${item.id}/decision`, { decision, note })
-    reviewMessage.value = response.data.kind === 'definition' || decision === 'rejected'
-      ? `候选已${decision === 'accepted' ? '接受' : '拒绝'}。`
-      : '候选已合并到草稿，草稿版本已自动递增；发布前仍需完整校验。'
-    await load()
-  } catch (reason: any) {
-    error.value = reason?.response?.data?.detail || '候选审核失败'
-  }
-}
-
-function openEditor() {
-  if (!draft.value) return
-  editorText.value = JSON.stringify(draft.value, null, 2)
-  editorVisible.value = true
-}
-
-function createDomain() {
-  const domain = window.prompt('请输入业务域标识（小写字母、数字、下划线）')?.trim()
   if (!domain) return
-  if (!/^[a-z][a-z0-9_]{1,99}$/.test(domain)) {
-    error.value = '业务域标识格式不正确'
-    return
-  }
-  const name = window.prompt('请输入业务域名称', domain)?.trim() || domain
-  selectedDomain.value = domain
-  draft.value = { domain, name, version: '1.0.0', description: '', dataSourceId: '', knowledgeBaseIds: [], scopeField: '', timeField: '', defaultFilters: [], objects: [], relations: [], metrics: [] }
-  candidates.value = []
-  openEditor()
+  try {
+    const result = (await api.get(`/ontology/configurations/${domain}`)).data
+    if (version === loadVersion && domain === selectedDomain.value) ontology.value = mapped(result)
+  } catch (reason: any) { error.value = reason.response?.data?.detail || '无法读取本体配置' }
 }
-
-async function saveDraft() {
-  let value: any
-  try {
-    value = JSON.parse(editorText.value)
-  } catch {
-    error.value = '草稿不是有效 JSON'
-    return
-  }
-  if (value.domain !== selectedDomain.value) {
-    error.value = '业务域标识不能在编辑过程中修改'
-    return
-  }
-  saving.value = true
-  error.value = ''
-  try {
-    await api.put(`/ontology/drafts/${selectedDomain.value}`, value)
-    editorVisible.value = false
-    reviewMessage.value = '本体草稿已通过完整性校验并保存。'
-    await load()
-  } catch (reason: any) {
-    error.value = reason?.response?.data?.detail || '草稿校验或保存失败'
-  } finally {
-    saving.value = false
-  }
+async function load() {
+  try { await loadDomains(); await loadDomain() }
+  catch (reason: any) { error.value = reason.response?.data?.detail || '无法读取业务域' }
 }
-
-onMounted(load)
-
-function sourceOf(name: string) { return draft.value.objects.find((o: any) => o.name === name)?.dataSourceId || draft.value.dataSourceId }
-async function saveMappings() {
-  const value = JSON.parse(JSON.stringify(draft.value))
-  if (publication.value?.published_version === value.version) {
-    const parts = value.version.split('.')
-    const last = Number(parts[parts.length - 1])
-    value.version = Number.isFinite(last) ? [...parts.slice(0, -1), String(last + 1)].join('.') : `${value.version}.1`
+function openCreate() {
+  newDomain.value = { name: '', domain: '' }
+  createError.value = ''
+  createVisible.value = true
+}
+async function createDomain() {
+  const domain = newDomain.value.domain.trim()
+  const name = newDomain.value.name.trim()
+  if (!name || !/^[a-z][a-z0-9_]{1,99}$/.test(domain)) {
+    createError.value = '请填写业务域名称；标识为2～100位小写字母、数字或下划线，并以字母开头。'
+    return
   }
-  saving.value = true
+  creating.value = true
+  createError.value = ''
   try {
-    await api.put(`/ontology/drafts/${selectedDomain.value}`, value)
-    reviewMessage.value = '数据源映射已保存为草稿，发布后供新查询使用。跨源关系将用于分步传递关联键。'
+    await api.post('/ontology/domains', { name, domain })
+    selectedDomain.value = domain
+    createVisible.value = false
     await load()
-  } catch (reason: any) { error.value = reason?.response?.data?.detail || '映射保存失败' }
+    message.value = '业务域已创建，请配置对象与关联关系。'
+  } catch (reason: any) { createError.value = reason.response?.data?.detail || '创建业务域失败' }
+  finally { creating.value = false }
+}
+function objectOf(name: string) { return ontology.value?.objects.find((object: any) => object.name === name) }
+function tableLabel(name: string) {
+  const object = objectOf(name)
+  return object ? `${object.label || object.name} · ${object.table}` : name
+}
+function sourceOf(name: string) { return objectOf(name)?.dataSourceId || '' }
+function sourceLabel(name: string) {
+  return dataSources.value.find(source => source.id === sourceOf(name))?.name || sourceOf(name) || '未配置数据源'
+}
+function openRelation(index = -1) {
+  relationIndex.value = index
+  relationDraft.value = index < 0
+    ? { name: '', label: '', from: '', to: '', cardinality: 'N:1', joinType: 'many_to_one', condition: '', optional: false }
+    : JSON.parse(JSON.stringify(ontology.value.relations[index]))
+  relationError.value = ''
+  relationVisible.value = true
+}
+async function saveConfiguration(value: any) {
+  const domain = selectedDomain.value
+  if (!value || value.domain !== domain) throw new Error('业务域标识不能在编辑过程中更改')
+  const result = (await api.put(`/ontology/configurations/${domain}`, value)).data
+  if (domain === selectedDomain.value) {
+    ontology.value = mapped(result)
+  }
+  await loadDomains()
+  message.value = '本体配置已保存，新查询立即使用；已开始的查询保留原配置。'
+}
+async function saveRelation() {
+  const relation = { ...relationDraft.value, name: relationDraft.value.name.trim(), condition: relationDraft.value.condition.trim() }
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(relation.name) || !relation.from || !relation.to || !relation.condition) {
+    relationError.value = '请填写关系标识、两端表及关联条件；标识仅支持字母、数字和下划线，且不能以数字开头。'
+    return
+  }
+  if (ontology.value.relations.some((item: any, index: number) => index !== relationIndex.value && item.name === relation.name)) {
+    relationError.value = '关系标识已存在，请使用其他标识。'
+    return
+  }
+  const cardinalities: Record<string, string> = { '1:1': 'one_to_one', '1:N': 'one_to_many', 'N:1': 'many_to_one', 'N:N': 'many_to_many' }
+  if (relationIndex.value < 0 || relation.cardinality !== ontology.value.relations[relationIndex.value].cardinality) {
+    relation.joinType = cardinalities[relation.cardinality]
+  }
+  const relations = [...ontology.value.relations]
+  if (relationIndex.value < 0) relations.push(relation)
+  else relations[relationIndex.value] = relation
+  saving.value = true
+  relationError.value = ''
+  try {
+    await saveConfiguration({ ...editable(ontology.value), relations })
+    relationVisible.value = false
+  } catch (reason: any) { relationError.value = reason.response?.data?.detail || reason.message || '关系保存失败' }
   finally { saving.value = false }
 }
+async function deleteRelation() {
+  if (!deletingRelation.value) return
+  saving.value = true
+  error.value = ''
+  try {
+    const relations = ontology.value.relations.filter((item: any) => item.name !== deletingRelation.value.name)
+    await saveConfiguration({ ...editable(ontology.value), relations })
+    deletingRelation.value = null
+  } catch (reason: any) { error.value = reason.response?.data?.detail || reason.message || '关系删除失败' }
+  finally { saving.value = false }
+}
+onMounted(load)
 </script>
 
 <template>
   <div class="page">
     <div class="page-header">
-      <div><h1>本体工作室</h1><p>按业务域管理对象、属性、关系、指标、证据候选和不可变发布快照。</p></div>
+      <div><h1>本体工作室</h1><p>查看和维护表之间的关联关系，保存后供新查询使用。</p></div>
       <div class="header-actions">
-        <t-select v-model="selectedDomain" style="width:240px" @change="loadDomain">
-          <t-option v-for="item in drafts" :key="item.domain" :value="item.domain" :label="`${item.name} · ${item.version}`" />
-        </t-select>
-        <t-button variant="outline" @click="createDomain">新建业务域</t-button>
-        <t-button variant="outline" :disabled="!draft" @click="openEditor">编辑草稿</t-button>
-        <t-button theme="primary" :loading="publishing" :disabled="!draft || mappingsDirty" @click="publish">发布当前草稿</t-button>
+        <t-select v-model="selectedDomain" :disabled="saving" style="width:240px" @change="loadDomain"><t-option v-for="item in domains" :key="item.domain" :value="item.domain" :label="item.name" /></t-select>
+        <t-button variant="outline" :disabled="saving" @click="openCreate">新建业务域</t-button>
+        <t-button theme="primary" :disabled="!ontology?.objects.length || saving" @click="openRelation()">新增关联</t-button>
       </div>
     </div>
     <t-alert v-if="error" theme="error" :message="error" style="margin-bottom:16px" />
-    <t-alert v-if="reviewMessage" theme="success" title="操作完成" :message="reviewMessage" style="margin-bottom:16px" />
-
-    <template v-if="draft">
-      <t-alert v-if="publication" :theme="publication.published_version === draft.version ? 'info' : 'warning'" style="margin-bottom:16px" :title="publication.published_version ? `新查询使用已发布本体 ${publication.published_version}` : '当前业务域尚未发布本体'">
-        <template #message>已发布：{{ publication.published_counts.objects }} 个对象、{{ publication.published_counts.relations }} 条关系、{{ publication.published_counts.metrics }} 个指标。当前编辑的是草稿 {{ draft.version }}；保存草稿不会影响查询，需点击“发布当前草稿”后供新查询使用。已有查询继续绑定原版本。</template>
-      </t-alert>
-      <div class="domain-summary panel">
-        <div><strong>{{ draft.name }}</strong><span>{{ draft.domain }} · 草稿 {{ draft.version }}</span></div>
-        <p>{{ draft.description || '暂无业务域说明' }} · 数据源 {{ draft.dataSourceId || '未绑定' }} · 知识库 {{ draft.knowledgeBaseIds?.length || 0 }} 个</p>
-        <div class="ontology-stats">
-          <span>对象类 <b>{{ draft.objects?.length || 0 }}</b></span><span>关系类 <b>{{ draft.relations?.length || 0 }}</b></span>
-          <span>指标 <b>{{ draft.metrics?.length || 0 }}</b></span><span>待审候选 <b>{{ pendingCount }}</b></span>
-        </div>
-      </div>
-      <div class="panel" style="padding:16px;margin-bottom:16px">
-        <label>默认数据源 <t-select v-model="draft.dataSourceId" @change="mappingsDirty = true" style="width:300px;display:inline-block;margin:0 12px"><t-option v-for="source in dataSources" :key="source.id" :value="source.id" :label="`${source.name} · ${source.type}`" /></t-select></label>
-        <t-button :disabled="!mappingsDirty" :loading="saving" @click="saveMappings">保存数据源映射</t-button>
-        <p>对象可绑定不同实例。跨源关系只定义关联键，由程序分步查询，不生成跨实例 JOIN。机构权限映射可在草稿 sourceScopes 中按数据源配置。</p>
-      </div>
-
-      <div class="ontology-grid">
-        <section class="model-column">
-          <div class="panel model-panel">
-            <div class="panel-title">对象与属性映射</div>
-            <div v-if="draft.objects?.length" class="object-grid">
-              <article v-for="object in draft.objects" :key="object.name" class="object-card">
-                <div><strong>{{ object.label }}</strong><code>{{ object.name }}</code></div>
-                <small>{{ object.table }} · PK {{ object.primaryKey }}</small>
-                <t-select v-model="object.dataSourceId" placeholder="沿用默认数据源" clearable @change="mappingsDirty = true" style="margin:10px 0"><t-option v-for="source in dataSources" :key="source.id" :value="source.id" :label="`${source.name} · ${source.type}`" /></t-select>
-                <div class="property-list"><span v-for="property in object.properties" :key="property.name" :class="{ sensitive: property.sensitive }">{{ property.label || property.name }} → {{ property.column }}</span></div>
-              </article>
+    <t-alert v-if="message" theme="success" :message="message" closable @close="message = ''" style="margin-bottom:16px" />
+    <template v-if="ontology">
+      <section class="domain-summary panel">
+        <div class="domain-heading"><div><strong>{{ ontology.name }}</strong><small>{{ ontology.domain }}</small></div><t-tag variant="light" :theme="ontology.objects.length ? 'success' : 'default'">{{ ontology.objects.length ? '已配置' : '待配置' }}</t-tag></div>
+        <div class="ontology-stats"><span>表映射 <b>{{ ontology.objects.length }}</b></span><span>关联关系 <b>{{ ontology.relations.length }}</b></span></div>
+      </section>
+      <section class="panel model-panel">
+        <div class="panel-title">表之间的关联关系</div>
+        <div v-if="ontology.relations.length" class="relation-list">
+          <article v-for="(relation, index) in ontology.relations" :key="relation.name" class="relation-card">
+            <div class="relation-header">
+              <div><strong>{{ relation.label || relation.name }}</strong><small>{{ relation.name }}</small></div>
+              <div class="relation-actions"><t-button variant="text" :disabled="saving" @click="openRelation(Number(index))">编辑</t-button><t-button variant="text" theme="danger" :disabled="saving" @click="deletingRelation = relation">删除</t-button></div>
             </div>
-            <div v-else class="empty-hint">尚未定义对象；请编辑草稿并完成物理表映射。</div>
-          </div>
-
-          <div class="panel model-panel">
-            <div class="panel-title">关系路径</div>
-            <div v-if="draft.relations?.length" class="relation-list">
-              <article v-for="relation in draft.relations" :key="relation.name"><RelationIcon /><div><strong>{{ relation.label || relation.name }}</strong><span>{{ relation.from }} → {{ relation.to }} · {{ relation.cardinality }} · {{ sourceOf(relation.from) === sourceOf(relation.to) ? '同源关联' : '跨源分步查询' }}</span><code>{{ relation.condition }}</code></div></article>
+            <div class="relation-path">
+              <div class="table-node"><strong>{{ tableLabel(relation.from) }}</strong><small>{{ sourceLabel(relation.from) }}</small></div>
+              <div class="relation-link"><span>{{ relation.cardinality }}</span><RelationIcon /><small>{{ sourceOf(relation.from) && sourceOf(relation.to) ? (sourceOf(relation.from) === sourceOf(relation.to) ? '同源关联' : '跨源关联') : '数据源待配置' }}</small></div>
+              <div class="table-node"><strong>{{ tableLabel(relation.to) }}</strong><small>{{ sourceLabel(relation.to) }}</small></div>
             </div>
-            <div v-else class="empty-hint">尚未定义对象关系。</div>
-          </div>
-
-          <div class="panel model-panel">
-            <div class="panel-title">指标目录</div>
-            <div v-if="draft.metrics?.length" class="metric-table">
-              <div class="metric-row metric-head"><span>指标</span><span>语义表达式</span><span>粒度</span><span>格式</span></div>
-              <div v-for="metric in draft.metrics" :key="metric.name" class="metric-row"><span><strong>{{ metric.label }}</strong><small>{{ metric.name }}</small></span><code>{{ metric.expression }}</code><span>{{ metric.grain }}</span><span>{{ metric.format || '-' }}</span></div>
-            </div>
-            <div v-else class="empty-hint">尚未定义指标。</div>
-          </div>
-        </section>
-
-        <aside class="panel candidate-panel">
-          <div class="panel-title">知识抽取候选 <t-tag>{{ pendingCount }}</t-tag></div>
-          <article v-for="item in candidates" :key="item.id" class="candidate">
-            <RelationIcon /><div><strong>{{ item.term }}</strong> <t-tag size="small" variant="outline">{{ item.kind || 'definition' }}</t-tag><small>{{ item.source }}</small><p>{{ item.proposal }}</p>
-              <details v-if="item.evidence?.excerpt"><summary>查看原文证据</summary><p>{{ item.evidence.excerpt }}</p></details>
-              <small v-if="item.evidence?.locator">证据：{{ item.evidence.locator }} · {{ item.evidence.revision }}</small><small v-if="item.reviewedBy">审核：{{ item.reviewedBy }} · {{ item.reviewNote }}</small>
-              <t-tag v-if="item.status !== 'pending_review'" :theme="item.status === 'accepted' ? 'success' : 'danger'">{{ item.status }}</t-tag>
-              <div v-else><t-button size="small" variant="outline" @click="decide(item, 'rejected')">拒绝</t-button><t-button size="small" theme="primary" @click="decide(item, 'accepted')">接受候选</t-button></div>
-            </div>
+            <div class="relation-condition"><span>关联条件</span><code>{{ relation.condition }}</code><t-tag v-if="relation.optional" variant="light">可选关联</t-tag></div>
           </article>
-          <div v-if="!candidates.length" class="empty-hint">该业务域暂无知识候选。</div>
-        </aside>
-      </div>
+        </div>
+        <div v-else class="empty-hint"><p>{{ ontology.objects.length ? '尚未配置表关联，可手动新增。' : '当前业务域尚未配置表映射，配置后可维护关联关系。' }}</p><t-button v-if="ontology.objects.length" variant="outline" @click="openRelation()">新增关联</t-button></div>
+      </section>
     </template>
-    <div v-else class="panel empty-hint">暂无本体草稿，请新建业务域。</div>
-
-    <t-alert v-if="published" theme="success" title="本体发布成功" :message="`${published.domain} · ${published.version} · ${published.artifactVersion} · ${published.contentHash}`" style="margin-top:16px" />
-    <t-dialog v-model:visible="editorVisible" header="编辑本体草稿 JSON" width="min(1000px, 92vw)" :confirm-btn="{ content: '校验并保存', loading: saving }" @confirm="saveDraft">
-      <p class="editor-tip">对象、属性、关系和指标会在服务端执行完整投影校验；校验失败不会覆盖现有草稿。</p><textarea v-model="editorText" class="ontology-editor" spellcheck="false" />
+    <div v-else class="panel empty-hint">请选择或新建业务域。</div>
+    <t-dialog v-model:visible="createVisible" header="新建业务域" :footer="false" width="520px">
+      <div class="domain-form">
+        <label>业务域名称<t-input v-model="newDomain.name" placeholder="填写业务域名称" :maxlength="200" /></label>
+        <label>业务域标识<t-input v-model="newDomain.domain" placeholder="例如：operations_analysis" :maxlength="100" /><small>2～100位小写字母、数字或下划线，以字母开头；创建后不可更改。</small></label>
+        <t-alert v-if="createError" theme="error" :message="createError" />
+        <div class="dialog-actions"><t-button variant="outline" @click="createVisible = false">取消</t-button><t-button theme="primary" :loading="creating" :disabled="!newDomain.name.trim() || !newDomain.domain.trim()" @click="createDomain">创建业务域</t-button></div>
+      </div>
+    </t-dialog>
+    <t-dialog v-model:visible="relationVisible" :header="relationIndex < 0 ? '新增关联关系' : '编辑关联关系'" width="min(720px, 92vw)" top="6vh" :footer="false" :close-on-overlay-click="!saving" :close-btn="!saving" :close-on-esc-keydown="!saving">
+      <div class="relation-form">
+        <t-alert v-if="relationError" theme="error" :message="relationError" />
+        <div class="form-grid">
+          <label>关系名称<t-input v-model="relationDraft.label" placeholder="例如：客户持有贷款" :disabled="saving" /></label>
+          <label>关系标识<t-input v-model="relationDraft.name" placeholder="例如：customer_has_loan" :disabled="saving" /></label>
+          <label>来源表<t-select v-model="relationDraft.from" :disabled="saving" filterable placeholder="选择来源表"><t-option v-for="object in ontology?.objects || []" :key="object.name" :value="object.name" :label="`${tableLabel(object.name)} · ${sourceLabel(object.name)} (${object.name})`" /></t-select></label>
+          <label>目标表<t-select v-model="relationDraft.to" :disabled="saving" filterable placeholder="选择目标表"><t-option v-for="object in ontology?.objects || []" :key="object.name" :value="object.name" :label="`${tableLabel(object.name)} · ${sourceLabel(object.name)} (${object.name})`" /></t-select></label>
+          <label>关联基数<t-select v-model="relationDraft.cardinality" :disabled="saving"><t-option value="1:1" label="一对一 (1:1)" /><t-option value="1:N" label="一对多 (1:N)" /><t-option value="N:1" label="多对一 (N:1)" /><t-option value="N:N" label="多对多 (N:N)" /></t-select></label>
+          <label>可选关联<t-switch v-model="relationDraft.optional" :disabled="saving" /><small>允许来源表记录没有匹配的目标记录。</small></label>
+        </div>
+        <label>关联条件<t-textarea v-model="relationDraft.condition" :disabled="saving" :autosize="{ minRows: 3, maxRows: 8 }" placeholder="例如：customer.id = loan.customer_id" /><small>使用对象标识引用字段；复合关联可用 AND 连接。{{ relationDraft.from || '来源对象' }} → {{ relationDraft.to || '目标对象' }}</small></label>
+        <div class="dialog-actions"><t-button variant="outline" :disabled="saving" @click="relationVisible = false">取消</t-button><t-button theme="primary" :loading="saving" @click="saveRelation">保存并生效</t-button></div>
+      </div>
+    </t-dialog>
+    <t-dialog :visible="!!deletingRelation" header="删除关联关系" :confirm-btn="{ content: '删除并生效', theme: 'danger', loading: saving }" :cancel-btn="{ disabled: saving }" :close-btn="!saving" :close-on-overlay-click="false" :close-on-esc-keydown="!saving" @confirm="deleteRelation" @cancel="deletingRelation = null" @close="deletingRelation = null">
+      <p>确认删除“{{ deletingRelation?.label || deletingRelation?.name }}”？保存后新查询将不再使用该关联。</p>
     </t-dialog>
   </div>
 </template>
 
 <style scoped>
-.header-actions{display:flex;gap:10px;align-items:center}.domain-summary{display:grid;grid-template-columns:auto 1fr;align-items:center;margin-bottom:16px;overflow:hidden}.domain-summary>div:first-child{padding:18px}.domain-summary strong,.domain-summary span{display:block}.domain-summary span,.domain-summary p{color:var(--semora-muted);margin-top:5px}.domain-summary>p{padding:0 18px}.ontology-stats{grid-column:1/-1;display:flex;border-top:1px solid var(--semora-line)}.ontology-stats span{flex:1;padding:14px 16px;text-align:center;color:var(--semora-muted)}.ontology-stats b{color:var(--semora-ink);margin-left:8px}.ontology-grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(320px,1fr);gap:16px}.model-column{display:grid;gap:16px}.model-panel{overflow:hidden}.object-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;padding:16px}.object-card{border:1px solid var(--semora-line);border-radius:10px;padding:15px;min-width:0}.object-card>div:first-child{display:flex;justify-content:space-between;gap:10px}.object-card small,.metric-row small{display:block;color:var(--semora-muted);margin-top:6px}.property-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:13px}.property-list span{font-size:11px;background:var(--semora-page);border-radius:6px;padding:5px 7px}.property-list span.sensitive{background:#fff2e8;color:#9b4c0f}.relation-list article{display:flex;gap:11px;padding:14px 17px;border-top:1px solid var(--semora-line)}.relation-list article:first-child{border-top:0}.relation-list svg{color:var(--semora-green);flex:none}.relation-list span,.relation-list code{display:block;margin-top:5px;color:var(--semora-muted);font-size:12px}.metric-table{overflow:auto}.metric-row{display:grid;grid-template-columns:1.1fr 2.5fr .7fr .7fr;gap:12px;align-items:center;padding:12px 16px;border-top:1px solid var(--semora-line);font-size:12px}.metric-head{color:var(--semora-muted);background:var(--semora-sidebar)}.metric-row code{white-space:normal;overflow-wrap:anywhere}.candidate-panel{overflow:hidden;height:max-content}.candidate{display:flex;gap:10px;padding:17px;border-bottom:1px solid var(--semora-line)}.candidate>svg{color:var(--semora-green);flex:none}.candidate small{display:block;color:var(--semora-muted);margin-top:5px}.candidate p{line-height:1.6}.candidate .t-button{margin-right:7px}.candidate details{margin:8px 0;color:var(--semora-muted);font-size:12px}.candidate summary{cursor:pointer}.candidate details p{max-height:120px;overflow:auto}.editor-tip{color:var(--semora-muted)}.ontology-editor{width:100%;height:58vh;resize:vertical;border:1px solid var(--semora-line);border-radius:8px;padding:14px;background:#102018;color:#d9f8e4;font:12px/1.6 Consolas,monospace;outline:0}.empty-hint{padding:30px;text-align:center;color:var(--semora-muted)}
-@media(max-width:1100px){.ontology-grid{grid-template-columns:1fr}.object-grid{grid-template-columns:1fr}.header-actions{flex-wrap:wrap}.metric-row{grid-template-columns:1fr}.metric-head{display:none}}
+.header-actions{display:flex;gap:10px;align-items:center}.domain-summary{margin-bottom:20px;overflow:hidden}.domain-heading{display:flex;justify-content:space-between;align-items:center;padding:20px 22px}.domain-heading strong{font-size:18px}.domain-heading small{display:block;color:var(--semora-muted);margin-top:6px}.ontology-stats{display:flex;border-top:1px solid var(--semora-line)}.ontology-stats span{flex:1;padding:14px 16px;text-align:center;color:var(--semora-muted)}.ontology-stats b{color:var(--semora-ink);margin-left:8px}.model-panel{overflow:hidden;margin-bottom:20px}.relation-list{display:grid;gap:16px;padding:18px}.relation-card{border:1px solid var(--semora-line);border-radius:10px;min-width:0;padding:18px}.relation-header{display:flex;justify-content:space-between;align-items:center;gap:12px}.relation-header small{display:block;margin-top:5px;color:var(--semora-muted);overflow-wrap:anywhere}.relation-actions{display:flex;flex:none}.relation-path{display:grid;grid-template-columns:minmax(0,1fr) 120px minmax(0,1fr);align-items:center;gap:16px;margin:18px 0}.table-node{background:var(--semora-page);border:1px solid var(--semora-line);border-radius:8px;padding:14px;overflow-wrap:anywhere}.table-node small{display:block;color:var(--semora-muted);margin-top:8px}.relation-link{display:flex;flex-direction:column;align-items:center;gap:6px;color:var(--semora-green)}.relation-link small{color:var(--semora-muted)}.relation-condition{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;font-size:12px}.relation-condition>span{color:var(--semora-muted)}.relation-condition code{overflow-wrap:anywhere;flex:1;min-width:0}.domain-form,.relation-form{display:flex;flex-direction:column;gap:20px;padding-top:6px}.domain-form label,.relation-form label{display:flex;flex-direction:column;gap:8px;min-width:0}.domain-form small,.relation-form small{color:var(--semora-muted);line-height:1.6}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.dialog-actions{display:flex;justify-content:flex-end;gap:10px}.empty-hint{padding:30px;text-align:center;color:var(--semora-muted)}
+@media(max-width:800px){.header-actions{flex-wrap:wrap}.page-header{flex-wrap:wrap;gap:16px}.relation-path{grid-template-columns:1fr}.relation-link svg{transform:rotate(90deg)}.form-grid{grid-template-columns:1fr}.relation-header{align-items:flex-start}}
 </style>

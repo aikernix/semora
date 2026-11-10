@@ -9,15 +9,23 @@ from typing import Any
 
 import psycopg
 import sqlglot
-from fastapi import FastAPI, Header, HTTPException
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Header, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from sqlglot import exp
 from semora_telemetry import configure_telemetry
-from . import mysql_adapter
+from . import mysql_adapter, jdbc_adapter, adapter_registry, drivers, scan_control
 from .errors import database_error
+from .connection_settings import ConnectionSettings, connection_store
 
 
 app = FastAPI(title="Semora Read-only Executor", version="0.1.0")
+@app.exception_handler(RequestValidationError)
+async def private_validation_error(request, exc):
+    # Pydantic root-validator errors can otherwise echo the full password-bearing input.
+    return JSONResponse(status_code=422, content={"detail":[{k:e[k] for k in ("loc","msg","type") if k in e} for e in exc.errors()]})
+
 configure_telemetry(app, "semora-executor")
 FORBIDDEN = (exp.Insert, exp.Update, exp.Delete, exp.Create, exp.Drop, exp.Alter, exp.Command, exp.Merge)
 ACTIVE_QUERIES: dict[str, psycopg.Connection] = {}
@@ -32,6 +40,7 @@ class DataSourceInput(BaseModel):
 
 class DataSourceScanInput(DataSourceInput):
     tables: list[str] | None = Field(default=None, min_length=1, max_length=1000)
+    execution_id: str | None = Field(default=None, max_length=64)
 
 
 class QueryInput(BaseModel):
@@ -59,17 +68,55 @@ def require_internal_token(token: str | None) -> None:
 
 
 def resolve_datasource(body: DataSourceInput) -> str:
-    if body.type not in {"postgresql", "mysql"}:
+    if adapter_registry.is_jdbc(body.type):
         raise HTTPException(422, f"当前版本不支持数据源类型：{body.type}")
-    value = os.getenv(body.secret_ref)
+    value = connection_store.resolve(body.datasource_id, body.secret_ref)
     if not value:
         raise HTTPException(422, f"Executor 未配置密钥引用：{body.secret_ref}")
     return value
 
 
+class ConfigureDataSource(DataSourceInput):
+    connection: ConnectionSettings
+
+
+@app.post("/internal/v1/datasources/configuration")
+def read_connection(body: DataSourceInput, x_semora_internal_token: str | None = Header(default=None)):
+    require_internal_token(x_semora_internal_token)
+    return connection_store.public(connection_store.get(body.datasource_id, body.secret_ref, body.type))
+
+
+@app.put("/internal/v1/datasources/configuration")
+def save_connection(body: ConfigureDataSource, x_semora_internal_token: str | None = Header(default=None)):
+    require_internal_token(x_semora_internal_token)
+    if body.type != body.connection.type:
+        raise HTTPException(422, "数据库类型不一致")
+    try:
+        value = connection_store.candidate(body.datasource_id, body.secret_ref, body.connection)
+        connection_store.save(body.datasource_id, value)
+        return connection_store.public(value)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/internal/v1/datasources/test-configuration")
+def test_connection_configuration(body: ConfigureDataSource, x_semora_internal_token: str | None = Header(default=None)):
+    require_internal_token(x_semora_internal_token)
+    if body.type != body.connection.type:
+        raise HTTPException(422, "数据库类型不一致")
+    try:
+        value = connection_store.candidate(body.datasource_id, body.secret_ref, body.connection)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if adapter_registry.is_jdbc(body.type):
+        return jdbc_adapter.run(value, "test", timeout_ms=10000)
+    inspect = {"mysql": mysql_adapter.inspect, "postgresql": inspect_connection}[body.type]
+    return inspect(connection_store.dsn(value))
+
+
 def inspect_connection(dsn: str) -> dict[str, Any]:
     try:
-        with psycopg.connect(dsn, autocommit=False, connect_timeout=5) as connection:
+        with scan_control.track(psycopg.connect(dsn, autocommit=False, connect_timeout=5)) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """SELECT current_database(), current_user,
@@ -79,13 +126,18 @@ def inspect_connection(dsn: str) -> dict[str, Any]:
                     FROM pg_roles WHERE rolname = current_user"""
                 )
                 row = cursor.fetchone()
+                version = getattr(connection.info, "server_version", None)
                 connection.rollback()
     except Exception as exc:
-        raise HTTPException(502, f"数据源连接失败：{type(exc).__name__}: {exc}") from exc
+        raise database_error(exc, "test") from exc
     assert row is not None
     dangerous = any(bool(value) for value in row[3:8]) or bool(row[8])
     read_only = str(row[2]).lower() == "on" and not dangerous
     return {
+        "product": "PostgreSQL",
+        "driver":"psycopg",
+        "driver_version":psycopg.__version__,
+        "version": (f"{version // 10000}.{version % 10000}" if version >= 100000 else f"{version // 10000}.{version // 100 % 100}.{version % 100}") if version else "unknown",
         "database": row[0],
         "user": row[1],
         "default_transaction_read_only": row[2],
@@ -99,21 +151,24 @@ def sensitivity_level(table: str, column: str) -> str:
     return "internal"
 
 
-def scan_postgresql(dsn: str) -> dict[str, Any]:
+def scan_postgresql(dsn: str, selected_tables: list[str] | None = None, selected_schema: str | None = None) -> dict[str, Any]:
     connection_info = inspect_connection(dsn)
     if not connection_info["read_only"]:
         raise HTTPException(409, "数据源账号不是只读账号，拒绝扫描和注册")
     try:
-        with psycopg.connect(dsn, autocommit=False, connect_timeout=5) as connection:
+        with scan_control.track(psycopg.connect(dsn, autocommit=False, connect_timeout=5)) as connection:
             with connection.cursor() as cursor:
                 cursor.execute("SET TRANSACTION READ ONLY")
+                cursor.execute("SET LOCAL statement_timeout='30s'")
                 cursor.execute(
                     """SELECT table_schema,table_name,column_name,data_type,is_nullable,ordinal_position
                     FROM information_schema.columns
                     WHERE table_schema NOT IN ('pg_catalog','information_schema')
-                    ORDER BY table_schema,table_name,ordinal_position"""
+                    """ + (" AND (table_schema || '.' || table_name) = ANY(%s)" if selected_tables else "") + (" AND table_schema=%s" if selected_schema else "") + " ORDER BY table_schema,table_name,ordinal_position LIMIT 100001",
+                    ([selected_tables] if selected_tables else []) + ([selected_schema] if selected_schema else [])
                 )
                 column_rows = cursor.fetchall()
+                if len(column_rows)>100000: raise HTTPException(413,"扫描超过 10 万字段，请限定表范围")
                 cursor.execute(
                     """SELECT n.nspname,c.relname,a.attname
                     FROM pg_constraint con
@@ -153,7 +208,7 @@ def scan_postgresql(dsn: str) -> dict[str, Any]:
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(502, f"Schema 扫描失败：{type(exc).__name__}: {exc}") from exc
+        raise database_error(exc, "scan") from exc
     tables: dict[tuple[str, str], dict[str, Any]] = {}
     sensitive_columns: list[dict[str, str]] = []
     for schema, table, column, data_type, nullable, _ in column_rows:
@@ -178,7 +233,7 @@ def scan_postgresql(dsn: str) -> dict[str, Any]:
 
 
 def assert_readonly(sql: str, dialect: str = "postgres") -> None:
-    parser_sql = re.sub(r"%\([A-Za-z_][A-Za-z0-9_]*\)s", "ARRAY[1]", sql)
+    parser_sql = re.sub(r"%\([A-Za-z_][A-Za-z0-9_]*\)s", "1", sql)
     try:
         statements = sqlglot.parse(parser_sql, read=dialect)
     except sqlglot.errors.ParseError as exc:
@@ -189,7 +244,11 @@ def assert_readonly(sql: str, dialect: str = "postgres") -> None:
     if not isinstance(ast, (exp.Select, exp.Union, exp.Intersect, exp.Except)) or any(ast.find(node) for node in FORBIDDEN):
         raise HTTPException(400, "Executor 拒绝非只读 SQL")
     limit = ast.args.get("limit")
-    if limit is None:
+    where=ast.args.get("where")
+    rownum_bound=(dialect=="oracle" and where is not None and isinstance(where.this,exp.LTE)
+                 and isinstance(where.this.this,exp.Column) and where.this.this.name.upper()=="ROWNUM"
+                 and isinstance(where.this.expression,exp.Literal) and where.this.expression.is_int)
+    if limit is None and not rownum_bound:
         raise HTTPException(400, "Executor 要求显式 LIMIT")
     if ast.find(exp.Into) or ast.find(exp.Lock):
         raise HTTPException(400, "Executor 拒绝导出文件或锁定数据")
@@ -216,23 +275,52 @@ def healthz() -> dict:
 @app.post("/internal/v1/datasources/test")
 def test_datasource(body: DataSourceInput, x_semora_internal_token: str | None = Header(default=None)) -> dict:
     require_internal_token(x_semora_internal_token)
-    inspect = mysql_adapter.inspect if body.type == "mysql" else inspect_connection
+    if adapter_registry.is_jdbc(body.type):
+        return {"datasource_id": body.datasource_id, **jdbc_adapter.run(jdbc_adapter.settings(body), "test", timeout_ms=10000)}
+    inspect = {"mysql": mysql_adapter.inspect, "postgresql": inspect_connection}[body.type]
     return {"datasource_id": body.datasource_id, **inspect(resolve_datasource(body))}
 
 
 @app.post("/internal/v1/datasources/scan")
 def scan_datasource(body: DataSourceScanInput, x_semora_internal_token: str | None = Header(default=None)) -> dict:
     require_internal_token(x_semora_internal_token)
-    if body.tables is not None and body.type != 'mysql':
-        raise HTTPException(422, '当前只有MySQL支持限定表扫描')
-    result = mysql_adapter.scan(resolve_datasource(body), sensitivity_level, body.tables) if body.type == "mysql" else scan_postgresql(resolve_datasource(body))
-    return {"datasource_id": body.datasource_id, **result}
+    with scan_control.operation(body.execution_id):
+        if adapter_registry.is_jdbc(body.type):
+            result = jdbc_adapter.run(jdbc_adapter.settings(body), "scan", tables=body.tables or [], execution_id=body.execution_id, timeout_ms=180000)
+        elif body.type == "mysql":
+            cfg = connection_store.get(body.datasource_id,body.secret_ref,body.type) or {}
+            prefix = cfg.get("database", "") + "."
+            table_names = [t[len(prefix):] if t.startswith(prefix) else t for t in body.tables] if body.tables else None
+            result = mysql_adapter.scan(resolve_datasource(body), sensitivity_level, table_names)
+        elif body.type == "postgresql":
+            cfg = connection_store.get(body.datasource_id,body.secret_ref,body.type) or {}
+            result = scan_postgresql(resolve_datasource(body), body.tables, cfg.get("schema_name"))
+            if body.tables:
+                result["tables"] = [t for t in result["tables"] if f"{t['schema']}.{t['name']}" in body.tables]
+        from .snapshots import normalize_snapshot, supplement_native
+        if not adapter_registry.is_jdbc(body.type):
+            result = supplement_native(result, resolve_datasource(body), body.type)
+        cfg = connection_store.get(body.datasource_id,body.secret_ref,body.type) or {}
+        if cfg.get("schema_name"):
+            result["tables"]=[t for t in result.get("tables",[]) if t.get("schema")==cfg["schema_name"]]
+        return {"datasource_id": body.datasource_id, **normalize_snapshot(result)}
 
 
 @app.post("/internal/v1/query")
 def execute_query(body: QueryInput, x_semora_internal_token: str | None = Header(default=None)) -> dict:
     require_internal_token(x_semora_internal_token)
-    assert_readonly(body.sql, "mysql" if body.datasource.type == "mysql" else "postgres")
+    assert_readonly(body.sql, adapter_registry.dialect(body.datasource))
+    if adapter_registry.is_jdbc(body.datasource.type):
+        cfg = jdbc_adapter.settings(body.datasource)
+        sql, params = jdbc_adapter.bind_parameters(body.sql, body.parameters)
+        result = jdbc_adapter.run(cfg, "query", sql=sql, parameters=params,
+            execution_id=body.execution_id,
+            timeout_ms=min(body.timeout_ms or 30000, int(os.getenv("QUERY_TIMEOUT_MS", "30000"))),
+            max_rows=min(body.max_rows or 1000, int(os.getenv("MAX_RESULT_ROWS", "1000"))),
+            max_bytes=min(body.max_bytes or 10485760, int(os.getenv("MAX_RESULT_BYTES", "10485760"))))
+        result["rows"] = [[mask_sensitive(result["columns"][i], v, set(body.sensitive_columns)) for i,v in enumerate(row)] for row in result["rows"]]
+        result["bytes_returned"] = len(json.dumps(result["rows"], ensure_ascii=False).encode())
+        return result
     dsn = resolve_datasource(body.datasource)
     started = time.perf_counter()
     # Environment values are hard security ceilings. A versioned system policy
@@ -263,7 +351,8 @@ def execute_query(body: QueryInput, x_semora_internal_token: str | None = Header
                 columns = [column[0] for column in cursor.description or []]
                 from .result_types import column_types, encode_scalar
                 rows = cursor.fetchmany(max_rows + 1)
-                result_types = column_types(cursor.description, body.datasource.type == 'mysql', rows)
+                result_types = column_types(cursor.description, body.datasource.type == 'mysql', rows,
+                    getattr(getattr(cursor,"_result",None),"fields",None))
                 truncated = len(rows) > max_rows
                 rows = rows[:max_rows]
                 sensitive_columns = {item.lower() for item in body.sensitive_columns}
@@ -308,6 +397,9 @@ def execute_query(body: QueryInput, x_semora_internal_token: str | None = Header
 @app.post("/internal/v1/executions/{execution_id}/cancel")
 def cancel_query(execution_id: str, x_semora_internal_token: str | None = Header(default=None)) -> dict:
     require_internal_token(x_semora_internal_token)
+    native_cancelled = scan_control.cancel(execution_id)
+    if jdbc_adapter.cancel(execution_id) or native_cancelled:
+        return {"execution_id": execution_id, "accepted": True}
     with ACTIVE_QUERIES_LOCK:
         connection = ACTIVE_QUERIES.get(execution_id)
     if connection is None:
@@ -328,7 +420,13 @@ def cancel_query(execution_id: str, x_semora_internal_token: str | None = Header
 def estimate_query(body: EstimateInput, x_semora_internal_token: str | None = Header(default=None)) -> dict:
     """Estimate a read-only query without executing it or returning business data."""
     require_internal_token(x_semora_internal_token)
-    assert_readonly(body.sql, "mysql" if body.datasource.type == "mysql" else "postgres")
+    assert_readonly(body.sql, adapter_registry.dialect(body.datasource))
+    if adapter_registry.is_jdbc(body.datasource.type):
+        # Authentication/permissions must be checked before reporting preflight unavailable.
+        result = jdbc_adapter.run(jdbc_adapter.settings(body.datasource), "test", timeout_ms=body.timeout_ms)
+        if not result.get("read_only"):
+            raise HTTPException(409, detail={"error_type": "permission", "message": "尚未通过只读验证"})
+        raise HTTPException(422, detail={"error_type": "capability", "operation": "estimate", "message": "该 JDBC 来源不支持无副作用预检，请告警后实际只读执行"})
     dsn = resolve_datasource(body.datasource)
     if body.datasource.type == "mysql":
         return mysql_adapter.estimate(dsn, body.sql, body.parameters, body.timeout_ms)
@@ -356,3 +454,88 @@ def estimate_query(body: EstimateInput, x_semora_internal_token: str | None = He
         "source": "postgresql-explain",
     }
 
+
+
+@app.get("/internal/v1/database-drivers")
+def database_drivers(x_semora_internal_token: str | None = Header(default=None)):
+    require_internal_token(x_semora_internal_token)
+    return drivers.list_drivers()
+
+@app.post("/internal/v1/database-drivers")
+async def upload_driver(config: str = Form(...), files: list[UploadFile] = File(...), x_semora_internal_token: str | None = Header(default=None)):
+    require_internal_token(x_semora_internal_token)
+    try:
+        settings = drivers.DriverConfig.model_validate_json(config)
+    except ValueError:
+        raise HTTPException(422, "驱动配置格式无效") from None
+    payload=[]; total=0
+    for file in files:
+        data=await file.read(100*1024**2+1);total+=len(data)
+        if total>100*1024**2: raise HTTPException(413, "驱动包超过 100MB")
+        payload.append((file.filename or "",data))
+    return drivers.install(settings, payload)
+
+@app.put("/internal/v1/database-drivers/{driver_id}")
+def update_driver(driver_id: str, body: drivers.DriverConfig, x_semora_internal_token: str | None = Header(default=None)):
+    require_internal_token(x_semora_internal_token)
+    return drivers.update(driver_id, body)
+
+
+@app.post("/internal/v1/datasources/validate-query")
+def validate_datasource_query(body: DataSourceInput, x_semora_internal_token: str | None = Header(default=None)):
+    require_internal_token(x_semora_internal_token)
+    if adapter_registry.is_jdbc(body.type): return jdbc_adapter.validate(body)
+    execute_query(QueryInput(sql="SELECT 1 AS semora_probe LIMIT 1",datasource=body,timeout_ms=5000,max_rows=1),x_semora_internal_token)
+    result=test_datasource(body,x_semora_internal_token)
+    from .sql_capabilities import probe_native
+    try:probes=probe_native(body.type,resolve_datasource(body))
+    except Exception as exc:raise database_error(exc,"test") from exc
+    result["probes"]={k:v for k,v in probes.items() if k!="sql_baseline"}
+    result["capabilities"]={"connection":"verified","query":"verified","dialect":adapter_registry.dialect(body),"live_validation":"synthetic_query_only",**probes}
+    return result
+
+
+@app.get("/internal/v1/executions/{execution_id}/progress")
+def execution_progress(execution_id: str, x_semora_internal_token: str | None = Header(default=None)):
+    require_internal_token(x_semora_internal_token)
+    return jdbc_adapter.progress(execution_id)
+
+
+class ProfileInput(BaseModel):
+    datasource: DataSourceInput
+    source_table: str = Field(min_length=1,max_length=800)
+    source_columns: list[str] = Field(min_length=1,max_length=8)
+    target_table: str = Field(min_length=1,max_length=800)
+    target_columns: list[str] = Field(min_length=1,max_length=8)
+    sample_rows: int = Field(default=200,ge=10,le=500)
+
+
+@app.post("/internal/v1/datasources/profile-relationship")
+def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None = Header(default=None)):
+    require_internal_token(x_semora_internal_token)
+    if len(body.source_columns)!=len(body.target_columns):raise HTTPException(422,"复合键字段数不一致")
+    dialect=adapter_registry.dialect(body.datasource)
+    def sample(table, columns):
+        # Identifiers are always quoted; samples never leave this service.
+        parts=table.split(".")
+        if any(not p or len(p)>255 for p in parts):raise HTTPException(422,"表标识无效")
+        tree=exp.select(*(exp.column(c,quoted=True) for c in columns)).from_(exp.Table(
+            this=exp.to_identifier(parts[-1],quoted=True),
+            db=exp.to_identifier(parts[-2],quoted=True) if len(parts)>1 else None,
+            catalog=exp.to_identifier(parts[-3],quoted=True) if len(parts)>2 else None)).limit(body.sample_rows)
+        from semora_contracts.sql_compat import apply_pagination
+        pagination="baseline"
+        if adapter_registry.is_jdbc(body.datasource.type):
+            driver,_,_=jdbc_adapter.configuration(jdbc_adapter.settings(body.datasource))
+            pagination=driver["effective_pagination"]
+        tree=apply_pagination(tree,dialect,pagination)
+        result=execute_query(QueryInput(sql=tree.sql(dialect=dialect),datasource=body.datasource,
+            timeout_ms=3000,max_rows=body.sample_rows,max_bytes=1024*1024),x_semora_internal_token)
+        return [tuple(json.dumps(v,sort_keys=True,default=str) for v in row) for row in result["rows"] if all(v is not None for v in row)]
+    left=sample(body.source_table,body.source_columns);right=sample(body.target_table,body.target_columns)
+    rset=set(right)
+    return {"method":"bounded_independent_samples","sample_budget_per_table":body.sample_rows,
+            "source_nonnull_sample_rows":len(left),"target_nonnull_sample_rows":len(right),
+            "target_sample_distinct_keys":len(rset),"source_keys_observed_in_target_sample":sum(k in rset for k in left),
+            "global_uniqueness":"not_established","global_referential_integrity":"not_established",
+            "warning":"独立采样中的缺失不代表全表无关联，样本唯一不代表全表唯一"}

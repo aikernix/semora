@@ -18,7 +18,9 @@ docker compose -f docker-compose.yml -f deploy/compose.mvp.yml up -d --build --r
 
 页面：<http://127.0.0.1:5173>。设置页配置模型；数据源页配置只读连接并扫描结构；本体页发布映射及关系；知识库可绑定外部 WeKnora，也可暂不绑定。
 
-常驻服务只有 Web、API、Ontology、Executor、PostgreSQL。`migrate`、`langgraph-migrate`、`ontology-migrate` 是一次性元数据迁移任务。业务数据库由 Executor 连接；模型和 API 不持有业务连接密码。内嵌 DuckDB 只处理本次查询的中间结果，不是另一个常驻服务。
+常驻服务只有 Web、API、Ontology、Executor、PostgreSQL。`migrate`、`langgraph-migrate`、`ontology-migrate` 是一次性元数据迁移任务。业务数据库由 Executor 连接；API 仅在配置时转发凭据，不将数据库密码写入元数据或模型上下文。内嵌 DuckDB 只处理本次查询的中间结果，不是另一个常驻服务。
+
+知识库页的“连接配置”支持修改 WeKnora 地址和 API Key，保存后立即生效；更换实例后需核对业务域的知识库绑定。数据源页支持通过地址、端口、数据库名、用户名及密码新增和编辑连接，密码留空保留原值。旧 `.env` 配置仍可使用，页面保存的连接优先。Executor 的加密连接文件和加密密钥持久化在 `executor-config` 数据卷中，备份与迁移时需一起保留；WeKnora 配置保存在平台元数据库中。升级时先运行新增的 `008-integrations.sql` 元数据迁移。
 
 本地知识库 API、解析 Worker、对象存储、内置 Keycloak 和 OTEL Collector 已从部署中移除。知识能力统一通过外部 WeKnora API 提供；现有认证适配器可按需连接外部身份服务。启动命令会移除同一 Compose 项目的旧孤立容器，不删除数据卷；已有数据库和历史任务保留。
 
@@ -61,3 +63,5 @@ npm run build
 ```
 
 API 测试使用隔离元数据和 SQLite/DuckDB，不写业务数据库；覆盖实际关系运算、跨源传键、修复预算、澄清恢复、模型传输和数据源适配器。
+
+多数据库配置、JDBC 扩展与 Wren MDL 导出见 [多数据库接入文档](docs/MULTIDATABASE.md)。产品入口和实例验收分别记录，不承诺未验证的版本或兼容模式。

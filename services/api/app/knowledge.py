@@ -27,7 +27,7 @@ class WeKnoraClient:
 
     def _ensure_configured(self) -> None:
         if not self.base_url or not self.api_key:
-            raise KnowledgeCoreError("WeKnora 未配置：需要 WEKNORA_BASE_URL 和 WEKNORA_API_KEY")
+            raise KnowledgeCoreError("WeKnora 未配置：请在知识库的连接配置中填写服务地址和 API Key")
 
     @staticmethod
     def _unwrap(payload: Any) -> Any:

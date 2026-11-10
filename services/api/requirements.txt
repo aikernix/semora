@@ -18,3 +18,6 @@ opentelemetry-instrumentation-fastapi==0.66b2
 opentelemetry-instrumentation-httpx==0.66b2
 opentelemetry-instrumentation-psycopg==0.66b2
 
+
+jsonschema==4.23.0
+wren-core-py==0.8.2; sys_platform == "linux"

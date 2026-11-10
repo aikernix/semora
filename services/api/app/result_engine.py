@@ -12,6 +12,7 @@ from .sql_errors import SQLIssue
 def _type(type_name):
     """Types originate in cursor metadata, never in model-authored DDL."""
     name = str(type_name).upper()
+    name={"TIMESTAMP WITH TIME ZONE":"TIMESTAMPTZ","TIME WITH TIME ZONE":"TIMETZ"}.get(name,name)
     if re.fullmatch(r"DECIMAL\([1-9][0-9]?,[0-9]+\)", name):
         return name
     if name in {
@@ -27,6 +28,8 @@ def _type(type_name):
         "DATE",
         "TIME",
         "TIMESTAMP",
+        "TIMESTAMPTZ",
+        "TIMETZ",
         "VARCHAR",
     }:
         return name

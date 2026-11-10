@@ -20,3 +20,24 @@ Semora 使用或参考以下开源项目。名称与 Logo 不属于 Semora，也
 
 OpenBKN License 覆盖的文件不纳入本仓库。未来如引入任何上游源码，必须先完成逐文件许可评估，并保留原始版权头、许可证、修改说明和上游 commit。
 
+# Compiled delivery build tool
+
+The optional compiled-delivery pipeline uses Cython 3.3.1 (Apache-2.0) as a build
+tool, not as a bundled runtime dependency. Source: https://github.com/cython/cython
+and https://github.com/cython/cython/blob/3.3.1/COPYING.txt.
+Generated-code notices in native modules must be retained. Compiling owned modules
+does not change the licenses or notice obligations of their dependencies.
+
+
+## Database adapters and MDL export (2026-11-10)
+
+- Wren Core Python 0.8.2: Apache-2.0; used exclusively for exported MDL validation, not query planning. https://github.com/Canner/WrenAI/tree/main/core/wren-core-py
+- Unmodified Wren MDL schema at commit `548eee3e864b11e7f11eee15ae82be178a295f22`: Apache-2.0 under upstream `core/**` license map. Source and license are retained in `services/api/app/vendor/`.
+- JSON Schema Python 4.23.0: MIT; https://github.com/python-jsonschema/jsonschema.
+- Jackson Databind 2.18.2 (including Jackson core/annotations): Apache-2.0; https://github.com/FasterXML/jackson-databind.
+- Oracle JDBC ojdbc11 23.6.0.24.10: Oracle Free Use Terms and Conditions (FUTC); vendor artifact and license metadata retained in JAR. https://www.oracle.com/database/technologies/appdev/jdbc-downloads.html
+- Microsoft JDBC 12.8.1.jre11: MIT; https://github.com/microsoft/mssql-jdbc.
+- OceanBase Connector/J 2.4.13: LGPL-2.1; https://github.com/oceanbase/obconnector-j. Shipped unmodified as a separate JAR with license metadata; source available from the linked upstream repository. No driver is statically linked into the Worker.
+- Custom JDBC bundles are administrator-supplied; Semora retains hashes and versions. Their own licenses and dependencies remain applicable.
+
+JRE and Maven base images retain their bundled third-party notices. Java Worker is Semora-owned code and communicates through JSON; database credentials are not command-line arguments.

@@ -83,6 +83,7 @@ def input_binding(run, ontology, scope):
                 "at": source.last_scan_at,
                 "status": source.status,
                 "version": (source.scan_result.get("connection") or {}).get("version"),
+                "capabilities": source.scan_result.get("capabilities", {}),
             }
         except KeyError:
             scans[source_id] = "not_registered"
@@ -210,12 +211,16 @@ def context_packet(workflow, run, ontology, names):
         source_id = obj.get("dataSourceId") or ontology.get("dataSourceId")
         try:
             source = datasource_service.repository.get(source_id)
-            table = obj.get("table", "").split(".")[-1]
-            matches = [
-                t
-                for t in source.scan_result.get("tables", [])
-                if str(t.get("name") or t.get("table_name") or "").split(".")[-1] == table
-            ]
+            table = obj.get("table", "")
+            def table_id(t):
+                return t.get("id") or ".".join(str(t.get(k)) for k in ("catalog","schema","name") if t.get(k))
+            scanned = source.scan_result.get("tables", [])
+            matches = [t for t in scanned if table_id(t) == table]
+            if not matches and "." not in table:
+                matches = [t for t in scanned if (t.get("name") or t.get("table_name")) == table]
+                if len(matches)>1:
+                    gaps.append(f"对象 {name} 的物理表 {table} 跨 Schema 重名，请补全映射")
+                    matches=[]
             # Only scanned structural metadata. Never include secret refs or rows.
             tables = [
                 {
@@ -224,7 +229,11 @@ def context_packet(workflow, run, ontology, names):
                         "name",
                         "table_name",
                         "schema",
+                        "catalog",
+                        "id",
                         "columns",
+                        "primary_keys",
+                        "unique_constraints",
                         "primary_key",
                         "foreign_keys",
                     )

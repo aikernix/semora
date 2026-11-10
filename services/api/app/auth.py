@@ -70,7 +70,7 @@ def required_roles(method: str, path: str) -> frozenset[str]:
         return frozenset({"approver", "admin"})
     if path.startswith("/api/v1/audits"):
         return frozenset({"auditor", "admin"})
-    if path.startswith("/api/v1/datasources"):
+    if path.startswith(("/api/v1/datasources", "/api/v1/datasource-connection-test")):
         if method != "GET" or path.endswith("/test") or path.endswith("/scan"):
             return frozenset({"data_steward", "admin"})
         return frozenset({"analyst", "data_steward", "admin"})

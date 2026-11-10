@@ -21,11 +21,11 @@ from test_sql_native import native_harness, sources as source_fixture, step
     "version,supported",
     [
         ("5.7.21-log", False),
-        ("8.0.45", True),
+        ("8.0.45", False),
         ("10.1.48-MariaDB", False),
-        ("5.5.5-10.6.12-MariaDB", True),
-        ("", None),
-        ("5.7.25-TiDB-v7.5", None),
+        ("5.5.5-10.6.12-MariaDB", False),
+        ("", False),
+        ("5.7.25-TiDB-v7.5", False),
     ],
 )
 def test_scanned_capabilities_respect_vendor_and_unknowns(version, supported):
@@ -81,7 +81,7 @@ def test_known_unsupported_construct_is_corrected_before_database_call(monkeypat
 
 
 def test_capability_error_is_specific_not_a_missing_table():
-    with pytest.raises(SQLIssue, match="不支持窗口函数"):
+    with pytest.raises(SQLIssue, match="未启用窗口函数"):
         validate_features(
             sqlglot.parse_one("SELECT ROW_NUMBER() OVER()"),
             {"vendor": "mysql", "version": "5.7", "features": {"window_functions": False}},
@@ -273,6 +273,7 @@ def test_independent_coverage_correction_preserves_all_records_of_selected_entit
     corrected = deepcopy(program)
     corrected["steps"][0]["sql"] = good
     w, session, _, _, model, _ = native_harness(monkeypatch, program=program)
+    datasources.datasource_service.repository.get("source").scan_result={"capabilities":{"cte":{"status":"verified"}}}
     model.complete_json.side_effect = [
         program,
         {

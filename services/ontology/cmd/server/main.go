@@ -118,6 +118,48 @@ func (s *server) publish(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, 201, value)
 }
 
+func (s *server) knowledgeBinding(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		jsonResponse(w, 405, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var input struct {
+		IDs *[]string `json:"knowledgeBaseIds"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&input) != nil || input.IDs == nil || len(*input.IDs) > 20 {
+		jsonResponse(w, 422, map[string]string{"error": "请提供不超过20项的知识库ID数组"})
+		return
+	}
+	ids := []string{}
+	seen := map[string]bool{}
+	for _, id := range *input.IDs {
+		if strings.TrimSpace(id) == "" || len(id) > 200 || id != strings.TrimSpace(id) {
+			jsonResponse(w, 422, map[string]string{"error": "知识库ID无效"})
+			return
+		}
+		if !seen[id] {
+			ids = append(ids, id)
+			seen[id] = true
+		}
+	}
+	domain := r.PathValue("domain")
+	if err := s.store.bindEffectiveKnowledgeBases(r.Context(), domain, ids); err != nil {
+		if validation, ok := err.(*validationError); ok {
+			jsonResponse(w, 422, map[string]any{"error": validation.Error(), "issues": validation.issues})
+			return
+		}
+		if isNotFound(err) {
+			jsonResponse(w, 404, map[string]string{"error": "draft not found"})
+			return
+		}
+		jsonResponse(w, 500, map[string]string{"error": "知识库绑定保存失败"})
+		return
+	}
+	jsonResponse(w, 200, map[string]any{"domain": domain, "knowledgeBaseIds": ids})
+}
+
 func (s *server) latest(w http.ResponseWriter, r *http.Request) {
 	value, err := s.store.latestSnapshot(r.Context(), domainQuery(r))
 	if isNotFound(err) {
@@ -257,6 +299,9 @@ func main() {
 	})
 	mux.HandleFunc("/api/v1/ontology/drafts", app.internal(app.drafts))
 	mux.HandleFunc("/api/v1/ontology/drafts/{domain}", app.internal(app.draft))
+	mux.HandleFunc("/api/v1/ontology/drafts/{domain}/knowledge-bases", app.internal(app.knowledgeBinding))
+	mux.HandleFunc("/api/v1/ontology/configurations/{domain}", app.internal(app.effectiveConfiguration))
+	mux.HandleFunc("/api/v1/ontology/domains", app.internal(app.createDomain))
 	mux.HandleFunc("/api/v1/ontology/publish", app.internal(app.publish))
 	mux.HandleFunc("/api/v1/ontology/snapshots/latest", app.internal(app.latest))
 	mux.HandleFunc("/api/v1/ontology/paths", app.internal(app.paths))

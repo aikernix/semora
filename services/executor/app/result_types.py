@@ -2,12 +2,18 @@
 from decimal import Decimal
 
 
-def column_types(description, mysql=False, rows=()):
+def column_types(description, mysql=False, rows=(), mysql_fields=None):
     values=[]
     for index,c in enumerate(description or []):
         code=c[1]
         if code in ({0,246} if mysql else {1700}):
             precision,scale=c[4],c[5]
+            if mysql and mysql_fields and index<len(mysql_fields):
+                field=mysql_fields[index]
+                # PyMySQL's DBAPI precision is protocol display width, which
+                # includes the sign and decimal separator (not numeric digits).
+                precision=field.length-(0 if field.flags & 32 else 1)-(1 if field.scale else 0)
+                scale=field.scale
             if precision and precision<=38 and scale is not None and scale<=precision:
                 name=f'DECIMAL({precision},{scale})'
             else:
@@ -28,7 +34,9 @@ def column_types(description, mysql=False, rows=()):
         elif code in ({4,5} if mysql else {700,701}):name='DOUBLE'
         elif not mysql and code==16:name='BOOLEAN'
         elif code in ({10,14} if mysql else {1082}):name='DATE'
-        elif code in ({7,12} if mysql else {1114,1184}):name='TIMESTAMP'
+        elif not mysql and code==1184:name='TIMESTAMPTZ'
+        elif not mysql and code==1266:name='TIMETZ'
+        elif code in ({7,12} if mysql else {1114}):name='TIMESTAMP'
         elif code in ({11} if mysql else {1083}):name='TIME'
         else:name='VARCHAR'
         values.append(name)

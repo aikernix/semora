@@ -2,23 +2,28 @@
 from __future__ import annotations
 
 import json
-from urllib.parse import unquote, urlsplit
+import importlib.metadata
+from urllib.parse import unquote, urlsplit, parse_qs
 
 import pymysql
 from fastapi import HTTPException
 from .errors import database_error
+from . import scan_control
 
 
 def connect(dsn: str, timeout_ms: int = 30_000):
     url = urlsplit(dsn)
     if url.scheme != 'mysql' or not url.hostname or not url.path.strip('/'):
         raise HTTPException(422, 'MySQL 连接配置无效')
+    properties={k:v[-1] for k,v in parse_qs(url.query).items()}
+    tls={k:v for k,v in properties.items() if k in {"ssl_ca","ssl_cert","ssl_key"}}
+    tls.update({k:v.lower()=="true" for k,v in properties.items() if k in {"ssl_verify_cert","ssl_verify_identity"}})
     return pymysql.connect(
         host=url.hostname, port=url.port or 3306,
         user=unquote(url.username or ''), password=unquote(url.password or ''),
         database=unquote(url.path.lstrip('/')), charset='utf8mb4',
         connect_timeout=5, read_timeout=max(1, timeout_ms / 1000 + 1),
-        write_timeout=5, autocommit=False,
+        write_timeout=5, autocommit=False, **tls,
     )
 
 
@@ -30,7 +35,7 @@ def begin_readonly(connection, timeout_ms: int):
 
 def inspect(dsn: str) -> dict:
     try:
-        with connect(dsn) as connection:
+        with scan_control.track(connect(dsn)) as connection:
             begin_readonly(connection, 5000)
             with connection.cursor() as cursor:
                 cursor.execute('SELECT DATABASE(), CURRENT_USER(), VERSION()')
@@ -41,6 +46,8 @@ def inspect(dsn: str) -> dict:
         import re
         writable = any(re.search(r'\b(ALL PRIVILEGES|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|EXECUTE|SUPER|GRANT OPTION)\b', grant, re.I) for grant in grants)
         return {
+            'product':'MariaDB' if 'mariadb' in version.lower() else 'OceanBase' if 'oceanbase' in version.lower() else 'MySQL',
+            'driver':'PyMySQL','driver_version':importlib.metadata.version('PyMySQL'),
             'database': database, 'user': user, 'version': version,
             'read_only': True, 'account_read_only': not writable,
             'default_transaction_read_only': 'transaction_enforced',
@@ -61,16 +68,16 @@ def scan(dsn: str, sensitivity_level, table_names: list[str] | None = None) -> d
     tables = {}
     sensitive = []
     try:
-        with connect(dsn) as connection:
+        with scan_control.track(connect(dsn)) as connection:
             begin_readonly(connection, 5000)
             with connection.cursor() as cursor:
                 cursor.execute('''SELECT c.TABLE_SCHEMA,c.TABLE_NAME,c.COLUMN_NAME,c.COLUMN_TYPE,
-                    c.IS_NULLABLE,c.COLUMN_KEY,c.COLUMN_COMMENT,t.TABLE_COMMENT
+                    c.IS_NULLABLE,c.COLUMN_KEY,c.COLUMN_COMMENT,t.TABLE_COMMENT,t.TABLE_TYPE
                     FROM information_schema.COLUMNS c JOIN information_schema.TABLES t
                     ON c.TABLE_SCHEMA=t.TABLE_SCHEMA AND c.TABLE_NAME=t.TABLE_NAME
                     WHERE c.TABLE_SCHEMA=DATABASE()''' + selected + ' ORDER BY c.TABLE_NAME,c.ORDINAL_POSITION', table_names or ())
-                for schema, table, name, dtype, nullable, key, comment, table_comment in cursor.fetchall():
-                    item = tables.setdefault((schema, table), {'schema':schema, 'name':table, 'comment':table_comment, 'columns':[]})
+                for schema, table, name, dtype, nullable, key, comment, table_comment, table_kind in cursor.fetchall():
+                    item = tables.setdefault((schema, table), {'schema':schema, 'name':table, 'kind':table_kind, 'comment':table_comment, 'columns':[]})
                     level = sensitivity_level(table, name)
                     item['columns'].append({'name':name,'type':dtype,'nullable':nullable=='YES','primary_key':key=='PRI','comment':comment,'sensitivity':level})
                     if level != 'internal':

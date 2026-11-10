@@ -31,6 +31,8 @@ services:
         condition: service_healthy
 
   executor:
+    volumes:
+      - executor-config:/data/config
     build:
       context: .
       dockerfile: services/executor/Dockerfile
@@ -197,5 +199,6 @@ services:
       - "5173:8080"
 
 volumes:
+  executor-config:
   semora-postgres:
 
