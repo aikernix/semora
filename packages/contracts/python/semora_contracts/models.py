@@ -167,10 +167,52 @@ class QueryConfidence(BaseModel):
     )
 
 
+class BusinessRequirements(BaseModel):
+    """Business meaning only; this is not a SQL execution plan."""
+    subject: str = ""
+    time_semantics: str | None = None
+    grain: str | None = None
+    data_scope: dict[str, Any] = Field(default_factory=dict)
+    output_fields: list[str] = Field(default_factory=list)
+    metrics: list[str] = Field(default_factory=list)
+    dimensions: list[str] = Field(default_factory=list)
+    filters: list[str] = Field(default_factory=list)
+    aggregation_rules: list[str] = Field(default_factory=list)
+    ordering: list[str] = Field(default_factory=list)
+    sequence: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+
+    @field_validator("output_fields", "metrics", "dimensions", "filters", "aggregation_rules",
+                     "ordering", "sequence", "assumptions", mode="before")
+    @classmethod
+    def normalize_lists(cls, value):
+        return [] if value is None else value
+
+    @field_validator("data_scope", mode="before")
+    @classmethod
+    def normalize_scope(cls, value):
+        return {} if value is None else value
+
+    @field_validator("subject", mode="before")
+    @classmethod
+    def normalize_subject(cls, value):
+        return "" if value is None else value
+
+
 class QueryUnderstanding(BaseModel):
     summary: str = Field(min_length=1, max_length=1200, description="给业务用户看的需求理解：目标、范围及统计方式，不含数据库表列名、技术编码或SQL表达式。")
     target_state: Literal["known", "needs_direction"]
     confidence: QueryConfidence | None = None
+    requirements: BusinessRequirements = Field(
+        default_factory=BusinessRequirements,
+        description="用业务语言记录目标、时间、范围、指标、分组、条件、每组含义、排序和先后顺序；只整理有依据的要求，不新增条件，不放SQL或执行步骤契约。",
+    )
+
+    @field_validator("requirements", mode="before")
+    @classmethod
+    def normalize_requirements(cls, value):
+        return {} if value is None else value
+
     skeleton: list[str] = Field(
         default_factory=list,
         max_length=12,

@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 from fastapi import HTTPException
-from semora_contracts.database import PRODUCTS, SQL_BASELINE_ID, baseline_pagination
+from semora_contracts.database import PRODUCTS, SQL_BASELINE_ID, baseline_pagination, normalize_sql_probe
 from . import drivers
 from .connection_settings import connection_store
 from .errors import database_error
@@ -142,6 +142,8 @@ def run(cfg, operation, *, execution_id=None, timeout_ms=30000, validating=False
                     exc.sqlstate = None
                 raise database_error(exc, operation)
             value = result["result"]
+            if isinstance(value.get("probes"), dict):
+                value["probes"] = {key: normalize_sql_probe(probe, dialect) for key, probe in value["probes"].items()}
             connection = value.get("connection", value)
             connection["database"] = connection.get("database") or cfg.get("database", "")
             connection.update(dialect=dialect, compatibility_mode=cfg.get("compatibility_mode", ""), product_override=cfg.get("product_override", ""))
@@ -177,10 +179,19 @@ def cancel(execution_id):
         process.kill()
         return True
 
-def validate(body):
+def validate(body, probe_keys=None):
     cfg=settings(body);driver,dialect,strategy=configuration(cfg)
     if not dialect or not strategy:raise HTTPException(409,"请管理员配置方言和只读策略")
-    inspected=run(cfg,"test",timeout_ms=30000,probe_capabilities=True)
+    from semora_contracts.sql_probes import probe_catalog
+    catalog = probe_catalog(dialect, driver.get("effective_pagination", "baseline"))
+    selected = set(catalog) if probe_keys is None else set(probe_keys)
+    if not selected <= catalog.keys(): raise HTTPException(422, "未知探测项目")
+    inspected=run(cfg,"test",timeout_ms=90000,probe_capabilities=True,
+                  probe_catalog={k: v for k, v in catalog.items() if k in selected})
+    inspected.setdefault("probes", {})
+    for key in selected:
+        if key not in inspected["probes"]:
+            inspected["probes"][key] = {"status": "unverified", "reason": "probe_conversion_unavailable"}
     if not inspected.get("read_only"):
         raise HTTPException(409,detail={"error_type":"permission","message":"数据库只读边界或兼容模式验证未通过"})
     import sqlglot

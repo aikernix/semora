@@ -58,6 +58,8 @@ async def update_driver(driver_id: str,body: dict):
     # Connections referencing this immutable bundle need fresh validation.
     for item in datasource_service.repository.list():
         if item.type not in {"mysql","postgresql"}:
+            item.scan_result.pop("capability_cache", None)
+            item.scan_result.get("connection", {}).pop("probes", None)
             item.scan_result.pop("capabilities",None);item.scan_result["scan_stale"]=True;item.status="unverified"
             datasource_service.repository.save(item)
     return result
@@ -65,8 +67,12 @@ async def update_driver(driver_id: str,body: dict):
 @router.get("/datasources/{identifier}/capabilities")
 def capabilities(identifier: str):
     item=source(identifier)
+    from .database_profile import source_profile
+    profile=source_profile(item)
     return {"connection":item.scan_result.get("connection",{}),
-            "capabilities":item.public()["capabilities"] or {k:"pending" for k in ("connection","structure","comments","constraints","mdl","query")}}
+            "capabilities":item.public()["capabilities"] or {k:"pending" for k in ("connection","structure","comments","constraints","mdl","query")},
+            "probe_cache":item.scan_result.get("connection",{}).get("probe_cache",{}),
+            "features":profile["features"],"function_capabilities":profile["function_capabilities"]}
 
 @router.get("/datasources/{identifier}/snapshot")
 def snapshot(identifier: str):return source(identifier).scan_result
@@ -161,15 +167,19 @@ def download_mdl(identifier: str):
 
 
 @router.post("/datasources/{identifier}/validate-query")
-async def validate_query(identifier: str):
+async def validate_query(identifier: str, force: bool = False):
     item=source(identifier)
-    try:result=await executor_request("POST","datasources/validate-query",json=payload(item))
+    from .capability_service import validate_cached, TASKS as probe_tasks
+    try:
+        pending = probe_tasks.get(identifier)
+        result = await asyncio.shield(pending) if pending else None
+        if result is None or force:
+            result=await validate_cached(item, datasource_service.repository, executor_request, force=force)
     except HTTPException:
         item.status="unverified"
         item.scan_result.setdefault("capabilities",{})["query"]="failed"
         datasource_service.repository.save(item)
         raise
-    datasource_service.repository.record_test(identifier,result)
     return result
 
 

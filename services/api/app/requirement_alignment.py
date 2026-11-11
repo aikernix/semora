@@ -229,6 +229,9 @@ class RequirementAlignment:
     def _finalize(self, run, draft, plan, confirmed_facts, actor):
         actor = str(actor or "business-user")
         requirement_payload = {
+            **{key: getattr(draft, key, []) for key in (
+                "metrics", "dimensions", "filters", "aggregation_rules", "ordering", "sequence"
+            )},
             "source_draft_version": draft.version,
             "summary": plan.sql_program.summary,
             "subject": draft.subject,

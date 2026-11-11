@@ -7,24 +7,26 @@ from semora_contracts.sql_compat import apply_pagination
 from services.executor.app import jdbc_adapter
 
 @pytest.mark.parametrize("kind,version",[("mysql","8.4"),("postgresql","16.15"),("oracle","23"),("sqlserver","2022")])
-def test_version_alone_never_enables_optional_sql(kind,version):
+def test_version_alone_leaves_optional_sql_unknown_and_allows_preflight(kind,version):
     profile=source_profile(SimpleNamespace(type=kind,scan_result={"connection":{"version":version}}))
     assert not any(profile["features"].values())
-    with pytest.raises(SQLIssue,match="未启用"):
-        validate_features(sqlglot.parse_one("SELECT ROW_NUMBER() OVER()"),profile)
+    assert all(v is None for v in profile["features"].values())
+    validate_features(sqlglot.parse_one("SELECT ROW_NUMBER() OVER()"),profile)
 
 def test_probes_enable_individual_features_and_latest_negative_wins():
     source=SimpleNamespace(type="mysql",scan_result={
         "capabilities":{"cte":{"status":"verified"}},
-        "connection":{"probes":{"cte":{"status":"unavailable"},"window_functions":{"status":"verified"}}}})
+        "connection":{"probes":{"cte":{"status":"unsupported"},"window_functions":{"status":"verified"}}}})
     profile=source_profile(source)
     assert profile["features"]["window_functions"]
     assert not profile["features"]["common_table_expressions"]
     assert not profile["features"]["recursive_common_table_expressions"]
 
-def test_recursive_sql_needs_a_separate_probe():
+def test_unknown_recursive_sql_is_allowed_but_confirmed_unsupported_is_repaired():
     profile=source_profile(SimpleNamespace(type="postgresql",scan_result={"capabilities":{"cte":{"status":"verified"}}}))
     tree=sqlglot.parse_one("WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM t WHERE n<2) SELECT n FROM t",read="postgres")
+    validate_features(tree,profile)
+    profile["features"]["recursive_common_table_expressions"] = False
     with pytest.raises(SQLIssue,match="递归WITH"):validate_features(tree,profile)
 
 @pytest.mark.parametrize("ending",["LIMIT 3","FETCH FIRST 3 ROWS ONLY"])
@@ -52,7 +54,9 @@ def test_sqlserver_offset_is_distinct_from_basic_top():
     source=SimpleNamespace(type="sqlserver",scan_result={"capabilities":{"dialect":"tsql"}})
     profile=source_profile(source)
     tree=sqlglot.parse_one("SELECT id FROM events ORDER BY id LIMIT 2 OFFSET 1",read="postgres")
-    with pytest.raises(SQLIssue,match="OFFSET/FETCH"):validate_features(tree,profile)
+    validate_features(tree,profile)
+    source.scan_result["capabilities"]["offset_pagination"]={"status":"unsupported"}
+    with pytest.raises(SQLIssue,match="OFFSET/FETCH"):validate_features(tree,source_profile(source))
     source.scan_result["capabilities"]["offset_pagination"]={"status":"verified"}
     validate_features(tree,source_profile(source))
 

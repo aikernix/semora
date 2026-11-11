@@ -128,6 +128,32 @@ def context(workflow, run, question):
     }
 
 
+def sql_context(workflow, run, question, requirement):
+    """Give authoring a complete business contract, with user facts kept distinct."""
+    payload = context(workflow, run, question)
+    value = requirement.model_dump(mode="json") if hasattr(requirement, "model_dump") else dict(requirement or {})
+    payload["request"] = {
+        key: value[key]
+        for key in value
+        if key not in {"evidence", "confidence", "clarifications", "technical_gaps", "status",
+                       "clarification_stage", "clarification_round", "confirmed_facts",
+                       "confirmed_by", "confirmed_at", "content_hash"}
+    }
+    payload["original_request"] = question
+    return payload
+
+
+MAX_SQL_REPAIRS = 5
+
+
+def reserve_sql_repair(run, issue):
+    count = int((run.agent_memory.get("sql_repair_count") or [{}])[-1].get("attempts", 0))
+    if count >= MAX_SQL_REPAIRS:
+        raise ValueError(f"SQL 经{MAX_SQL_REPAIRS}轮定向修复仍未通过：" + str(issue))
+    run.agent_memory["sql_repair_count"] = [{"attempts": count + 1}]
+    return count + 1
+
+
 async def structured(workflow, run, prompt, payload, schema):
     """A malformed response gets one format correction, never a fresh ReAct."""
     from .run_state import revision
@@ -135,7 +161,10 @@ async def structured(workflow, run, prompt, payload, schema):
     initial = revision(run)
     value = None
     contract_error = ""
-    for attempt in range(2):
+    format_corrections = 0
+    from .sql_errors import SQLIssue
+    for attempt in range(MAX_SQL_REPAIRS + 2):
+        previous_value = value
         try:
             raw = await workflow.model.complete_json(
                 prompt,
@@ -200,7 +229,7 @@ async def structured(workflow, run, prompt, payload, schema):
                             )
                             validate_features(tree, profile)
                     except ValueError as exc:
-                        raise ValueError(
+                        raise SQLIssue(
                             f"步骤{step.name}的{step.engine}查询校验未通过：{exc}。"
                             f"本步骤可用表：{tables}。保持确认目标，针对错误修正完整SQLProgram；"
                             "同源关联直接在source SQL中完成，local不能访问物理表。"
@@ -217,8 +246,16 @@ async def structured(workflow, run, prompt, payload, schema):
                 "模型未返回 JSON 文本",
             }:
                 raise
-            if attempt:
+            if isinstance(exc, SQLIssue):
+                if exc.kind != "sql":
+                    raise
+                if previous_value is not None and value == previous_value:
+                    raise ValueError("模型重复提交相同无效SQL，已停止重复修复") from exc
+                reserve_sql_repair(run, str(exc))
+            elif format_corrections:
                 raise
+            else:
+                format_corrections += 1
             contract_error = str(exc)[:1600]
 
 
@@ -332,6 +369,7 @@ async def analyse(workflow, run, question, ontology, scope):
     draft = RequirementDraft(
         summary=report.summary,
         analysis_steps=report.skeleton,
+        **report.requirements.model_dump(mode="json"),
         evidence=run.evidence,
         clarifications=report.questions,
         technical_gaps=report.technical_gaps,
@@ -353,8 +391,11 @@ async def analyse(workflow, run, question, ontology, scope):
     )
     if report.questions or report.technical_gaps:
         return AnalysisOutcome(plan=None, requirement=draft, model_mode="sql-native")
-    payload = context(workflow, run, question)
-    run.agent_memory["sql_request_context"] = [{"request": question}]
+    payload = sql_context(workflow, run, question, draft)
+    run.agent_memory["sql_request_context"] = [{
+        "request": question,
+        "requirement_contract": deepcopy(payload["request"]),
+    }]
     program = await structured(workflow, run, AUTHOR, payload, SQLProgram)
     program = await check_coverage(workflow, run, payload, program)
     await polish_public_text(workflow, run, program)
@@ -382,7 +423,7 @@ async def check_coverage(workflow, run, payload, program):
         packet = payload.get("materials", {})
         comparison = {
             "sql_contract": payload["sql_contract"],
-            "request": payload["request"],
+            "request": payload.get("original_request", payload["request"]),
             "confirmed_answers": payload.get("confirmed_answers", []),
             "data_sources": payload.get("data_sources", []),
             "materials": {
@@ -453,13 +494,12 @@ async def check_coverage(workflow, run, payload, program):
 
 
 async def repair_step(workflow, run, name, issue):
-    count = int((run.agent_memory.get("sql_repair_count") or [{}])[-1].get("attempts", 0))
-    if count >= 2:
-        raise ValueError("SQL 经两次定向修复仍未通过：" + str(issue))
-    run.agent_memory["sql_repair_count"] = [{"attempts": count + 1}]
+    attempt = reserve_sql_repair(run, issue)
     step = next(s for s in run.plan.sql_program.steps if s.name == name)
     saved_request = (run.agent_memory.get("sql_request_context") or [{}])[-1]
-    payload = context(workflow, run, saved_request.get("request", run.question))
+    question = saved_request.get("request", run.question)
+    requirement = saved_request.get("requirement_contract") or run.requirement or run.requirement_draft
+    payload = sql_context(workflow, run, question, requirement)
     artifact = run.source_artifacts.get(name)
     # A compile failure may leave the previous artifact in memory. Never
     # present that stale target statement as the output of the current source.
@@ -490,13 +530,13 @@ async def repair_step(workflow, run, name, issue):
     before_hash = digest([step.sql, step.parameters])
     step.sql, step.parameters = fixed.sql, fixed.parameters
     run.agent_memory.setdefault("sql_repairs", []).append(
-        {"step": name, "error": issue, "change_summary": fixed.change_summary, "attempt": count + 1}
+        {"step": name, "error": issue, "change_summary": fixed.change_summary, "attempt": attempt}
     )
     workflow.emit(
         run,
         "sql.repaired",
         run.status,
-        {"step": name, "summary": fixed.change_summary, "attempt": count + 1,
+        {"step": name, "summary": fixed.change_summary, "attempt": attempt,
          "error_stage": issue.get("error_stage"), "error_type": issue.get("error_type"),
          "baseline_before_hash": before_hash, "baseline_after_hash": digest([step.sql, step.parameters])},
         "sql_author",

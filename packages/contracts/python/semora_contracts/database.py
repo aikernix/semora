@@ -21,6 +21,24 @@ SQL_OPTIONAL_FEATURES = {
     "offset_pagination": "offset_pagination",
 }
 
+def normalize_sql_probe(probe, dialect=""):
+    """Classify isolated synthetic probes, never arbitrary business SQL failures."""
+    if not isinstance(probe, dict):
+        return {"status": "unverified"}
+    value = dict(probe)
+    state = value.get("status") if isinstance(value.get("status"), str) else None
+    if state in {"verified", "unsupported"}:
+        return value
+    code = value.get("code") if isinstance(value.get("code"), (int, str)) else None
+    sqlstate = value.get("sqlstate") if isinstance(value.get("sqlstate"), str) else None
+    # Syntax/feature errors from fixed minimal probes only. Access, timeouts
+    # and network errors must never become a global negative capability.
+    dialect_codes = {"mysql": {1064, 1235}, "oracle": {900, 907, 933, 936}, "tsql": {102, 156}}
+    unsupported = code in dialect_codes.get(dialect, set()) or code in {"42601", "0A000"} or sqlstate in {"42601", "0A000"}
+    value["status"] = "unsupported" if state == "unavailable" and unsupported else "unverified"
+    return value
+
+
 def baseline_pagination(dialect: str, configured: str = "baseline") -> str:
     if configured and configured != "baseline":
         return configured

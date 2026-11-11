@@ -27,6 +27,7 @@ class DataSourceRecord:
     last_scan_at: datetime | None = None
     scan_result: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=utc_now)
+    capability_profile_id: str | None = None
 
     def public(self) -> dict[str, Any]:
         from semora_contracts.database import SQL_BASELINE_ID
@@ -43,6 +44,7 @@ class DataSourceRecord:
             "objects": self.objects,
             "last_scan_at": self.last_scan_at,
             "created_at": self.created_at,
+            "capability_profile_id": self.capability_profile_id,
             "connection": self.scan_result.get("connection", {}),
             "capabilities": capabilities,
             "scan_job": self.scan_result.get("scan_job"),
@@ -53,6 +55,8 @@ class DataSourceRepository:
     def __init__(self, dsn: str | None = None) -> None:
         self._dsn = dsn if dsn is not None else os.getenv("METADATA_DATABASE_URL")
         self._items: dict[str, DataSourceRecord] = {}
+        from .capability_cache import CapabilityCache
+        self.capability_cache = CapabilityCache(self._dsn)
         if self._dsn:
             self._load()
         if not self._dsn or os.getenv("SEMORA_DEMO_SEED", "false").lower() == "true":
@@ -62,17 +66,39 @@ class DataSourceRepository:
         return psycopg.connect(self._dsn, autocommit=True)
 
     def _load(self) -> None:
+        from .capability_storage import join_snapshot
         with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                """SELECT id,name,type,secret_ref,status,access,objects,last_scan_at,scan_result,created_at
-                FROM semora_meta.datasources ORDER BY created_at"""
-            )
+            cursor.execute("""SELECT d.id,d.name,d.type,d.secret_ref,d.status,d.access,d.objects,
+                d.last_scan_at,d.scan_result,d.created_at,d.capability_profile_id,
+                o.connection_metadata,o.capabilities,o.probes,o.observations,o.reuse_receipt
+                FROM semora_meta.datasources d
+                LEFT JOIN semora_meta.datasource_capability_observations o ON o.datasource_id=d.id
+                ORDER BY d.created_at""")
             for row in cursor.fetchall():
+                snapshot = join_snapshot(row[8] or {}, *(value or {} for value in row[11:16]))
                 self._items[row[0]] = DataSourceRecord(
                     id=row[0], name=row[1], type=row[2], secret_ref=row[3], status=row[4],
                     access=row[5], objects=row[6], last_scan_at=row[7],
-                    scan_result=row[8] or {}, created_at=row[9],
+                    scan_result=snapshot, created_at=row[9], capability_profile_id=row[10],
                 )
+        # Rebuild the transient shared view from its canonical store after restart.
+        # A cache failure must not discard the local observations just loaded.
+        for item in list(self._items.values()):
+            from .capability_cache import profile_descriptor, profile_key
+            descriptor = profile_descriptor(item.type, item.scan_result.get("connection", {}),
+                                              item.scan_result.get("capabilities", {}))
+            expected = profile_key(descriptor) if descriptor else None
+            if item.capability_profile_id != expected:
+                self.save(item)  # Backfill legacy identities even without an old shared-cache reference.
+            try:
+                cached = self.capability_cache.resolve(item.type, item.scan_result.get("connection", {}),
+                                                       item.scan_result.get("capabilities", {}))
+                if cached:
+                    receipt = item.scan_result.get("capability_cache") or {}
+                    item.scan_result["capability_cache"] = {**receipt, **cached}
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning("Capability cache reload unavailable: %s", type(exc).__name__)
 
     def _ensure_demo_source(self) -> None:
         if "retail-credit-pg" not in self._items:
@@ -84,21 +110,34 @@ class DataSourceRepository:
             ))
 
     def save(self, item: DataSourceRecord) -> DataSourceRecord:
-        self._items[item.id] = item
+        from .capability_cache import profile_descriptor, profile_key
+        from .capability_storage import split_snapshot, write_observations
+        descriptor = profile_descriptor(item.type, item.scan_result.get("connection", {}),
+                                         item.scan_result.get("capabilities", {}))
+        item.capability_profile_id = profile_key(descriptor) if descriptor else None
+        scan, state = split_snapshot(item.scan_result)
         if self._dsn:
-            with self._connect() as connection, connection.cursor() as cursor:
+            with self._connect() as connection, connection.transaction(), connection.cursor() as cursor:
+                if descriptor:
+                    cursor.execute("""INSERT INTO semora_meta.database_capability_profiles
+                        (profile_key,descriptor,payload) VALUES(%s,%s::jsonb,'{}')
+                        ON CONFLICT(profile_key) DO NOTHING""",
+                        (item.capability_profile_id, json.dumps(descriptor)))
                 cursor.execute(
                     """INSERT INTO semora_meta.datasources(
-                        id,name,type,secret_ref,status,access,objects,last_scan_at,scan_result,created_at
-                    ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+                        id,name,type,secret_ref,status,access,objects,last_scan_at,scan_result,created_at,capability_profile_id
+                    ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)
                     ON CONFLICT(id) DO UPDATE SET
                         name=excluded.name,type=excluded.type,secret_ref=excluded.secret_ref,
                         status=excluded.status,access=excluded.access,objects=excluded.objects,
-                        last_scan_at=excluded.last_scan_at,scan_result=excluded.scan_result""",
+                        last_scan_at=excluded.last_scan_at,scan_result=excluded.scan_result,
+                        capability_profile_id=excluded.capability_profile_id""",
                     (item.id, item.name, item.type, item.secret_ref, item.status, item.access,
-                     item.objects, item.last_scan_at,
-                     json.dumps(item.scan_result, ensure_ascii=False), item.created_at),
+                     item.objects, item.last_scan_at, json.dumps(scan, ensure_ascii=False),
+                     item.created_at, item.capability_profile_id),
                 )
+                write_observations(cursor, item.id, state)
+        self._items[item.id] = item
         return item
 
     def create(self, name: str, datasource_type: str, secret_ref: str) -> DataSourceRecord:
@@ -119,14 +158,30 @@ class DataSourceRepository:
     def invalidate_changed_metadata(item, fresh):
         previous=item.scan_result.get("connection",{})
         if any(previous.get(k) is not None and fresh.get(k) is not None and previous[k]!=fresh[k]
-               for k in ("product","version","driver_version","compatibility_mode")):
+               for k in ("product","version","driver_version","compatibility_mode","adapter_fingerprint","connection_fingerprint")):
             item.scan_result["connection"]={k:v for k,v in previous.items() if k!="probes"}
             item.scan_result["capabilities"]={}
+            item.scan_result.pop("sql_feedback", None)
+            item.scan_result.pop("sql_observations", None)
+            item.scan_result.pop("capability_cache", None)
             item.scan_result["scan_stale"]=True
 
     def record_test(self, datasource_id: str, result: dict[str, Any]) -> DataSourceRecord:
         item = self.get(datasource_id)
         self.invalidate_changed_metadata(item,result)
+        if isinstance(result.get("probes"), dict):
+            from semora_contracts.database import normalize_sql_probe
+            dialect = (result.get("capabilities") or {}).get("dialect") or result.get("dialect") or {"postgresql": "postgres", "sqlserver": "tsql"}.get(item.type, item.type)
+            old_probes = item.scan_result.get("connection", {}).get("probes", {})
+            old_capabilities = item.scan_result.get("capabilities", {})
+            probes = dict(old_probes)
+            for key, probe in result["probes"].items():
+                fresh = normalize_sql_probe(probe, dialect)
+                previous = normalize_sql_probe(old_probes.get(key) or old_capabilities.get(key), dialect)
+                if fresh["status"] == "unverified" and previous["status"] in {"verified", "unsupported"}:
+                    fresh = {**previous, "last_attempt": fresh}
+                probes[key] = fresh
+            result = {**result, "probes": probes, "capabilities": {**result.get("capabilities", {}), **probes}}
         item.status = "healthy" if result.get("read_only") else "unsafe"
         item.access = "read_only" if result.get("read_only") else "write_capable"
         if item.type not in {"mysql","postgresql"} and not result.get("read_only"):
@@ -149,6 +204,8 @@ class DataSourceRepository:
     def record_scan(self, datasource_id: str, result: dict[str, Any]) -> DataSourceRecord:
         item = self.get(datasource_id)
         self.invalidate_changed_metadata(item,result.get("connection",{}))
+        sql_feedback = item.scan_result.get("sql_feedback", [])
+        reusable = {k: item.scan_result[k] for k in ("capability_cache", "sql_observations") if k in item.scan_result}
         item.status = "healthy"
         item.access = "read_only"
         if result.get("connection",{}).get("read_only") is False:
@@ -160,6 +217,9 @@ class DataSourceRepository:
         if item.type in {"mysql","postgresql"} and item.scan_result.get("capabilities",{}).get("query")=="verified":
             result.setdefault("capabilities",{})["query"]="verified"
         result = merge_snapshot(item.scan_result, result)
+        result.update(reusable)
+        if sql_feedback:
+            result["sql_feedback"] = sql_feedback
         item.scan_result = {**result, "connection": {
             **(item.scan_result.get("connection") or {}), **(result.get("connection") or {})}}
         return self.save(item)

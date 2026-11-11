@@ -22,8 +22,8 @@ def test_isolated_native_database(kind,port,tmp_path,monkeypatch):
     assert executor.test_datasource(source,None)["read_only"]
     capabilities=executor.validate_datasource_query(source,None)["capabilities"]
     assert capabilities["sql_baseline"]=="portable-read-v1"
-    assert capabilities["cte"]["status"]==("unavailable" if port==23305 else "verified")
-    assert capabilities["window_functions"]["status"]==("unavailable" if port==23305 else "verified")
+    assert capabilities["cte"]["status"]==("unsupported" if port==23305 else "verified")
+    assert capabilities["window_functions"]["status"]==("unsupported" if port==23305 else "verified")
     assert capabilities["offset_pagination"]["status"]=="verified"
     scan=executor.scan_datasource(executor.DataSourceScanInput(**source.model_dump()),None)
     assert not scan["permission_gaps"],scan["permission_gaps"]

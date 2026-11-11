@@ -809,7 +809,12 @@ async def test_datasource_configuration(body: DataSourceCreate, datasource_id: s
 @app.post("/api/v1/datasources/{datasource_id}/test")
 async def test_datasource(datasource_id: str) -> dict:
     try:
-        return await datasource_service.test(datasource_id)
+        result = await datasource_service.test(datasource_id)
+        if result.get("read_only"):
+            from .capability_service import schedule_validation
+            from .database_routes import executor_request
+            schedule_validation(datasource_service.repository.get(datasource_id), datasource_service.repository, executor_request)
+        return result
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except RuntimeError as exc:

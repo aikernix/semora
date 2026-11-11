@@ -203,7 +203,7 @@ def test_explain_error_repaired_with_concrete_diagnostic(monkeypatch):
     assert estimate.await_count==2 and execute.await_count==1
 
 
-def test_invalid_local_scope_is_corrected_as_program_before_sql_repair(monkeypatch):
+def test_invalid_local_scope_correction_uses_the_shared_sql_repair_budget(monkeypatch):
     w,session,execute,estimate,model,_=native_harness(monkeypatch)
     correct=deepcopy(model.complete_json.return_value)
     invalid=deepcopy(correct)
@@ -211,7 +211,7 @@ def test_invalid_local_scope_is_corrected_as_program_before_sql_repair(monkeypat
     model.complete_json.side_effect=[invalid,correct]
     run=asyncio.run(w.start(session.id,'List items',domain='test'))
     assert run.status==RunStatus.COMPLETED,run.error
-    assert len(query_model_calls(model))==2 and not run.agent_memory.get('sql_repair_count')
+    assert len(query_model_calls(model))==2 and run.agent_memory['sql_repair_count']==[{'attempts':1}]
     assert 'local不能访问物理表' in query_model_calls(model)[-1].args[1]
     assert estimate.await_count==1 and execute.await_count==1
 
@@ -272,11 +272,14 @@ def test_repair_budget_shared_and_result_not_fabricated(monkeypatch):
     estimate.side_effect=ExecutorOperationError('syntax',1064)
     model.complete_json.side_effect=[model.complete_json.return_value,
         {'sql':'SELECT id+0 AS id FROM items','change_summary':'First correction'},
-        {'sql':'SELECT id*1 AS id FROM items','change_summary':'Second correction'}]
+        {'sql':'SELECT id*1 AS id FROM items','change_summary':'Second correction'},
+        {'sql':'SELECT id+0+0 AS id FROM items','change_summary':'Third correction'},
+        {'sql':'SELECT id*1*1 AS id FROM items','change_summary':'Fourth correction'},
+        {'sql':'SELECT id+0+0+0 AS id FROM items','change_summary':'Fifth correction'}]
     run=asyncio.run(w.start(session.id,'List items',domain='test'))
     assert run.status==RunStatus.FAILED and run.result is None
-    assert len(query_model_calls(model))==3 and estimate.await_count==3
-    assert run.agent_memory['sql_repair_count']==[{'attempts':2}]
+    assert len(query_model_calls(model))==6 and estimate.await_count==6
+    assert run.agent_memory['sql_repair_count']==[{'attempts':5}]
     execute.assert_not_called()
 
 

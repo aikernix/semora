@@ -20,12 +20,12 @@ from test_sql_native import native_harness, sources as source_fixture, step
 @pytest.mark.parametrize(
     "version,supported",
     [
-        ("5.7.21-log", False),
-        ("8.0.45", False),
-        ("10.1.48-MariaDB", False),
-        ("5.5.5-10.6.12-MariaDB", False),
-        ("", False),
-        ("5.7.25-TiDB-v7.5", False),
+        ("5.7.21-log", None),
+        ("8.0.45", None),
+        ("10.1.48-MariaDB", None),
+        ("5.5.5-10.6.12-MariaDB", None),
+        ("", None),
+        ("5.7.25-TiDB-v7.5", None),
     ],
 )
 def test_scanned_capabilities_respect_vendor_and_unknowns(version, supported):
@@ -68,7 +68,7 @@ def test_known_unsupported_construct_is_corrected_before_database_call(monkeypat
     w, session, execute, estimate, model, _ = native_harness(monkeypatch)
     source = datasources.datasource_service.repository.get("source")
     source.type = "mysql"
-    source.scan_result = {"connection": {"version": "5.7.21-log"}}
+    source.scan_result = {"connection": {"version": "5.7.21-log", "probes": {"window_functions": {"status": "unsupported", "code": 1064}}}}
     correct = deepcopy(model.complete_json.return_value)
     invalid = deepcopy(correct)
     invalid["steps"][0]["sql"] = "SELECT id,ROW_NUMBER() OVER(ORDER BY id) AS n FROM items"
@@ -81,7 +81,7 @@ def test_known_unsupported_construct_is_corrected_before_database_call(monkeypat
 
 
 def test_capability_error_is_specific_not_a_missing_table():
-    with pytest.raises(SQLIssue, match="未启用窗口函数"):
+    with pytest.raises(SQLIssue, match="已确认不支持窗口函数"):
         validate_features(
             sqlglot.parse_one("SELECT ROW_NUMBER() OVER()"),
             {"vendor": "mysql", "version": "5.7", "features": {"window_functions": False}},
@@ -231,7 +231,7 @@ def test_relevant_field_hints_are_bounded_and_do_not_expose_full_schema():
     assert len(prepared_context.field_candidates(objects, "所属区域 State", limit=1)) == 1
 
 
-def test_sql_role_does_not_inherit_unconfirmed_draft_as_a_fact(monkeypatch):
+def test_sql_contract_keeps_original_user_authority_separate_from_model_interpretation(monkeypatch):
     import json
 
     w, session, _, _, model, runner = native_harness(monkeypatch)
@@ -242,9 +242,13 @@ def test_sql_role_does_not_inherit_unconfirmed_draft_as_a_fact(monkeypatch):
     run = asyncio.run(w.start(session.id, "All records of matching entities", domain="test"))
     assert run.status.value == "completed"
     payload = json.loads(query_model_calls(model)[-1].args[1])
-    assert payload["request"] == "All records of matching entities"
-    assert not {"confirmed_understanding", "proposed_understanding"} & payload.keys()
-    assert "UNCONFIRMED WRONG SCOPE" not in json.dumps(payload)
+    assert payload["original_request"] == "All records of matching entities"
+    assert payload["request"]["summary"] == "UNCONFIRMED WRONG SCOPE"
+    assert payload["request"]["analysis_steps"] == ["Only flagged rows"]
+    assert payload["confirmed_answers"] == []
+    from semora_agent.sql_prompts import AUTHOR
+    assert "不是额外的用户确认" in AUTHOR
+    assert "冲突时以用户明确口径为准" in AUTHOR
 
 
 def test_independent_coverage_correction_preserves_all_records_of_selected_entities(monkeypatch):

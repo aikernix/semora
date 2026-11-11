@@ -81,11 +81,24 @@ public final class JdbcWorker {
         sql.put("offset_pagination",offset+(Set.of("tsql","oracle").contains(dialect)?" OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY":" LIMIT 1 OFFSET 1"));
         sql.put("pagination",dialect.equals("tsql")?"SELECT TOP 1 n FROM ("+leaf+") semora_probe":dialect.equals("oracle")?leaf+(text(q,"pagination").equals("rownum")?" WHERE ROWNUM <= 1":" FETCH FIRST 1 ROWS ONLY"):leaf+" LIMIT 1");
         sql.put("types","SELECT CAST(123.45 AS DECIMAL(18,2)), CAST(NULL AS "+(dialect.equals("oracle")?"VARCHAR2(10)":"VARCHAR(10)")+")"+(dialect.equals("oracle")?" FROM DUAL":""));
+        JsonNode catalog=q.path("probe_catalog");
+        if(catalog.isObject()) {
+            sql.clear();
+            catalog.fields().forEachRemaining(e->{ if(e.getValue().has("sql"))sql.put(e.getKey(),text(e.getValue(),"sql")); });
+        }
         Map<String,Object> results=new LinkedHashMap<>();
         sql.forEach((key,query)->{
             try { readonly(c,text(q,"strategy"),3000);
                 try(Statement s=c.createStatement()){s.setQueryTimeout(3);s.setMaxRows(2);try(ResultSet r=s.executeQuery(query)){
-                    boolean valid=r.next()&&(key.equals("types")?r.getBigDecimal(1).compareTo(new BigDecimal("123.45"))==0&&r.getObject(2)==null:r.getInt(1)==(Set.of("recursive_cte","offset_pagination").contains(key)?2:1));
+                    boolean hasRow=r.next(),valid=false;
+                    if(hasRow&&catalog.isObject()) {
+                        JsonNode spec=catalog.path(key); Object actual=r.getObject(1);
+                        valid=switch(text(spec,"expected_kind")) {
+                            case "null" -> actual==null;
+                            case "number" -> actual!=null&&r.getBigDecimal(1).compareTo(new BigDecimal(text(spec,"expected")))==0&&(!key.equals("types")||r.getObject(2)==null);
+                            default -> Objects.equals(r.getString(1),text(spec,"expected"));
+                        };
+                    } else if(hasRow) valid=key.equals("types")?r.getBigDecimal(1).compareTo(new BigDecimal("123.45"))==0&&r.getObject(2)==null:r.getInt(1)==(Set.of("recursive_cte","offset_pagination").contains(key)?2:1);
                     if(!valid||r.next())throw new SQLException("unexpected capability probe result","HY000");
                 }}
                 results.put(key,map("status","verified","method","synthetic_readonly_probe"));

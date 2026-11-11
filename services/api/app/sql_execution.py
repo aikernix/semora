@@ -13,6 +13,17 @@ class SQLExecution:
     def __init__(self, workflow, run, ontology, settings):
         self.w, self.run, self.ontology, self.settings = workflow, run, ontology, settings
 
+    def remember_rejection(self, step, artifact, error, stage):
+        from .sql_feedback import record_sql_rejection
+        try:
+            entry = record_sql_rejection(step, artifact, error, stage)
+        except Exception:
+            self.run.delivery_warnings.append("本次SQL兼容性记录暂未保存，继续尝试定向修复。")
+            return
+        if entry:
+            self.w.emit(self.run, "sql.compatibility.recorded", self.run.status,
+                        {"step": step.name, "summary": "已记录数据库拒绝该SQL的原因，进入定向修复", **entry}, "executor")
+
     def artifact(self, step, results=None, *, template=False):
         value = compile_step(
             step,
@@ -105,6 +116,7 @@ class SQLExecution:
                         "state": "invalid",
                         "error": issue_data(exc, error_stage),
                     }
+                    self.remember_rejection(step, artifact, exc, error_stage)
                     from .sql_authoring import repair_step
 
                     await repair_step(self.w, self.run, step.name, issue_data(exc, error_stage))
@@ -203,6 +215,8 @@ class SQLExecution:
                     if not repairable(exc):
                         raise
                     if step.name in self.run.source_artifacts:
+                        self.remember_rejection(step, self.run.source_artifacts[step.name], exc, error_stage)
+                    if step.name in self.run.source_artifacts:
                         self.run.source_artifacts[step.name].compilation["validation"] = {
                             "state": "invalid",
                             "error": issue_data(exc, error_stage),
@@ -220,6 +234,12 @@ class SQLExecution:
             }
             results[step.name] = result
             self.run.source_results[step.name] = result
+            from .sql_learning import record_sql_success
+            try:
+                record_sql_success(step, result)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning("SQL capability learning was not saved")
             from .control_state import record_receipt
             from .run_state import digest
 

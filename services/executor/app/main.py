@@ -43,6 +43,10 @@ class DataSourceScanInput(DataSourceInput):
     execution_id: str | None = Field(default=None, max_length=64)
 
 
+class DataSourceValidationInput(DataSourceInput):
+    probe_keys: list[str] | None = Field(default=None, max_length=128)
+
+
 class QueryInput(BaseModel):
     sql: str = Field(min_length=1, max_length=100_000)
     parameters: dict[str, Any] = Field(default_factory=dict)
@@ -276,9 +280,12 @@ def healthz() -> dict:
 def test_datasource(body: DataSourceInput, x_semora_internal_token: str | None = Header(default=None)) -> dict:
     require_internal_token(x_semora_internal_token)
     if adapter_registry.is_jdbc(body.type):
-        return {"datasource_id": body.datasource_id, **jdbc_adapter.run(jdbc_adapter.settings(body), "test", timeout_ms=10000)}
-    inspect = {"mysql": mysql_adapter.inspect, "postgresql": inspect_connection}[body.type]
-    return {"datasource_id": body.datasource_id, **inspect(resolve_datasource(body))}
+        result = jdbc_adapter.run(jdbc_adapter.settings(body), "test", timeout_ms=10000)
+    else:
+        inspect = {"mysql": mysql_adapter.inspect, "postgresql": inspect_connection}[body.type]
+        result = inspect(resolve_datasource(body))
+    from .probe_identity import attach_identity
+    return {"datasource_id": body.datasource_id, **attach_identity(result, body)}
 
 
 @app.post("/internal/v1/datasources/scan")
@@ -482,13 +489,15 @@ def update_driver(driver_id: str, body: drivers.DriverConfig, x_semora_internal_
 
 
 @app.post("/internal/v1/datasources/validate-query")
-def validate_datasource_query(body: DataSourceInput, x_semora_internal_token: str | None = Header(default=None)):
+def validate_datasource_query(body: DataSourceValidationInput, x_semora_internal_token: str | None = Header(default=None)):
     require_internal_token(x_semora_internal_token)
-    if adapter_registry.is_jdbc(body.type): return jdbc_adapter.validate(body)
+    if adapter_registry.is_jdbc(body.type):
+        from .probe_identity import attach_identity
+        return attach_identity(jdbc_adapter.validate(body, body.probe_keys), body)
     execute_query(QueryInput(sql="SELECT 1 AS semora_probe LIMIT 1",datasource=body,timeout_ms=5000,max_rows=1),x_semora_internal_token)
     result=test_datasource(body,x_semora_internal_token)
     from .sql_capabilities import probe_native
-    try:probes=probe_native(body.type,resolve_datasource(body))
+    try:probes=probe_native(body.type,resolve_datasource(body), body.probe_keys)
     except Exception as exc:raise database_error(exc,"test") from exc
     result["probes"]={k:v for k,v in probes.items() if k!="sql_baseline"}
     result["capabilities"]={"connection":"verified","query":"verified","dialect":adapter_registry.dialect(body),"live_validation":"synthetic_query_only",**probes}
