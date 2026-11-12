@@ -55,6 +55,7 @@ class DataSourceRepository:
     def __init__(self, dsn: str | None = None) -> None:
         self._dsn = dsn if dsn is not None else os.getenv("METADATA_DATABASE_URL")
         self._items: dict[str, DataSourceRecord] = {}
+        self._table_digests: dict[str, str] = {}
         from .capability_cache import CapabilityCache
         self.capability_cache = CapabilityCache(self._dsn)
         if self._dsn:
@@ -67,6 +68,8 @@ class DataSourceRepository:
 
     def _load(self) -> None:
         from .capability_storage import join_snapshot
+        from .datasource_table_storage import load_tables, tables_digest
+        tables_present: set[str] = set()
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute("""SELECT d.id,d.name,d.type,d.secret_ref,d.status,d.access,d.objects,
                 d.last_scan_at,d.scan_result,d.created_at,d.capability_profile_id,
@@ -75,12 +78,26 @@ class DataSourceRepository:
                 LEFT JOIN semora_meta.datasource_capability_observations o ON o.datasource_id=d.id
                 ORDER BY d.created_at""")
             for row in cursor.fetchall():
-                snapshot = join_snapshot(row[8] or {}, *(value or {} for value in row[11:16]))
+                stored_scan = dict(row[8] or {})
+                if stored_scan.pop("_schema_tables_present", False):
+                    tables_present.add(row[0])
+                snapshot = join_snapshot(stored_scan, *(value or {} for value in row[11:16]))
                 self._items[row[0]] = DataSourceRecord(
                     id=row[0], name=row[1], type=row[2], secret_ref=row[3], status=row[4],
                     access=row[5], objects=row[6], last_scan_at=row[7],
                     scan_result=snapshot, created_at=row[9], capability_profile_id=row[10],
                 )
+            stored_tables = load_tables(cursor)
+            for identifier, item in self._items.items():
+                # A completed empty scan is observably different from a source
+                # that has never been scanned.
+                if (
+                    identifier in stored_tables
+                    or identifier in tables_present
+                    or item.last_scan_at is not None
+                ):
+                    item.scan_result["tables"] = stored_tables.get(identifier, [])
+                    self._table_digests[identifier] = tables_digest(item.scan_result["tables"])
         # Rebuild the transient shared view from its canonical store after restart.
         # A cache failure must not discard the local observations just loaded.
         for item in list(self._items.values()):
@@ -112,10 +129,27 @@ class DataSourceRepository:
     def save(self, item: DataSourceRecord) -> DataSourceRecord:
         from .capability_cache import profile_descriptor, profile_key
         from .capability_storage import split_snapshot, write_observations
+        from .datasource_table_storage import split_tables, tables_digest, write_tables
         descriptor = profile_descriptor(item.type, item.scan_result.get("connection", {}),
                                          item.scan_result.get("capabilities", {}))
         item.capability_profile_id = profile_key(descriptor) if descriptor else None
         scan, state = split_snapshot(item.scan_result)
+        scan, tables = split_tables(scan)
+        snapshot_had_tables = tables is not None
+        # Clearing a connection also clears its former schema rows.  Ordinary
+        # metadata-only saves leave the table collection untouched.
+        if (
+            tables is None
+            and item.last_scan_at is None
+            and item.objects == 0
+            and item.id in self._table_digests
+        ):
+            tables = []
+        if snapshot_had_tables:
+            scan["_schema_tables_present"] = True
+        else:
+            scan.pop("_schema_tables_present", None)
+        table_digest = tables_digest(tables) if tables is not None else None
         if self._dsn:
             with self._connect() as connection, connection.transaction(), connection.cursor() as cursor:
                 if descriptor:
@@ -137,6 +171,10 @@ class DataSourceRepository:
                      item.created_at, item.capability_profile_id),
                 )
                 write_observations(cursor, item.id, state)
+                if tables is not None and self._table_digests.get(item.id) != table_digest:
+                    write_tables(cursor, item.id, tables, item.last_scan_at)
+            if table_digest is not None:
+                self._table_digests[item.id] = table_digest
         self._items[item.id] = item
         return item
 
