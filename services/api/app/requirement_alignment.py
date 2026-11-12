@@ -241,6 +241,7 @@ class RequirementAlignment:
             "grain": draft.grain,
             "output_fields": list(plan.sql_program.steps[-1].output_columns),
             "assumptions": list(dict.fromkeys([*draft.assumptions, *plan.sql_program.assumptions])),
+            "logical_plan": plan.logical_plan.model_dump(mode="json") if plan.logical_plan else None,
             "evidence": [e.model_dump(mode="json") for e in draft.evidence],
             "confirmed_facts": [f.model_dump(mode="json") for f in confirmed_facts],
             "confirmed_by": actor,

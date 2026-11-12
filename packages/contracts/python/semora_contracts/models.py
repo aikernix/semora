@@ -199,6 +199,49 @@ class BusinessRequirements(BaseModel):
         return "" if value is None else value
 
 
+class LogicalMetric(BaseModel):
+    """A business calculation bound to published semantic references."""
+
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$", max_length=64)
+    label: str = Field(min_length=1, max_length=200)
+    operation: Literal["value", "count", "count_distinct", "sum", "avg", "min", "max", "derived"]
+    field_refs: list[str] = Field(default_factory=list, max_length=8)
+
+
+class LogicalFilter(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    field_refs: list[str] = Field(default_factory=list, max_length=8)
+    relation_ref: str | None = None
+    operator: Literal[
+        "eq", "neq", "gt", "gte", "lt", "lte", "in", "not_in", "between",
+        "like", "is_null", "is_not_null", "exists", "not_exists",
+    ]
+    value: Any = None
+    description: str = Field(min_length=1, max_length=300)
+
+
+class LogicalSort(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_ref: str = Field(min_length=1, max_length=200, description="指标id或对象.属性引用")
+    direction: Literal["asc", "desc"] = "asc"
+
+
+class LogicalQueryPlan(BaseModel):
+    """Internal semantic contract; labels explain it, stable refs drive validation."""
+
+    model_config = ConfigDict(extra="forbid")
+    subject_refs: list[str] = Field(default_factory=list, max_length=8)
+    output_refs: list[str] = Field(default_factory=list, max_length=32)
+    dimension_refs: list[str] = Field(default_factory=list, max_length=16)
+    metrics: list[LogicalMetric] = Field(default_factory=list, max_length=16)
+    filters: list[LogicalFilter] = Field(default_factory=list, max_length=24)
+    relation_refs: list[str] = Field(default_factory=list, max_length=16)
+    sort: list[LogicalSort] = Field(default_factory=list, max_length=8)
+    limit: int | None = Field(default=None, ge=1, le=100000)
+    sequence: list[str] = Field(default_factory=list, max_length=12)
+
+
 class QueryUnderstanding(BaseModel):
     summary: str = Field(min_length=1, max_length=1200, description="给业务用户看的需求理解：目标、范围及统计方式，不含数据库表列名、技术编码或SQL表达式。")
     target_state: Literal["known", "needs_direction"]
@@ -228,6 +271,10 @@ class QueryUnderstanding(BaseModel):
         max_length=64,
         description="有依据的关联、数据映射或执行障碍；不包含业务定义、指标口径或范围待确认。",
     )
+    logical_plan: LogicalQueryPlan | None = Field(
+        default=None,
+        description="资料与口径足够时填写的结构化查询要求；引用资料中的稳定对象、属性和关系标识。",
+    )
 
     @field_validator("skeleton", "questions", "technical_gaps", mode="before")
     @classmethod
@@ -253,6 +300,7 @@ class RequirementDraft(BaseModel):
     clarifications: list[ClarificationQuestion] = Field(default_factory=list)
     technical_gaps: list[QueryConfigurationGap] = Field(default_factory=list)
     status: Literal["draft", "awaiting_clarification", "ready"] = "draft"
+    logical_plan: LogicalQueryPlan | None = None
 
 
 class ConfirmedFact(BaseModel):
@@ -281,6 +329,7 @@ class RequirementSpec(BaseModel):
     confirmed_facts: list[ConfirmedFact] = Field(default_factory=list)
     confirmed_by: str
     confirmed_at: datetime = Field(default_factory=utc_now)
+    logical_plan: LogicalQueryPlan | None = None
 
 
 class SQLInputBinding(BaseModel):
@@ -370,6 +419,7 @@ class QueryPlan(BaseModel):
     execution_mode: Literal["single_query", "sequential_queries"] = "single_query"
     assumptions: list[str] = Field(default_factory=list)
     evidence: list[EvidenceRef] = Field(default_factory=list)
+    logical_plan: LogicalQueryPlan | None = None
 
 
 class SQLArtifact(BaseModel):

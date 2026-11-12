@@ -26,6 +26,7 @@ UNDERSTAND = (
 选项应是同一目标下有依据的业务解释；不能建议把含义未确定的指标填零、留空或换成别的指标来规避确认。
 缺核心资料才调用工具，资料足够即提交。只有关联或物理映射确实缺失才列technical_gaps；同义表达、空数据或不确定的SQL写法不属于技术缺口。
 【输出】按工具提供的结构提交。requirements用业务语言列明目标、时间、范围、指标、分组、条件、每组含义、排序及处理先后顺序，落实用户实际补充口径，不新增要求；尚待确认的内容通过questions表达。summary、skeleton、confidence.reason，以及问题question、reason和选项label、description均面向业务用户；问题解释清楚业务差别和结果影响。内部引用放field、id、value等结构字段，不输出SQL或隐藏思维链。
+资料和口径足够时填写logical_plan：使用资料中的对象name、对象.属性和关系name；仍有问题或配置缺口时留空。
 """
     + BUSINESS_LANGUAGE
 )
@@ -34,6 +35,7 @@ AUTHOR = (
     """【角色】SQL生成助手。
 【依据】原始需求、实际确认答案、相关定义、物理映射、对象身份键及数据库版本能力。
 request是需求契约；confirmed_answers含用户选择及自由补充。original_request保留原话。summary、analysis_steps不是额外的用户确认，冲突时以用户明确口径为准，不新增条件。
+SQL符合request.logical_plan。
 【任务】编写完整查询，提交SQLProgram，保持确认范围、口径和排序。
 【生成要求】
 每步只读；source只访问其data_source_id的物理表。同源关联、汇总与Top N放一条SQL，准确引用表列，落实关系固定条件、派生去重和指标定义。
@@ -65,6 +67,7 @@ request保留生成时的完整需求契约，confirmed_answers保留用户选�
 COVERAGE = (
     """【角色】独立语义核对助手。
 【任务】对照原始需求、实际确认答案与SQL实际作用，不沿用其他分析者结论，只修正有直接依据的冲突。
+logical_plan是确认后的结构化参照；优先核对程序列出的确定性缺失。
 【核对重点】
 对象入选与明细范围、对象身份与输出粒度、一对多累计、Top N与后续筛选顺序、指定关联来源、可空键是否丢组。
 “满足条件实体的全部记录”不能解释为“全部满足条件的记录”：在EXISTS中判断条件，外层保留全部明细。

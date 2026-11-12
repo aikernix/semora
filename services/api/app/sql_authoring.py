@@ -358,6 +358,12 @@ async def analyse(workflow, run, question, ontology, scope):
     from .business_copy import polish_public_text
 
     await polish_public_text(workflow, run, report)
+    from .query_alignment import validate_logical_refs
+    logical_plan_errors = validate_logical_refs(report.logical_plan, saved["packet"])
+    if logical_plan_errors:
+        # The internal plan is an aid, never a new failure exit for a valid user request.
+        run.agent_memory["logical_plan_validation"] = [{"errors": logical_plan_errors}]
+        report.logical_plan = None
     if (
         report.questions
         and not policy["business_allowed"]
@@ -376,6 +382,7 @@ async def analyse(workflow, run, question, ontology, scope):
         clarification_stage="direction" if report.target_state == "needs_direction" else "business",
         clarification_round=policy["answered_rounds"],
         status="awaiting_clarification" if report.questions or report.technical_gaps else "ready",
+        logical_plan=report.logical_plan,
     )
     workflow.emit(
         run,
@@ -406,6 +413,7 @@ async def analyse(workflow, run, question, ontology, scope):
         execution_mode="sequential_queries" if len(program.steps) > 1 else "single_query",
         assumptions=program.assumptions,
         evidence=run.evidence,
+        logical_plan=draft.logical_plan,
     )
     return AnalysisOutcome(plan=plan, requirement=draft, model_mode="sql-native")
 
@@ -415,15 +423,22 @@ async def check_coverage(workflow, run, payload, program):
     from sqlglot import exp
     import sqlglot
 
-    # A plain projection has no scope/aggregation interaction to reconcile.
+    from .query_alignment import inspect_alignment
+    logical = payload.get("request", {}).get("logical_plan")
+    from semora_contracts import LogicalQueryPlan
+    logical = LogicalQueryPlan.model_validate(logical) if logical else None
+    alignment = inspect_alignment(logical, program, payload.get("materials", {}))
+    run.agent_memory["sql_alignment"] = [{"findings": alignment}]
+    # A plain projection with no deterministic finding has no scope/aggregation interaction to reconcile.
     trees = [sqlglot.parse_one(s.sql, read="postgres") for s in program.steps]
-    if len(trees) == 1 and not any(trees[0].find(t) for t in (exp.AggFunc, exp.Join, exp.Subquery)):
+    if not alignment and len(trees) == 1 and not any(trees[0].find(t) for t in (exp.AggFunc, exp.Join, exp.Subquery)):
         return program
     try:
         packet = payload.get("materials", {})
         comparison = {
             "sql_contract": payload["sql_contract"],
             "request": payload.get("original_request", payload["request"]),
+            "logical_plan": logical.model_dump(mode="json") if logical else None,
             "confirmed_answers": payload.get("confirmed_answers", []),
             "data_sources": payload.get("data_sources", []),
             "materials": {
@@ -454,6 +469,7 @@ async def check_coverage(workflow, run, payload, program):
             "program_steps": [
                 s.model_dump(mode="json", exclude={"purpose"}) for s in program.steps
             ],
+            "deterministic_alignment_findings": alignment,
         }
         reviewed = await asyncio.wait_for(
             structured(
@@ -489,7 +505,12 @@ async def check_coverage(workflow, run, payload, program):
             {"summary": "；".join(e.change_summary for e in reviewed.edits)[:1200]},
             "sql_author",
         )
-        return apply_coverage_edits(program, reviewed)
+        candidate = apply_coverage_edits(program, reviewed)
+        run.agent_memory["sql_alignment"] = [{
+            "findings": inspect_alignment(logical, candidate, payload.get("materials", {})),
+            "after_coverage": True,
+        }]
+        return candidate
     return program
 
 
