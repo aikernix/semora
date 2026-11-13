@@ -11,7 +11,7 @@ from .relationship_research import batches
 
 TABLE_SYSTEM = """角色：数据模型结构分析员。
 任务：识别每张表的职责、每行粒度、核心实体及字段用途，为查询连接选择实体主表提供依据。不要根据主键唯一就认定为主表。
-区分entity_master、dimension、transaction、detail、extension、bridge、history、view、replica、unknown。扩展表和历史表可能与主表共用主键，但不因此成为所有引用的目标。
+区分entity_master、dimension、transaction、detail、extension、bridge、history、view、replica、unknown。物理VIEW不代替业务职责，视图也可以是实体主表或交易主表；仅提供投影且无法判断业务职责时使用view。扩展表和历史表可能与主表共用主键，但不因此成为所有引用的目标。
 仅判断提供的table_id和字段，不新增关联或SQL。保留不同引用角色；时间和金额是业务属性，除非有明确引用证据，不是实体连接键。
 若一个标识字段根据伴随的类型字段引用不同实体，将其标记为polymorphic_reference，对应类型鉴别字段标记为discriminator；普通业务类别不等于鉴别字段。
 输出JSON：{"tables":[{"table_id":"...","role":"entity_master","entity":"实体含义","grain":"一行代表什么","field_roles":{"字段名":"identifier/reference/polymorphic_reference/discriminator/measure/time/attribute/unknown"},"reason":"简短依据"}]}。"""
