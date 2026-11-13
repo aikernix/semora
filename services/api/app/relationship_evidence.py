@@ -17,6 +17,17 @@ def meaning_tokens(column):
 
 def recall_field_pairs(sources, targets):
     """Bounded field-level recall; common catalog terms carry no evidence."""
+    # Explicit references can point to non-unique fields too. Their cardinality
+    # and proof path are resolved later; don't lose them in a key-only registry.
+    target_fields = {(str(t.get("name", "")).lower(), c["name"].lower()): (t, c)
+                     for t in targets for c in t.get("columns") or []}
+    for source in sources:
+        for column in source.get("columns") or []:
+            text = str(column.get("description") or column.get("comment") or "").lower()
+            for ref in re.findall(r"(?<![\w])([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)(?![\w])", text):
+                if ref in target_fields:
+                    target, field = target_fields[ref]
+                    yield source, column, target, field, True
     keys, postings = [], defaultdict(list)
     for table in targets:
         columns = {c["name"]: c for c in table.get("columns") or []}
@@ -102,14 +113,24 @@ def finalize_relationships(candidates, *, cross_source=False):
                         if e.get("kind") == "value_profile"), {})
         review = next((e for e in reversed(evidence)
                        if e.get("kind") == "model_semantic_review"), {})
+        independent = next((e for e in reversed(evidence)
+                           if e.get("kind") == "independent_review"), {})
+        documented = any(e.get("kind") == "explicit_field_reference" for e in evidence)
+        samples = profile.get("source_nonnull_distinct_keys", 0)
+        coverage = profile.get("directional_coverage", 0)
+        unique = any(e.get("kind") == "target_unique_index" and e.get("confirmed") is True for e in evidence)
+        data_path = unique and samples >= (200 if cross_source else 100) and coverage >= (.99 if cross_source else .98)
+        # A concrete documented field reference is a separate proof path.
+        # Empty data is unknown; observed contradictory data still blocks it.
+        documented_path = documented and not (samples >= 10 and coverage < .98)
         reasons = []
-        if not any(e.get("kind") == "target_unique_index" and e.get("confirmed") is True for e in evidence):
+        if not unique and not documented_path:
             reasons.append("target_uniqueness_unverified")
-        if not profile:
+        if not profile and not documented_path:
             reasons.append("value_verification_missing")
-        elif profile.get("source_nonnull_distinct_keys", 0) < (200 if cross_source else 100):
+        elif samples < (200 if cross_source else 100) and not documented_path:
             reasons.append("insufficient_distinct_samples")
-        elif profile.get("directional_coverage", 0) < (.99 if cross_source else .98):
+        elif coverage < (.99 if cross_source else .98) and not documented_path:
             reasons.append("insufficient_value_coverage")
         if not review.get("supported") or review.get("confidence", 0) < .9:
             reasons.append("semantic_evidence_insufficient")
@@ -119,11 +140,42 @@ def finalize_relationships(candidates, *, cross_source=False):
             reasons.append("alternative_target_unresolved")
         if review.get("target_role") == "replica":
             reasons.append("replica_is_not_business_reference")
+        if (not independent.get("supported") or independent.get("confidence", 0) < .9
+                or independent.get("target_role") not in {"reference", "identity"}
+                or independent.get("alternative_unresolved") is not False):
+            reasons.append("independent_review_incomplete")
         # A shared source field does not imply targets are mutually exclusive.
         candidate["status"] = "pending" if reasons else "accepted"
         if not reasons:
             candidate["evidence_grade"] = "strong"
-            candidate["confidence"] = min(review["confidence"], profile["directional_coverage"])
+            candidate["confidence"] = min(review["confidence"], independent["confidence"])
         candidate["evidence"] = [e for e in evidence if e.get("kind") != "confirmation"]
         candidate["evidence"].append({"kind": "confirmation", "reasons": reasons,
+                                      "proof_path": "documented_reference" if documented_path else "verified_values" if data_path else "insufficient",
                                       "decision": candidate["status"]})
+
+
+def coverage_report(tables, candidates):
+    """Whole-catalog checks run after batching; batches are not isolated schemas."""
+    by_name = {str(t.get("name", "")).lower(): t for t in tables}
+    mappings = {(c["source_table_id"], tuple(c["source_columns"]), c["target_table_id"], tuple(c["target_columns"]))
+                for c in candidates}
+    missing, unavailable = [], []
+    references = 0
+    for table in tables:
+        for column in table.get("columns") or []:
+            text = str(column.get("description") or column.get("comment") or "").lower()
+            for name, field in re.findall(r"(?<![\w])([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)(?![\w])", text):
+                references += 1
+                target = by_name.get(name)
+                target_column = next((c for c in (target or {}).get("columns", []) if c["name"].lower() == field), None)
+                issue = {"source_table": table["id"], "source_field": column["name"], "reference": name + "." + field}
+                if not target_column:
+                    unavailable.append(issue)
+                elif (table["id"], (column["name"],), target["id"], (target_column["name"],)) not in mappings:
+                    missing.append(issue)
+    return {"tables": len(tables), "explicit_references": references,
+            "missing_reference_candidates": missing, "unavailable_reference_targets": unavailable,
+            "accepted": sum(c["status"] == "accepted" for c in candidates),
+            "researched": sum(any(e.get("kind") == "research_complete" for e in c["evidence"]) for c in candidates),
+            "foreign_keys": sum(c["evidence_grade"] == "foreign_key" for c in candidates)}

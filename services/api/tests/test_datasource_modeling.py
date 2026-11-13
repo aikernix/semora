@@ -123,6 +123,8 @@ def test_multiple_independent_targets_confirm_after_all_evidence_is_collected():
             {"kind": "value_profile", "statistics": {"source_nonnull_distinct_keys": 100,
                                                        "directional_coverage": .99}},
             {"kind": "model_semantic_review", "supported": True, "confidence": .96,
+             "target_role": role, "alternative_unresolved": False},
+            {"kind": "independent_review", "supported": True, "confidence": .96,
              "target_role": role, "alternative_unresolved": False}]})
     finalize_relationships(proposals)
     assert all(c["status"] == "accepted" for c in proposals)

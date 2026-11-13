@@ -522,13 +522,14 @@ class ProfileInput(BaseModel):
     sample_rows: int = Field(default=200,ge=10,le=500)
     source_index_confirmed: bool = False
     target_unique_index_confirmed: bool = False
+    allow_bounded_unindexed: bool = False
 
 
 @app.post("/internal/v1/datasources/profile-relationship")
 def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None = Header(default=None)):
     require_internal_token(x_semora_internal_token)
     if len(body.source_columns)!=len(body.target_columns):raise HTTPException(422,"复合键字段数不一致")
-    if not body.source_index_confirmed or not body.target_unique_index_confirmed:
+    if not body.allow_bounded_unindexed and (not body.source_index_confirmed or not body.target_unique_index_confirmed):
         raise HTTPException(422,"自动关系验证只允许使用已确认的来源索引和目标唯一索引")
 
     def table_expr(table):
@@ -543,7 +544,9 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
         dialect=adapter_registry.dialect(datasource)
         tree=exp.select(*(exp.column(c,quoted=True) for c in columns)).from_(table_expr(table))
         tree=tree.where(exp.and_(*(exp.column(c,quoted=True).is_(exp.null()).not_() for c in columns)))
-        tree=tree.order_by(*(exp.Ordered(this=exp.column(c,quoted=True),desc=descending) for c in columns)).limit(body.sample_rows)
+        if body.source_index_confirmed:
+            tree=tree.order_by(*(exp.Ordered(this=exp.column(c,quoted=True),desc=descending) for c in columns))
+        tree=tree.limit(body.sample_rows)
         from semora_contracts.sql_compat import apply_pagination
         pagination="baseline"
         if adapter_registry.is_jdbc(datasource.type):
@@ -557,7 +560,7 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
 
     # Two index-ordered windows reduce first-page bias without random sorts or OFFSET.
     observed=[]
-    for descending in (False,True):
+    for descending in ((False,True) if body.source_index_confirmed else (False,)):
         observed.extend(run_sample(body.datasource,body.source_table,body.source_columns,descending))
     # Interleave both ends so the ascending window cannot consume the budget.
     middle=len(observed)//2
@@ -579,7 +582,7 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
         tree=exp.select(*(exp.column(c,quoted=True) for c in body.target_columns)).from_(table_expr(body.target_table))
         tree=tree.where(exp.or_(*disjunction)).limit(len(batch))
         sql=tree.sql(dialect=dialect)
-        for name in parameters:sql=sql.replace(f":{name}",f"%({name})s")
+        for name in sorted(parameters, key=len, reverse=True):sql=sql.replace(f":{name}",f"%({name})s")
         result=execute_query(QueryInput(sql=sql,parameters=parameters,datasource=target,
             timeout_ms=3000,max_rows=max(1,len(batch)),max_bytes=1024*1024),x_semora_internal_token)
         matched.update(tuple(json.dumps(v,sort_keys=True,default=str) for v in row) for row in result["rows"])
@@ -588,6 +591,31 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
     return {"method":"indexed_directional_membership_v1","sample_budget":body.sample_rows,
             "source_nonnull_distinct_keys":len(keys),"matched_keys":len(set(keys)&matched),
             "directional_coverage":round(len(set(keys)&matched)/len(keys),6) if keys else 0,
-            "target_uniqueness":"declared_constraint","index_verified_by_metadata":True,
+            "target_uniqueness":"declared_constraint" if body.target_unique_index_confirmed else "unverified",
+            "index_verified_by_metadata":body.source_index_confirmed and body.target_unique_index_confirmed,
             "signature_version":"hmac-sha256-v1","signature":signatures,
             "raw_values_retained":False}
+
+
+class RelationDefinitionInput(DataSourceInput):
+    table_id: str = Field(min_length=1, max_length=800)
+
+
+@app.post("/internal/v1/datasources/relation-definitions")
+def relation_definitions(body: RelationDefinitionInput, x_semora_internal_token: str | None = Header(default=None)):
+    require_internal_token(x_semora_internal_token)
+    if body.type == "mysql":
+        parts = body.table_id.split(".")
+        if len(parts) != 2:
+            raise HTTPException(422, "视图标识需包含数据库及名称")
+        sql = "SELECT VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA=%(schema)s AND TABLE_NAME=%(name)s"
+        parameters = {"schema": parts[0], "name": parts[1]}
+    elif body.type == "postgresql":
+        sql = "SELECT pg_get_viewdef(to_regclass(%(table)s), true)"
+        parameters = {"table": body.table_id}
+    else:
+        return {"status": "unavailable", "reason": "driver_definition_reader_unavailable"}
+    result = execute_query(QueryInput(datasource=body, sql=sql, parameters=parameters,
+                           timeout_ms=3000, max_rows=1, max_bytes=48000), x_semora_internal_token)
+    return {"status": "available" if result["rows"] else "unavailable",
+            "definition": result["rows"][0][0] if result["rows"] else None}
