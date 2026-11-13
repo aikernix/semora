@@ -74,3 +74,40 @@ def test_context_batches_keep_complete_records_and_bound_bytes():
     groups = list(batches(packets, max_bytes=12000))
     assert sum(len(group) for group, _ in groups) == 25
     assert all(fits and all(len(p["key_pairs"]) == 2 for p in group) for group, fits in groups)
+
+
+def test_declared_unique_entity_reference_with_independent_semantic_evidence():
+    c = candidate("structured")
+    c["evidence"].extend([
+        {"kind": "entity_key_name"},
+        {"kind": "model_semantic_review", **verdict("structured")},
+        {"kind": "independent_review", **verdict("structured")}])
+    finalize_relationships([c])
+    assert c["status"] == "accepted"
+    assert c["evidence"][-1]["proof_path"] == "structural_semantic"
+    c["evidence"].append({"kind": "value_profile", "statistics": {
+        "source_nonnull_distinct_keys": 100, "directional_coverage": .2}})
+    finalize_relationships([c])
+    assert c["status"] == "pending"
+
+
+def test_missing_structured_decisions_are_repaired_without_losing_candidate():
+    class Model:
+        calls = 0
+        async def complete_json(self, system, user):
+            self.calls += 1
+            if self.calls == 1:
+                return {"decisions": []}
+            return {"decisions": [verdict("repair")]}
+    c = candidate("repair")
+    async def fetch(c, kind):
+        return {"kind": "value_profile", "statistics": {"source_nonnull_distinct_keys": 100, "directional_coverage": 1}}
+    async def persist(entries):
+        finalize_relationships(entries)
+    async def progress(done, total):
+        pass
+    model = Model()
+    asyncio.run(research([c], lambda c: {"candidate_id": c["id"], "evidence": c["evidence"]},
+                         fetch, model, persist, progress))
+    assert c["status"] == "accepted"
+    assert model.calls == 3

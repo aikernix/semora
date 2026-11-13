@@ -123,14 +123,22 @@ def finalize_relationships(candidates, *, cross_source=False):
         # A concrete documented field reference is a separate proof path.
         # Empty data is unknown; observed contradictory data still blocks it.
         documented_path = documented and not (samples >= 10 and coverage < .98)
+        semantic_structure = any(e.get("kind") in {"entity_key_name", "semantic_recall"} for e in evidence) or (
+            any(e.get("kind") == "same_name" for e in evidence)
+            and any(e.get("kind") == "comment_semantics" for e in evidence))
+        structural_path = (unique and semantic_structure
+                           and review.get("supported") is True and review.get("confidence", 0) >= .95
+                           and independent.get("supported") is True and independent.get("confidence", 0) >= .95
+                           and not (samples >= 10 and coverage < .98))
+        non_data_path = documented_path or structural_path
         reasons = []
-        if not unique and not documented_path:
+        if not unique and not non_data_path:
             reasons.append("target_uniqueness_unverified")
-        if not profile and not documented_path:
+        if not profile and not non_data_path:
             reasons.append("value_verification_missing")
-        elif samples < (200 if cross_source else 100) and not documented_path:
+        elif samples < (200 if cross_source else 100) and not non_data_path:
             reasons.append("insufficient_distinct_samples")
-        elif coverage < (.99 if cross_source else .98) and not documented_path:
+        elif coverage < (.99 if cross_source else .98) and not non_data_path:
             reasons.append("insufficient_value_coverage")
         if not review.get("supported") or review.get("confidence", 0) < .9:
             reasons.append("semantic_evidence_insufficient")
@@ -151,7 +159,7 @@ def finalize_relationships(candidates, *, cross_source=False):
             candidate["confidence"] = min(review["confidence"], independent["confidence"])
         candidate["evidence"] = [e for e in evidence if e.get("kind") != "confirmation"]
         candidate["evidence"].append({"kind": "confirmation", "reasons": reasons,
-                                      "proof_path": "documented_reference" if documented_path else "verified_values" if data_path else "insufficient",
+                                      "proof_path": "documented_reference" if documented_path else "structural_semantic" if structural_path else "verified_values" if data_path else "insufficient",
                                       "decision": candidate["status"]})
 
 
