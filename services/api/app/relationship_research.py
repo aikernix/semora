@@ -5,7 +5,7 @@ import asyncio
 import json
 import os
 
-VERSION = "query-relationship-research-v2"
+VERSION = "query-relationship-research-v3"
 SYSTEM = """角色：数据结构关系分析员。
 任务：生成可用于正确SQL的连接骨架，而非罗列字段相关性。根据表职责、行粒度、引用角色和完整连接条件判断每条候选。资料不足时请求具体资料，获得资料后继续判断。
 规则：同名和值相同不能单独证明关联；同一字段可以有多个有效目标。区分引用(reference)、身份映射(identity)、副本(replica)、未知(unknown)。仅在替代目标无法区分时标记alternative_unresolved。空表表示没有数据证据，不表示关系错误。字段注释中的明确引用可以作为文档证据，但不能自行猜测关联条件或唯一性。
@@ -17,7 +17,7 @@ SYSTEM += """
 usable表示独立且有意义的查询连接；exclude仅用于明确不合理或对查询冗余的映射；needs_evidence必须明确缺少什么事实。confidence表示对本次判断的把握，不是关联成立的概率。
 排除码：meaning_mismatch(度量/日期/标志与实体标识含义不符)、replica(副本)、lineage_only(视图到底表的血缘)、redundant_identity(相同数据对象重复映射)、transitive_only(仅因共用主实体而推导的明细之间关联)、wrong_target(明确指向另一个对象)。缺证据不能伪装成排除。
 优先保留记录到实体主表、明细到主记录、关联表到两端实体的引用。扩展表共享主键不代表应互相JOIN；不要把所有同标识表两两相连。同一表对的不同引用角色要分别保留，不机械删除环路。
-连接若需要类型等附加条件必须完整表达：additional_predicates=[{"side":"source或target","field":"实际字段","operator":"eq","value":"有资料依据的固定值"}]；无附加条件用[]。不得猜测固定值；缺少条件资料时needs_evidence。不得把目标唯一性未知直接等同于关系不存在。
+连接若需要类型等附加条件必须完整表达：additional_predicates=[{"side":"source或target","field":"实际字段","operator":"eq","value":"有资料依据的固定值"}]；无附加条件用[]。polymorphic_reference必须明确discriminator条件，无法取得值时needs_evidence。不得猜测固定值；缺少条件资料时needs_evidence。不得把目标唯一性未知直接等同于关系不存在。
 例外码不适用时exclusion_code=""。missing_evidence为具体缺口列表；query_role简述这条连接的查询用途。仅通过已有资料判断，不使用特定行业规则。"""
 REVIEW_SYSTEM = """角色：关系证据复核员。
 任务：独立核对给出的字段映射是否被资料支持，不把分析员的结论当作事实。

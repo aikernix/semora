@@ -1128,13 +1128,13 @@ class ModelingService:
                     candidate["evidence"].append({"kind": "research_gap", "reason": "model_unconfigured"})
             return
 
-        roles = (job or {}).get("details", {}).get("query_table_roles", {})
+        roles = (job or {}).get("details", {}).get("query_table_roles", {}) if (job or {}).get("details", {}).get("table_role_version") == "query-v2" else {}
         for source_id, tables in table_maps.items():
             async def save_roles(values, source_id=source_id):
                 roles[source_id] = values
                 if job:
                     self._update(job, "profiling", "understanding_tables", 68,
-                                 details={**job.get("details", {}), "query_table_roles": roles})
+                                 details={**job.get("details", {}), "query_table_roles": roles, "table_role_version": "query-v2"})
             roles[source_id] = await classify_tables(list(tables.values()), structured_model,
                                                      roles.get(source_id), save_roles)
         if len(table_maps) == 1:
@@ -1212,7 +1212,10 @@ class ModelingService:
                 if len(guards) == 2 and all(g is not None for g in guards) and guards[0] == guards[1]:
                     candidate["condition_template"]["guards"] = guards[0]
                     candidate["evidence"] = [e for e in candidate["evidence"] if e.get("kind") != "join_contract"]
-                    candidate["evidence"].append({"kind": "join_contract", "valid": True, "guards": guards[0]})
+                    field_roles = roles.get(candidate["source_datasource_id"], {}).get(candidate["source_table_id"], {}).get("field_roles", {})
+                    polymorphic = any(field_roles.get(name) == "polymorphic_reference" for name in candidate["source_columns"])
+                    discriminator_bound = any(g["side"] == "source" and field_roles.get(g["field"]) == "discriminator" for g in guards[0])
+                    candidate["evidence"].append({"kind": "join_contract", "valid": not polymorphic or discriminator_bound, "guards": guards[0]})
                 elif any(analyses):
                     candidate["evidence"] = [e for e in candidate["evidence"] if e.get("kind") != "join_contract"]
                     candidate["evidence"].append({"kind": "join_contract", "valid": False})
@@ -1301,7 +1304,8 @@ class ModelingService:
                 for candidate in candidates:
                     prior = saved.get(candidate["id"])
                     if (not force or job.get("details", {}).get("resume_research")) and prior and prior.get("source_schema_hash") == schema_hash:
-                        if any(e.get("kind") == "research_complete" and e.get("version") == "query-relationship-research-v2" for e in prior["evidence"]):
+                        from .relationship_research import VERSION
+                        if any(e.get("kind") == "research_complete" and e.get("version") == VERSION for e in prior["evidence"]):
                             candidate.update(evidence=prior["evidence"], status=prior["status"])
                 # Persist restored checkpoints before starting any new calls;
                 # otherwise another restart would erase the completed batches.
