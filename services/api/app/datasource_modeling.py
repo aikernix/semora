@@ -1095,6 +1095,7 @@ class ModelingService:
     async def _semantic_review(self, candidates, table_maps, job=None, persisted_only=False):
         from semora_agent.model import structured_model
         from .relationship_research import research
+        schema_hashes = {source_id: tables_digest(list(tables.values())) for source_id, tables in table_maps.items()}
         for candidate in candidates:
             if candidate["evidence_grade"] in {"foreign_key", "manual"}:
                 continue
@@ -1161,8 +1162,8 @@ class ModelingService:
                 candidate["cardinality"] = ("1:1" if source_unique else "N:1") if target_unique else ("1:N" if source_unique else "N:N")
                 finalize_relationships([candidate], cross_source=candidate["scope"] == "cross_source")
                 self.repository.replace_candidates([candidate],
-                    tables_digest(list(table_maps[candidate["source_datasource_id"]].values())),
-                    tables_digest(list(table_maps[candidate["target_datasource_id"]].values())))
+                    schema_hashes[candidate["source_datasource_id"]],
+                    schema_hashes[candidate["target_datasource_id"]])
 
         async def progress(done, total):
             if job:
