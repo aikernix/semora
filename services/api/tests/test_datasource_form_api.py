@@ -85,7 +85,8 @@ def test_relation_edit_soft_delete_and_restore(monkeypatch):
     monkeypatch.setattr(database_routes, "modeling_service", modeling)
     client = TestClient(main.app)
 
-    assert client.get("/api/v1/datasources/source/relationships").json()["total"] == 1
+    assert client.get("/api/v1/datasources/source/relationships").json()["total"] == 0
+    assert client.get("/api/v1/datasources/source/relationships?status=pending").json()["total"] == 0
     edited = client.put(
         "/api/v1/datasources/source/relationships/candidate",
         json={

@@ -576,8 +576,11 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
 
     # Two index-ordered windows reduce first-page bias without random sorts or OFFSET.
     observed=[]
+    source_exhausted = False
     for descending in ((False,True) if body.source_index_confirmed else (False,)):
-        observed.extend(run_sample(body.datasource,body.source_table,body.source_columns,descending))
+        window = run_sample(body.datasource,body.source_table,body.source_columns,descending)
+        source_exhausted = source_exhausted or len(window) < body.sample_rows
+        observed.extend(window)
     # Interleave both ends so the ascending window cannot consume the budget.
     middle=len(observed)//2
     interleaved=[value for pair in zip(observed[:middle],observed[middle:]) for value in pair]
@@ -610,6 +613,7 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
     secret=os.getenv("RELATIONSHIP_PROFILE_HMAC_KEY",os.getenv("INTERNAL_TOKEN","semora-dev-internal")).encode()
     signatures=sorted(hmac.new(secret,"\x1f".join(row).encode(),hashlib.sha256).hexdigest()[:24] for row in keys)[:64]
     return {"method":"indexed_directional_membership_v1","sample_budget":body.sample_rows,
+            "source_exhausted":source_exhausted,
             "guards_applied":[g.model_dump() for g in body.guards],
             "source_nonnull_distinct_keys":len(keys),"matched_keys":len(set(keys)&matched),
             "directional_coverage":round(len(set(keys)&matched)/len(keys),6) if keys else 0,
@@ -630,10 +634,10 @@ def relation_definitions(body: RelationDefinitionInput, x_semora_internal_token:
         parts = body.table_id.split(".")
         if len(parts) != 2:
             raise HTTPException(422, "视图标识需包含数据库及名称")
-        sql = "SELECT VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA=%(schema)s AND TABLE_NAME=%(name)s"
+        sql = "SELECT VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA=%(schema)s AND TABLE_NAME=%(name)s LIMIT 1"
         parameters = {"schema": parts[0], "name": parts[1]}
     elif body.type == "postgresql":
-        sql = "SELECT pg_get_viewdef(to_regclass(%(table)s), true)"
+        sql = "SELECT pg_get_viewdef(to_regclass(%(table)s), true) LIMIT 1"
         parameters = {"table": body.table_id}
     else:
         return {"status": "unavailable", "reason": "driver_definition_reader_unavailable"}

@@ -20,7 +20,7 @@ from .datasource_table_storage import tables_digest
 from .mdl_export import column_type
 from .relationship_evidence import recall_field_pairs, finalize_relationships, coverage_report
 
-GENERATOR_VERSION = "source-ontology-v5"
+GENERATOR_VERSION = "source-ontology-v6"
 PROFILE_VERSION = "indexed-directional-v1"
 TERMINAL = {"completed", "completed_with_pending", "failed", "cancelled"}
 GENERIC_NAMES = {"id", "code", "name", "type", "status", "date"}
@@ -1063,8 +1063,9 @@ class ModelingService:
             try:
                 package = self.repository.get_package(source.id)
                 current_hash = tables_digest(source.scan_result["tables"])
-                if (package["schema_hash"] == current_hash and package["status"] != "stale"
-                        and package.get("generator_version") == GENERATOR_VERSION):
+                # A software upgrade must not replace a usable online-researched
+                # package with a metadata-only backfill. Explicit reanalysis updates it.
+                if package["schema_hash"] == current_hash and package["status"] != "stale":
                     continue
             except KeyError:
                 pass
@@ -1129,18 +1130,44 @@ class ModelingService:
                     candidate["evidence"].append({"kind": "research_gap", "reason": "model_unconfigured"})
             return
 
-        roles = (job or {}).get("details", {}).get("query_table_roles", {}) if (job or {}).get("details", {}).get("table_role_version") == "query-v2" else {}
+        from .relationship_context import protected_fields, relationship_columns
+        protected = {source_id: protected_fields(list(tables.values())) for source_id, tables in table_maps.items()}
+        for candidate in candidates:
+            if len(candidate["key_pairs"]) > 1 or candidate["evidence_grade"] in {"foreign_key", "manual"}:
+                for side in ("source", "target"):
+                    protected[candidate[side + "_datasource_id"]][candidate[side + "_table_id"]].update(candidate[side + "_columns"])
+        roles = (job or {}).get("details", {}).get("query_table_roles", {}) if (job or {}).get("details", {}).get("table_role_version") == "query-v3" else {}
         for source_id, tables in table_maps.items():
             async def save_roles(values, source_id=source_id):
                 roles[source_id] = values
                 if job:
                     self._update(job, "profiling", "understanding_tables", 68,
-                                 details={**job.get("details", {}), "query_table_roles": roles, "table_role_version": "query-v2"})
+                                 details={**job.get("details", {}), "query_table_roles": roles, "table_role_version": "query-v3"})
             roles[source_id] = await classify_tables(list(tables.values()), structured_model,
-                                                     roles.get(source_id), save_roles)
+                                                     roles.get(source_id), save_roles, protected[source_id])
         if len(table_maps) == 1:
             source_id = next(iter(table_maps))
             by_id = {c["id"]: c for c in candidates}
+            for profile in roles[source_id].values():
+                for proposed in profile.get("relationship_proposals", []):
+                    source = table_maps[source_id].get(proposed["source_table_id"])
+                    target = table_maps[source_id].get(proposed["target_table_id"])
+                    if not source or not target:
+                        continue
+                    pairs = proposed["key_pairs"]
+                    left = {c["name"]: c for c in source["columns"]}
+                    right = {c["name"]: c for c in target["columns"]}
+                    if (len({k["source"] for k in pairs}) != len(pairs) or len({k["target"] for k in pairs}) != len(pairs)
+                            or not all(k["source"] in left and k["target"] in right and column_type(left[k["source"]])
+                                       and column_type(left[k["source"]]) == column_type(right[k["target"]]) for k in pairs)):
+                        continue
+                    proposal = _candidate(source_id, source_id, source, [k["source"] for k in pairs],
+                        target, [k["target"] for k in pairs], "single_source",
+                        [{"kind": "model_table_proposal", "reason": proposed["reason"]},
+                         {"kind": "target_unique_index", "confirmed": _indexed(target, [k["target"] for k in pairs], unique=True)}], .8)
+                    if proposal["id"] not in by_id:
+                        candidates.append(proposal)
+                        by_id[proposal["id"]] = proposal
             for source, column, target, field in entity_references(list(table_maps[source_id].values()), roles[source_id]):
                 if not column_type(column) or column_type(column) != column_type(field):
                     continue
@@ -1177,12 +1204,14 @@ class ModelingService:
                         "description": table.get("description"), "kind": table.get("kind"),
                         "fields": selected, "primary_keys": table.get("primary_keys", []),
                         "unique_constraints": table.get("unique_constraints", []),
-                        "table_understanding": {k: v for k, v in roles.get(source_id, {}).get(table_id, {}).items() if k != "field_roles"},
+                        "datasource_id": source_id,
+                        "table_understanding": {k: v for k, v in roles.get(source_id, {}).get(table_id, {}).items()
+                                                if k not in {"field_roles", "field_meanings", "relationship_proposals"}},
                         "field_roles": {name: value for name, value in roles.get(source_id, {}).get(table_id, {}).get("field_roles", {}).items()
                                         if name in fields or value == "discriminator"},
                         "context_fields": [c for c in table.get("columns", [])
                                            if roles.get(source_id, {}).get(table_id, {}).get("field_roles", {}).get(c["name"]) == "discriminator"],
-                        **({"field_directory": [c["name"] for c in table.get("columns", [])]} if directory else {})}
+                        }
             return {"candidate_id": candidate["id"],
                     "source": card(candidate["source_datasource_id"], candidate["source_table_id"], candidate["source_columns"]),
                     "target": card(candidate["target_datasource_id"], candidate["target_table_id"], candidate["target_columns"]),
@@ -1194,6 +1223,51 @@ class ModelingService:
                                       and c["source_datasource_id"] == candidate["source_datasource_id"]
                                       and c["source_columns"] == candidate["source_columns"] and c["id"] != candidate["id"]][:8]}
 
+        from .relationship_lineage import describe_view, direct_lineage
+        definitions = {}
+        definition_errors = {}
+        async def read_definition(source_id, table_id):
+            key = (source_id, table_id)
+            if key not in definitions:
+                item = self.datasources.repository.get(source_id)
+                try:
+                    result = await self.executor_request("POST", "datasources/relation-definitions",
+                        json={"datasource_id": item.id, "type": item.type, "secret_ref": item.secret_ref, "table_id": table_id})
+                    definitions[key] = (describe_view(result["definition"], "mysql" if item.type == "mysql" else "postgres")
+                                        if result.get("definition") else {"status": "unavailable", "reason": result.get("reason", "definition_not_visible")})
+                except Exception as exc:
+                    definitions[key] = {"status": "unavailable", "reason": type(exc).__name__}
+                    definition_errors[table_id] = type(exc).__name__
+            return definitions[key]
+
+        # One metadata read per actual view, not one per candidate relationship.
+        for source_id, tables in table_maps.items():
+            for table_id, table in tables.items():
+                if str(table.get("kind", "")).upper() == "VIEW":
+                    await read_definition(source_id, table_id)
+        if job and definition_errors:
+            self._update(job, "profiling", "researching", 68,
+                         details={**job.get("details", {}), "definition_errors": definition_errors})
+
+        for candidate in candidates:
+            if candidate["evidence_grade"] in {"foreign_key", "manual"}:
+                continue
+            source = table_maps[candidate["source_datasource_id"]][candidate["source_table_id"]]
+            target = table_maps[candidate["target_datasource_id"]][candidate["target_table_id"]]
+            left = {c["name"]: c for c in source["columns"]}
+            right = {c["name"]: c for c in target["columns"]}
+            for side, table in (("source", source), ("target", target)):
+                source_id = candidate[side + "_datasource_id"]
+                allowed = {c["name"] for c in relationship_columns(table, protected[source_id][table["id"]], roles.get(source_id, {}).get(table["id"]))}
+                if not set(candidate[side + "_columns"]) <= allowed:
+                    candidate["evidence"].append({"kind": "verified_non_relation_field", "side": side})
+            def title(c):
+                return re.split(r"[;；\n]", str(c.get("description") or c.get("comment") or ""))[0].strip().lower()
+            if all(title(left[k["source"]]) and title(left[k["source"]]) == title(right[k["target"]]) for k in candidate["key_pairs"]):
+                candidate["evidence"].append({"kind": "matching_identifier_definition"})
+            if direct_lineage(candidate, definitions):
+                candidate["evidence"].append({"kind": "verified_direct_lineage"})
+
         async def fetch(candidate, kind):
             if kind == "metadata":
                 return {"kind": "metadata_checked", "status": "complete_fields_and_constraints_in_packet"}
@@ -1202,10 +1276,16 @@ class ModelingService:
             item = self.datasources.repository.get(candidate["source_datasource_id"])
             target = self.datasources.repository.get(candidate["target_datasource_id"])
             if kind == "definition":
-                result = await self.executor_request("POST", "datasources/relation-definitions",
-                    json={"datasource_id": target.id, "type": target.type, "secret_ref": target.secret_ref,
-                          "table_id": candidate["target_table_id"]})
-                return {"kind": "view_definition", "result": result}
+                views = []
+                for side in ("source", "target"):
+                    key = (candidate[side + "_datasource_id"], candidate[side + "_table_id"])
+                    if key not in definitions:
+                        continue
+                    info = definitions[key]
+                    needed = set(candidate[side + "_columns"])
+                    views.append({"side": side, "table_id": key[1], **{k: v for k, v in info.items() if k != "direct_columns"},
+                                  "direct_columns": {k: v for k, v in info.get("direct_columns", {}).items() if k in needed}})
+                return {"kind": "view_definition", "views": views}
             profile = await self._profile(item, candidate, target if target.id != item.id else None)
             self.repository.save_column_profile(candidate, profile)
             return {"kind": "value_profile", "statistics": {k: v for k, v in profile.items() if k != "signature"}}
@@ -1248,6 +1328,9 @@ class ModelingService:
                     details={**job.get("details", {}), "researched": done, "research_total": total})
 
         await research(candidates, packet_for, fetch, structured_model, persist, progress)
+        from .relationship_lineage import prune_shared_entity_edges
+        if len(table_maps) == 1:
+            prune_shared_entity_edges(candidates, roles[next(iter(table_maps))])
 
     async def _run_onboarding(self, job, force=False):
         identifier = job["datasource_id"]

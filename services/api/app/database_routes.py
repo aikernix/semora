@@ -203,10 +203,12 @@ def relations(
 ):
     source(identifier)
     values = modeling_service.repository.list_candidates(identifier, "single_source")
+    # Discovery hypotheses remain internal; they are not a user confirmation queue.
+    values = [item for item in values if item.get("status") != "pending"]
     if status:
         values = [item for item in values if item.get("status") == status]
     else:
-        values = [item for item in values if item.get("status") in {"accepted", "pending"}]
+        values = [item for item in values if item.get("status") == "accepted"]
     values.sort(key=lambda item: ({"accepted": 0, "pending": 1, "rejected": 2, "stale": 3}.get(item.get("status"), 4), -float(item.get("confidence") or 0), item["id"]))
     total = len(values)
     window = values[(page - 1) * page_size:page * page_size]
@@ -425,7 +427,7 @@ def onboarding_status(identifier: str):
     job=modeling_service.repository.latest_job(identifier)
     if not job:raise HTTPException(404,"数据源尚未开始自动建模")
     return {**job, "details": {key: value for key, value in job.get("details", {}).items()
-                               if key != "query_table_roles"}}
+                               if key not in {"query_table_roles", "pending"}}}
 
 
 @router.post("/datasources/{identifier}/onboarding/retry",status_code=202)
@@ -445,7 +447,7 @@ def source_ontology(identifier: str):
     source(identifier)
     try:package=modeling_service.repository.get_package(identifier)
     except KeyError:raise HTTPException(404,"数据源尚未生成单源本体包") from None
-    package["candidates"]=modeling_service.repository.list_candidates(identifier,"single_source")
+    package["candidates"]=[c for c in modeling_service.repository.list_candidates(identifier,"single_source") if c["status"] == "accepted"]
     return package
 
 
@@ -509,7 +511,7 @@ def cross_source_status(domain: str,job_id: str):
     except KeyError:raise HTTPException(404,"跨源分析任务不存在") from None
     if job.get("domain")!=domain or job.get("kind")!="cross_source":raise HTTPException(404,"跨源分析任务不存在")
     if job["status"] in TERMINAL:
-        job["candidates"]=modeling_service.repository.list_cross_candidates(
+        job["candidates"]=[c for c in modeling_service.repository.list_cross_candidates(
             job["datasource_id"],job["peer_datasource_id"],domain
-        )
-    return job
+        ) if c["status"] == "accepted"]
+    return {**job, "details": {k: v for k, v in job.get("details", {}).items() if k not in {"query_table_roles", "pending"}}}

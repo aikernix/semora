@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter, defaultdict
+from .relationship_context import field_references
 
 
 def meaning_tokens(column):
@@ -24,7 +25,7 @@ def recall_field_pairs(sources, targets):
     for source in sources:
         for column in source.get("columns") or []:
             text = str(column.get("description") or column.get("comment") or "").lower()
-            for ref in re.findall(r"(?<![\w])([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)(?![\w])", text):
+            for ref in field_references(text):
                 if ref in target_fields:
                     target, field = target_fields[ref]
                     yield source, column, target, field, True
@@ -66,7 +67,7 @@ def recall_field_pairs(sources, targets):
             text = str(column.get("description") or column.get("comment") or "").lower()
             explicit = set()
             named = set()
-            for table_name, field_name in re.findall(r"(?<![\w])([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)(?![\w])", text):
+            for table_name, field_name in field_references(text):
                 explicit.update(references.get((table_name, field_name), []))
             source_name = re.sub(r"[^a-z0-9]", "", column["name"].lower())
             named.update(named_keys.get(source_name, []) if source_name else [])
@@ -116,29 +117,35 @@ def finalize_relationships(candidates, *, cross_source=False):
         independent = next((e for e in reversed(evidence)
                            if e.get("kind") == "independent_review"), {})
         from .query_relationships import triage
-        excluded = triage(candidate, review, independent)
+        excluded = ("lineage_only" if any(e.get("kind") == "verified_direct_lineage" for e in evidence)
+                    else "non_relationship_field" if any(e.get("kind") == "verified_non_relation_field" for e in evidence)
+                    else "shared_entity_path" if any(e.get("kind") == "verified_shared_entity_path" for e in evidence)
+                    else triage(candidate, review, independent))
         if excluded:
             candidate["status"] = "rejected"
             candidate["evidence"] = [e for e in evidence if e.get("kind") not in {"confirmation", "automatic_exclusion"}]
             candidate["evidence"].append({"kind": "automatic_exclusion", "code": excluded,
-                                           "reason": independent.get("reason")})
+                                           "reason": "已按物理结构、字段用途或完整关联路径核验为无关或冗余连接" if excluded in {"lineage_only", "shared_entity_path", "non_relationship_field"} else independent.get("reason")})
             candidate["evidence"].append({"kind": "confirmation", "decision": "rejected", "reasons": [excluded]})
             continue
         documented = any(e.get("kind") == "explicit_field_reference" for e in evidence)
         samples = profile.get("source_nonnull_distinct_keys", 0)
         coverage = profile.get("directional_coverage", 0)
         unique = any(e.get("kind") == "target_unique_index" and e.get("confirmed") is True for e in evidence)
-        data_path = unique and samples >= (200 if cross_source else 100) and coverage >= (.99 if cross_source else .98)
+        sufficient = samples >= (200 if cross_source else 100) or (profile.get("source_exhausted") is True and samples >= 10)
+        data_path = unique and sufficient and coverage >= (.99 if cross_source else .98)
         # A concrete documented field reference is a separate proof path.
         # Empty data is unknown; observed contradictory data still blocks it.
-        documented_path = documented and not (samples > 0 and coverage < .98)
-        semantic_structure = any(e.get("kind") in {"entity_key_name", "semantic_recall", "entity_role_reference", "contextual_reference_hint"} for e in evidence) or (
+        partial = all(e.get("coverage_expectation") == "partial" for e in (review, independent))
+        contradiction = samples > 0 and coverage < .98 and not (partial and coverage > 0)
+        documented_path = documented and not contradiction
+        semantic_structure = any(e.get("kind") in {"entity_key_name", "matching_identifier_definition"} for e in evidence) or (
             any(e.get("kind") == "same_name" for e in evidence)
             and any(e.get("kind") == "comment_semantics" for e in evidence))
         structural_path = (unique and semantic_structure
-                           and review.get("supported") is True and review.get("confidence", 0) >= .95
-                           and independent.get("supported") is True and independent.get("confidence", 0) >= .95
-                           and not (samples > 0 and coverage < .98))
+                           and review.get("supported") is True and review.get("confidence", 0) >= .9
+                           and independent.get("supported") is True and independent.get("confidence", 0) >= .9
+                           and not contradiction)
         non_data_path = documented_path or structural_path
         reasons = []
         if review.get("query_outcome") not in (None, "usable") or independent.get("query_outcome") not in (None, "usable"):
@@ -146,11 +153,13 @@ def finalize_relationships(candidates, *, cross_source=False):
         join_contract = next((e for e in reversed(evidence) if e.get("kind") == "join_contract"), None)
         if join_contract and not join_contract.get("valid"):
             reasons.append("join_predicates_unresolved")
+        if any(e.get("key_domain", "same") != "same" for e in (review, independent)):
+            reasons.append("identifier_domain_unverified")
         if not unique and not non_data_path:
             reasons.append("target_uniqueness_unverified")
         if not profile and not non_data_path:
             reasons.append("value_verification_missing")
-        elif samples < (200 if cross_source else 100) and not non_data_path:
+        elif not sufficient and not non_data_path:
             reasons.append("insufficient_distinct_samples")
         elif coverage < (.99 if cross_source else .98) and not non_data_path:
             reasons.append("insufficient_value_coverage")
@@ -187,7 +196,7 @@ def coverage_report(tables, candidates):
     for table in tables:
         for column in table.get("columns") or []:
             text = str(column.get("description") or column.get("comment") or "").lower()
-            for name, field in re.findall(r"(?<![\w])([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)(?![\w])", text):
+            for name, field in field_references(text):
                 references += 1
                 target = by_name.get(name)
                 target_column = next((c for c in (target or {}).get("columns", []) if c["name"].lower() == field), None)

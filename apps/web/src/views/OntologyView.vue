@@ -71,13 +71,6 @@ async function analyzeCrossSource() {
   try { crossJob.value = (await api.post(`/ontology/configurations/${selectedDomain.value}/cross-source-analysis`, { left_source_id: crossLeft.value, right_source_id: crossRight.value })).data; await pollCross() }
   catch (reason: any) { error.value = reason.response?.data?.detail || '无法启动跨源分析' }
 }
-async function decideCrossCandidate(candidate: any, status: string) {
-  try {
-    const updated = (await api.put(`/relationship-candidates/${candidate.id}`, { status, note: '' })).data
-    Object.assign(candidate, updated)
-    if (status === 'accepted') await loadDomain()
-  } catch (reason: any) { error.value = reason.response?.data?.detail || '无法更新候选关系' }
-}
 async function loadDomain() {
   const domain = selectedDomain.value
   const version = ++loadVersion
@@ -208,7 +201,7 @@ onUnmounted(() => { if (crossTimer) clearTimeout(crossTimer) })
         <div class="package-list">
           <article v-for="source in dataSources" :key="source.id" class="package-row">
             <div><strong>{{ source.name }}</strong><small>{{ source.type }} · {{ sourcePackages[source.id]?.object_count || 0 }} 个对象 · {{ sourcePackages[source.id]?.relation_count || 0 }} 条关系</small></div>
-            <t-tag variant="light" :theme="sourcePackages[source.id] ? 'success' : 'default'">{{ sourcePackages[source.id]?.status || '尚未完成建模' }}</t-tag>
+            <t-tag variant="light" :theme="sourcePackages[source.id] ? 'success' : 'default'">{{ ['ready', 'ready_with_pending'].includes(sourcePackages[source.id]?.status) ? '已完成' : sourcePackages[source.id]?.status === 'stale' ? '需更新' : '尚未完成建模' }}</t-tag>
             <t-button size="small" variant="outline" :disabled="saving || !sourcePackages[source.id] || boundSourceIds.has(source.id)" @click="bindSource(source.id)">{{ boundSourceIds.has(source.id) ? '已绑定' : '绑定到当前业务域' }}</t-button>
           </article>
         </div>
@@ -218,13 +211,11 @@ onUnmounted(() => { if (crossTimer) clearTimeout(crossTimer) })
           <t-select v-model="crossRight" placeholder="选择数据源 B" style="width:210px"><t-option v-for="source in crossSources.filter(item => item.id !== crossLeft)" :key="source.id" :value="source.id" :label="source.name" /></t-select>
           <t-button :disabled="!crossLeft || !crossRight || !!crossJob && !['completed','completed_with_pending','failed'].includes(crossJob.status)" @click="analyzeCrossSource">分析关联</t-button>
         </div>
-        <t-alert v-if="crossJob" :theme="crossJob.status === 'failed' ? 'error' : 'info'" :message="`跨源分析：${crossJob.phase} · ${crossJob.progress}%${crossJob.details?.accepted !== undefined ? ` · 自动采用 ${crossJob.details.accepted} 条，待确认 ${crossJob.details.pending} 条` : ''}`" />
+        <t-alert v-if="crossJob" :theme="crossJob.status === 'failed' ? 'error' : 'info'" :message="`跨源分析：${crossJob.phase} · ${crossJob.progress}%${crossJob.details?.accepted !== undefined ? ` · 自动采用 ${crossJob.details.accepted} 条` : ''}`" />
         <div v-if="crossJob?.candidates?.length" class="cross-candidates">
-          <article v-for="candidate in crossJob.candidates" :key="candidate.id">
+          <article v-for="candidate in crossJob.candidates.filter((item: any) => item.status === 'accepted')" :key="candidate.id">
             <div><strong>{{ candidate.source_table_id }} → {{ candidate.target_table_id }}</strong>
             <small>{{ candidate.source_columns.join(', ') }} ↔ {{ candidate.target_columns.join(', ') }} · {{ candidate.evidence_grade }} · 置信度 {{ candidate.confidence }} · {{ candidate.status }}</small></div>
-            <t-button v-if="candidate.status === 'pending'" size="small" variant="outline" @click="decideCrossCandidate(candidate, 'accepted')">采用</t-button>
-            <t-button v-if="candidate.status === 'pending'" size="small" variant="text" @click="decideCrossCandidate(candidate, 'rejected')">忽略</t-button>
           </article>
         </div>
       </section>

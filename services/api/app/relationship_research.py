@@ -1,18 +1,16 @@
 """Bounded-context, resumable relationship research over a complete catalog."""
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 
-VERSION = "query-relationship-research-v6"
+VERSION = "query-relationship-research-v7"
 
 
 def factual_evidence(evidence):
     """Internal decisions and previous model opinions are not source evidence."""
     excluded = {"source_code", "confirmation", "model_review_deferred", "research_complete",
                 "model_semantic_review", "independent_review", "join_contract",
-                "automatic_exclusion", "research_gap", "competition"}
+                "automatic_exclusion", "research_gap", "competition", "model_table_proposal"}
     return [entry for entry in evidence if entry.get("kind") not in excluded]
 
 
@@ -31,7 +29,7 @@ def restore_checkpoint(candidate, previous, source_hash, target_hash):
         candidate["condition_template"] = {**candidate.get("condition_template", {}), "guards": contract["guards"]}
     return True
 CONTRACT = """输出唯一JSON结构：
-{"requests":[{"candidate_id":"实际ID","kind":"metadata或definition或profile"}],"decisions":[{"candidate_id":"实际ID","supported":true,"target_role":"reference","alternative_unresolved":false,"confidence":0.95,"reason":"可核验的依据","query_outcome":"usable","exclusion_code":"","missing_evidence":[],"query_role":"连接的查询用途","additional_predicates":[]}]}。
+{"requests":[{"candidate_id":"实际ID","kind":"definition或profile"}],"decisions":[{"candidate_id":"实际ID","supported":true,"target_role":"reference","alternative_unresolved":false,"confidence":0.95,"reason":"可核验的依据","query_outcome":"usable","exclusion_code":"","missing_evidence":[],"query_role":"连接的查询用途","key_domain":"same","relationship_kind":"entity_reference","coverage_expectation":"complete","additional_predicates":[]}]}。
 query_outcome只能是usable、exclude、needs_evidence：
 - usable：完整条件可用于查询，有实体引用或有意义的跨实体身份映射。
 - exclude：明确不相关、错误目标、血缘、副本或冗余连接；必须填exclusion_code。
@@ -40,6 +38,12 @@ exclusion_code只能是meaning_mismatch、replica、lineage_only、redundant_ide
 target_role只能是reference、identity、replica、unknown。confidence表示对本次结论的把握，明确否定也可高把握。不要把supported=false直接转换为needs_evidence。
 additional_predicates是完整JOIN所需的附加条件：[{"side":"source或target","field":"实际字段","operator":"eq","value":"有证据的固定值"}]，没有条件则[]。不能猜字段和值；需要条件而资料缺失时needs_evidence。
 每个candidate_id都要返回结论。不得新增表、字段或SQL。"""
+
+CONTRACT += """
+key_domain为same、different、unknown，表示完整标识的编号体系是否相同，不是字段词语是否相似；不同系统或不同用途的编号不能凭都叫编号而视为同一体系。different应exclude，unknown应needs_evidence。
+relationship_kind为entity_reference、direct_record_reference、identity、lineage、shared_entity、unknown。lineage和无独立引用的shared_entity应exclude；不能仅凭存在其他路径就排除真实直接记录引用。
+coverage_expectation为complete、partial、unknown。表行数不同不构成否定；同一编号反复出现是正常N:1。只包含部分实体的子表允许partial，但必须说明范围依据，不能通过假设范围解释明显错误映射。
+metadata已提供，不重复请求。tables是共享表卡片，source/target.table_ref指向表卡片，fields限定当前字段。表职责和字段用途是初步推断，须用原始字段说明和证据复核。"""
 
 SYSTEM = """角色：查询数据模型分析员。
 任务：根据表职责、记录粒度、字段用途、约束和数据证据建立可用的SQL连接骨架。
@@ -97,6 +101,16 @@ def decision(value, *, strict=False):
             return None
         if not isinstance(value.get("additional_predicates"), list):
             return None
+        if value.get("key_domain") not in {"same", "different", "unknown"}:
+            return None
+        if value.get("relationship_kind") not in {"entity_reference", "direct_record_reference", "identity", "lineage", "shared_entity", "unknown"}:
+            return None
+        if value.get("coverage_expectation") not in {"complete", "partial", "unknown"}:
+            return None
+        if outcome == "usable" and (not value["supported"] or value["key_domain"] != "same"
+                                     or value["relationship_kind"] in {"lineage", "shared_entity"}
+                                     or value["target_role"] == "replica"):
+            return None
     return {"supported": value["supported"], "confidence": max(0, min(1, confidence)),
             "target_role": value["target_role"], "alternative_unresolved": value["alternative_unresolved"],
             "reason": str(value.get("reason") or "")[:1000],
@@ -104,138 +118,12 @@ def decision(value, *, strict=False):
             "exclusion_code": str(value.get("exclusion_code") or ""),
             "missing_evidence": value.get("missing_evidence") if isinstance(value.get("missing_evidence"), list) else [],
             "query_role": str(value.get("query_role") or "")[:300],
+            "key_domain": value.get("key_domain", "unknown"),
+            "relationship_kind": value.get("relationship_kind", "unknown"),
+            "coverage_expectation": value.get("coverage_expectation", "unknown"),
             "additional_predicates": value.get("additional_predicates", [])}
 
 
 async def research(candidates, packet_for, fetch, model, persist, progress):
-    """All candidates are covered. Durable evidence replaces growing chat history."""
-    todo = [c for c in candidates if c["evidence_grade"] not in {"foreign_key", "manual"}
-            and not any(e.get("kind") == "research_complete" and e.get("version") == VERSION
-                        for e in c["evidence"])]
-    for c in todo:
-        c["evidence"] = [e for e in factual_evidence(c["evidence"])
-                         if not (e.get("kind") == "value_profile"
-                                 and e.get("statistics", {}).get("guards_applied"))]
-        if "condition_template" in c:
-            c["condition_template"]["guards"] = []
-    packets = [packet_for(c) for c in todo]
-    lookup = {c["id"]: c for c in todo}
-    workers = max(1, min(16, int(os.getenv("RELATIONSHIP_MODEL_CONCURRENCY", "4"))))
-    semaphore = asyncio.Semaphore(workers)
-    completed = 0
-
-    async def run_batch(initial, fits):
-        nonlocal completed
-        async with semaphore:
-            current = {p["candidate_id"]: p for p in initial}
-            entries = [lookup[key] for key in current]
-            if not fits:
-                for c in entries:
-                    c["evidence"].append({"kind": "research_gap", "reason": "single_relation_context_oversized"})
-                await persist(entries)
-                return
-            seen = set()
-            final = {}
-            failures = 0
-            format_repairs = 0
-            while True:
-                payload = [packet_for(c) for c in entries]
-                if len(encoded(payload).encode()) > 48000:
-                    for c in entries:
-                        c["evidence"].append({"kind": "research_gap", "reason": "evidence_context_oversized"})
-                    break
-                try:
-                    response = await model.complete_json(SYSTEM, encoded({"candidates": payload,
-                        "required_decision_ids": [key for key in current if key not in final],
-                        "format_repair": format_repairs > 0}))
-                    if not isinstance(response.get("decisions", []), list) or not isinstance(response.get("requests", []), list):
-                        raise ValueError("invalid research response")
-                except Exception as exc:
-                    failures += 1
-                    if failures < 2:
-                        continue
-                    for c in entries:
-                        c["evidence"].append({"kind": "research_gap", "reason": type(exc).__name__})
-                    break
-                for item in response.get("decisions", []):
-                    parsed = decision(item, strict=True)
-                    if parsed is not None and item.get("candidate_id") in current:
-                        final[item["candidate_id"]] = parsed
-                added = False
-                for request in response.get("requests", []):
-                    if not isinstance(request, dict):
-                        continue
-                    key = (request.get("candidate_id"), request.get("kind"))
-                    if key[0] not in current or key[1] not in {"metadata", "definition", "profile"} or key in seen:
-                        continue
-                    seen.add(key)
-                    c = lookup[key[0]]
-                    try:
-                        evidence = await fetch(c, key[1])
-                    except Exception as exc:
-                        evidence = {"kind": "tool_unavailable", "tool": key[1], "reason": type(exc).__name__}
-                    c["evidence"].append(evidence)
-                    added = True
-                if not added:
-                    missing = [key for key in current if key not in final]
-                    if missing and format_repairs < 2:
-                        format_repairs += 1
-                        continue
-                    for key in missing:
-                        lookup[key]["evidence"].append({"kind": "research_gap", "reason": "missing_valid_structured_decision"})
-                    break
-                await persist(entries)
-            # Give every supported mapping a database check even if the analyst
-            # forgot to request one. Foreign keys never enter this path.
-            for c in entries:
-                value = final.get(c["id"])
-                if value:
-                    c["evidence"].append({"kind": "model_semantic_review", **value})
-                    if value["query_outcome"] == "usable" and not any(e.get("kind") == "value_profile" for e in c["evidence"]):
-                        try:
-                            c["evidence"].append(await fetch(c, "profile"))
-                        except Exception as exc:
-                            c["evidence"].append({"kind": "profile_unavailable", "reason": type(exc).__name__})
-            supported = [c for c in entries if final.get(c["id"], {}).get("supported")
-                         or final.get(c["id"], {}).get("query_outcome") == "exclude"]
-            for group, fits_review in batches([packet_for(c) for c in supported], max_bytes=48000):
-                if not fits_review:
-                    continue
-                allowed_ids = {p["candidate_id"] for p in group}
-                reviewed_ids = set()
-                for attempt in range(3):
-                    try:
-                        result = await model.complete_json(REVIEW_SYSTEM, encoded({
-                            "candidates": group, "required_decision_ids": sorted(allowed_ids - reviewed_ids),
-                            "format_repair": attempt > 0}))
-                        values = result.get("decisions", [])
-                        if not isinstance(values, list):
-                            continue
-                        for item in values:
-                            parsed = decision(item, strict=True)
-                            if parsed is not None and item.get("candidate_id") in allowed_ids:
-                                identifier = item["candidate_id"]
-                                lookup[identifier]["evidence"].append({"kind": "independent_review", **parsed})
-                                reviewed_ids.add(identifier)
-                        if reviewed_ids == allowed_ids:
-                            break
-                    except Exception as exc:
-                        if attempt == 2:
-                            for identifier in allowed_ids - reviewed_ids:
-                                lookup[identifier]["evidence"].append({"kind": "research_gap", "reason": type(exc).__name__})
-            for c in entries:
-                if c["id"] in final:
-                    c["evidence"].append({"kind": "research_complete", "version": VERSION})
-            await persist(entries)
-            completed += len(entries)
-            await progress(completed, len(todo))
-
-    # A fixed worker pool avoids creating one live task per candidate batch.
-    queue = asyncio.Queue()
-    for group in batches(packets):
-        queue.put_nowait(group)
-    async def worker():
-        while not queue.empty():
-            group, fits = queue.get_nowait()
-            await run_batch(group, fits)
-    await asyncio.gather(*(worker() for _ in range(workers)))
+    from .relationship_research_loop import run
+    await run(candidates, packet_for, fetch, model, persist, progress)
