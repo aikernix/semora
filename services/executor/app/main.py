@@ -7,7 +7,7 @@ import os
 import re
 import threading
 import time
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
 import sqlglot
@@ -512,6 +512,13 @@ def execution_progress(execution_id: str, x_semora_internal_token: str | None = 
     return jdbc_adapter.progress(execution_id)
 
 
+class ProfileGuard(BaseModel):
+    side: Literal["source", "target"]
+    field: str = Field(min_length=1, max_length=255)
+    operator: Literal["eq"] = "eq"
+    value: str | int | float | bool
+
+
 class ProfileInput(BaseModel):
     datasource: DataSourceInput
     target_datasource: DataSourceInput | None = None
@@ -523,6 +530,7 @@ class ProfileInput(BaseModel):
     source_index_confirmed: bool = False
     target_unique_index_confirmed: bool = False
     allow_bounded_unindexed: bool = False
+    guards: list[ProfileGuard] = Field(default_factory=list, max_length=8)
 
 
 @app.post("/internal/v1/datasources/profile-relationship")
@@ -544,6 +552,12 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
         dialect=adapter_registry.dialect(datasource)
         tree=exp.select(*(exp.column(c,quoted=True) for c in columns)).from_(table_expr(table))
         tree=tree.where(exp.and_(*(exp.column(c,quoted=True).is_(exp.null()).not_() for c in columns)))
+        parameters = {}
+        for index, guard in enumerate(body.guards):
+            if guard.side == "source":
+                name = f"source_guard_{index}"
+                parameters[name] = guard.value
+                tree = tree.where(exp.EQ(this=exp.column(guard.field, quoted=True), expression=exp.Placeholder(this=name)))
         if body.source_index_confirmed:
             tree=tree.order_by(*(exp.Ordered(this=exp.column(c,quoted=True),desc=descending) for c in columns))
         tree=tree.limit(body.sample_rows)
@@ -553,7 +567,9 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
             driver,_,_=jdbc_adapter.configuration(jdbc_adapter.settings(datasource))
             pagination=driver["effective_pagination"]
         tree=apply_pagination(tree,dialect,pagination)
-        result=execute_query(QueryInput(sql=tree.sql(dialect=dialect),datasource=datasource,
+        sql = tree.sql(dialect=dialect)
+        for name in sorted(parameters, key=len, reverse=True):sql=sql.replace(f":{name}",f"%({name})s")
+        result=execute_query(QueryInput(sql=sql,parameters=parameters,datasource=datasource,
             timeout_ms=3000,max_rows=body.sample_rows,max_bytes=1024*1024),x_semora_internal_token)
         return [tuple(json.dumps(v,sort_keys=True,default=str) for v in row)
                 for row in result["rows"] if all(v is not None for v in row)]
@@ -581,6 +597,11 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
             disjunction.append(exp.and_(*conjunction))
         tree=exp.select(*(exp.column(c,quoted=True) for c in body.target_columns)).from_(table_expr(body.target_table))
         tree=tree.where(exp.or_(*disjunction)).limit(len(batch))
+        for index, guard in enumerate(body.guards):
+            if guard.side == "target":
+                name = f"target_guard_{index}"
+                parameters[name] = guard.value
+                tree = tree.where(exp.EQ(this=exp.column(guard.field, quoted=True), expression=exp.Placeholder(this=name)))
         sql=tree.sql(dialect=dialect)
         for name in sorted(parameters, key=len, reverse=True):sql=sql.replace(f":{name}",f"%({name})s")
         result=execute_query(QueryInput(sql=sql,parameters=parameters,datasource=target,
@@ -589,6 +610,7 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
     secret=os.getenv("RELATIONSHIP_PROFILE_HMAC_KEY",os.getenv("INTERNAL_TOKEN","semora-dev-internal")).encode()
     signatures=sorted(hmac.new(secret,"\x1f".join(row).encode(),hashlib.sha256).hexdigest()[:24] for row in keys)[:64]
     return {"method":"indexed_directional_membership_v1","sample_budget":body.sample_rows,
+            "guards_applied":[g.model_dump() for g in body.guards],
             "source_nonnull_distinct_keys":len(keys),"matched_keys":len(set(keys)&matched),
             "directional_coverage":round(len(set(keys)&matched)/len(keys),6) if keys else 0,
             "target_uniqueness":"declared_constraint" if body.target_unique_index_confirmed else "unverified",

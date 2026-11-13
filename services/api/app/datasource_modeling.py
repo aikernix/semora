@@ -1102,6 +1102,7 @@ class ModelingService:
                 "source_index_confirmed": _indexed(source_table, candidate["source_columns"]),
                 "target_unique_index_confirmed": _indexed(target_table, candidate["target_columns"], unique=True),
                 "allow_bounded_unindexed": True,
+                "guards": candidate.get("condition_template", {}).get("guards", []),
             },
         )
 
@@ -1219,6 +1220,12 @@ class ModelingService:
                     polymorphic = any(field_roles.get(name) == "polymorphic_reference" for name in candidate["source_columns"])
                     discriminator_bound = any(g["side"] == "source" and field_roles.get(g["field"]) == "discriminator" for g in guards[0])
                     candidate["evidence"].append({"kind": "join_contract", "valid": not polymorphic or discriminator_bound, "guards": guards[0]})
+                    previous_profile = next((e.get("statistics", {}) for e in reversed(candidate["evidence"]) if e.get("kind") == "value_profile"), {})
+                    if guards[0] and all(e.get("query_outcome") == "usable" for e in analyses) and previous_profile.get("guards_applied") != guards[0]:
+                        try:
+                            candidate["evidence"].append(await fetch(candidate, "profile"))
+                        except Exception as exc:
+                            candidate["evidence"].append({"kind": "profile_unavailable", "reason": type(exc).__name__})
                 elif any(analyses):
                     candidate["evidence"] = [e for e in candidate["evidence"] if e.get("kind") != "join_contract"]
                     candidate["evidence"].append({"kind": "join_contract", "valid": False})

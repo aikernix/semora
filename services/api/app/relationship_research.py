@@ -5,7 +5,7 @@ import asyncio
 import json
 import os
 
-VERSION = "query-relationship-research-v4"
+VERSION = "query-relationship-research-v5"
 CONTRACT = """输出唯一JSON结构：
 {"requests":[{"candidate_id":"实际ID","kind":"metadata或definition或profile"}],"decisions":[{"candidate_id":"实际ID","supported":true,"target_role":"reference","alternative_unresolved":false,"confidence":0.95,"reason":"可核验的依据","query_outcome":"usable","exclusion_code":"","missing_evidence":[],"query_role":"连接的查询用途","additional_predicates":[]}]}。
 query_outcome只能是usable、exclude、needs_evidence：
@@ -22,6 +22,7 @@ SYSTEM = """角色：查询数据模型分析员。
 优先判断记录到实体主表、明细到主记录、关联表到两端实体的引用；不要把共享同一主实体的扩展表两两关联。视图到底表血缘、副本及无用途的重复身份映射应排除，不因字段相似就保留。
 同一表对的不同引用角色要保留。同一字段可连接多个有效目标，只有替代目标无法区分时alternative_unresolved=true。
 polymorphic_reference必须包含discriminator限定。空表、缺少外键或未声明唯一性本身不是否定证据，基数必须有依据。
+取样的guards_applied表示验证范围；未限定类型的全量取样不能直接否定带类型条件的连接，应按完整条件验证。
 可通过requests请求metadata（关联字段及约束）、definition（视图定义）、profile（限量匹配统计）；每种资料不会重复读取。明确不相关时直接exclude，不做无意义取证。
 """ + CONTRACT
 
