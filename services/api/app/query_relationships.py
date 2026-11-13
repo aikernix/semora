@@ -80,8 +80,7 @@ def triage(candidate, review, independent):
     """Only a specific, independently corroborated negative becomes exclusion."""
     negative = review.get("query_outcome") == "exclude" and independent.get("query_outcome") == "exclude"
     reason = review.get("exclusion_code")
-    if (negative and reason in EXCLUSION_CODES and independent.get("exclusion_code") in EXCLUSION_CODES
-            and min(review.get("confidence", 0), independent.get("confidence", 0)) >= .9):
+    if (negative and reason in EXCLUSION_CODES and independent.get("exclusion_code") in EXCLUSION_CODES):
         return reason
     return None
 

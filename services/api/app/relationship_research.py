@@ -5,27 +5,31 @@ import asyncio
 import json
 import os
 
-VERSION = "query-relationship-research-v3"
-SYSTEM = """角色：数据结构关系分析员。
-任务：生成可用于正确SQL的连接骨架，而非罗列字段相关性。根据表职责、行粒度、引用角色和完整连接条件判断每条候选。资料不足时请求具体资料，获得资料后继续判断。
-规则：同名和值相同不能单独证明关联；同一字段可以有多个有效目标。区分引用(reference)、身份映射(identity)、副本(replica)、未知(unknown)。仅在替代目标无法区分时标记alternative_unresolved。空表表示没有数据证据，不表示关系错误。字段注释中的明确引用可以作为文档证据，但不能自行猜测关联条件或唯一性。
-可请求：metadata（完整关联字段与约束）、definition（视图定义）、profile（限量键值匹配统计）。只使用给出的candidate_id；不要生成SQL或原始数据请求。重复请求不会带来新资料。
-输出JSON：{"requests":[{"candidate_id":"...","kind":"profile"}],"decisions":[{"candidate_id":"...","supported":true,"target_role":"reference","alternative_unresolved":false,"confidence":0.95,"reason":"简短证据和判断"}]}。
-每个候选最终都应提交判断；无法证明时supported=false并写清缺口。"""
-SYSTEM += """
-决策必须额外包含query_outcome(usable/exclude/needs_evidence)、exclusion_code、missing_evidence、query_role、additional_predicates。
-usable表示独立且有意义的查询连接；exclude仅用于明确不合理或对查询冗余的映射；needs_evidence必须明确缺少什么事实。confidence表示对本次判断的把握，不是关联成立的概率。
-排除码：meaning_mismatch(度量/日期/标志与实体标识含义不符)、replica(副本)、lineage_only(视图到底表的血缘)、redundant_identity(相同数据对象重复映射)、transitive_only(仅因共用主实体而推导的明细之间关联)、wrong_target(明确指向另一个对象)。缺证据不能伪装成排除。
-优先保留记录到实体主表、明细到主记录、关联表到两端实体的引用。扩展表共享主键不代表应互相JOIN；不要把所有同标识表两两相连。同一表对的不同引用角色要分别保留，不机械删除环路。
-连接若需要类型等附加条件必须完整表达：additional_predicates=[{"side":"source或target","field":"实际字段","operator":"eq","value":"有资料依据的固定值"}]；无附加条件用[]。polymorphic_reference必须明确discriminator条件，无法取得值时needs_evidence。不得猜测固定值；缺少条件资料时needs_evidence。不得把目标唯一性未知直接等同于关系不存在。
-例外码不适用时exclusion_code=""。missing_evidence为具体缺口列表；query_role简述这条连接的查询用途。仅通过已有资料判断，不使用特定行业规则。"""
-REVIEW_SYSTEM = """角色：关系证据复核员。
-任务：独立核对给出的字段映射是否被资料支持，不把分析员的结论当作事实。
-检查实体含义、引用方向、替代目标、数据副本、约束和数据反证。相同字段可以引用多个目标，样本不足或空表不构成反证。不能仅凭相同名称或相同值批准关系。
-输出JSON：{"decisions":[{"candidate_id":"...","supported":true,"target_role":"reference","alternative_unresolved":false,"confidence":0.95,"reason":"简短证据或具体缺口"}]}。"""
-REVIEW_SYSTEM += """
-同时核对查询用途、表职责、连接基数及附加条件是否完整。返回query_outcome(usable/exclude/needs_evidence)、exclusion_code、missing_evidence、query_role、additional_predicates；使用分析员相同的结构。confidence表示对本次判断的把握，明确排除也可以有高把握。排除码仅限meaning_mismatch、replica、lineage_only、redundant_identity、transitive_only、wrong_target。只有资料明确支持不合理或冗余时exclude，无法证明时needs_evidence。独立判断，不因分析员已选择目标或给出置信度就批准。
-视图与底表的投影血缘、数据副本不作为业务JOIN。不同实体的真正身份映射可以保留。不要把缺少外键或空表当成否定证据。"""
+VERSION = "query-relationship-research-v4"
+CONTRACT = """输出唯一JSON结构：
+{"requests":[{"candidate_id":"实际ID","kind":"metadata或definition或profile"}],"decisions":[{"candidate_id":"实际ID","supported":true,"target_role":"reference","alternative_unresolved":false,"confidence":0.95,"reason":"可核验的依据","query_outcome":"usable","exclusion_code":"","missing_evidence":[],"query_role":"连接的查询用途","additional_predicates":[]}]}。
+query_outcome只能是usable、exclude、needs_evidence：
+- usable：完整条件可用于查询，有实体引用或有意义的跨实体身份映射。
+- exclude：明确不相关、错误目标、血缘、副本或冗余连接；必须填exclusion_code。
+- needs_evidence：确实无法判断；必须在missing_evidence中列出具体缺口，不能用它代替明确否定。
+exclusion_code只能是meaning_mismatch、replica、lineage_only、redundant_identity、transitive_only、wrong_target；其他结论使用空字符串。
+target_role只能是reference、identity、replica、unknown。confidence表示对本次结论的把握，明确否定也可高把握。不要把supported=false直接转换为needs_evidence。
+additional_predicates是完整JOIN所需的附加条件：[{"side":"source或target","field":"实际字段","operator":"eq","value":"有证据的固定值"}]，没有条件则[]。不能猜字段和值；需要条件而资料缺失时needs_evidence。
+每个candidate_id都要返回结论。不得新增表、字段或SQL。"""
+
+SYSTEM = """角色：查询数据模型分析员。
+任务：根据表职责、记录粒度、字段用途、约束和数据证据建立可用的SQL连接骨架。
+优先判断记录到实体主表、明细到主记录、关联表到两端实体的引用；不要把共享同一主实体的扩展表两两关联。视图到底表血缘、副本及无用途的重复身份映射应排除，不因字段相似就保留。
+同一表对的不同引用角色要保留。同一字段可连接多个有效目标，只有替代目标无法区分时alternative_unresolved=true。
+polymorphic_reference必须包含discriminator限定。空表、缺少外键或未声明唯一性本身不是否定证据，基数必须有依据。
+可通过requests请求metadata（关联字段及约束）、definition（视图定义）、profile（限量匹配统计）；每种资料不会重复读取。明确不相关时直接exclude，不做无意义取证。
+""" + CONTRACT
+
+REVIEW_SYSTEM = """角色：查询连接独立复核员。
+任务：重新核对字段映射、查询用途、完整条件、表职责、基数和证据，不把分析员结论当事实。
+明确的度量/标志与实体标识含义不符、错误目标、纯血缘、副本或冗余连接应exclude，不要写成缺证据；只有确实无法判断时才needs_evidence。
+同一字段可关联多个目标；不同实体之间有用途的身份映射可以保留。空表不构成反证。检查多态引用附加条件，不批准不完整JOIN。
+""" + CONTRACT
 
 
 def encoded(value):
@@ -47,7 +51,7 @@ def batches(packets, max_bytes=24000, max_items=12):
         yield batch, True
 
 
-def decision(value):
+def decision(value, *, strict=False):
     if not isinstance(value, dict):
         return None
     confidence = value.get("confidence")
@@ -57,6 +61,17 @@ def decision(value):
         return None
     if type(value.get("alternative_unresolved")) is not bool:
         return None
+    if strict:
+        outcome = value.get("query_outcome")
+        from .query_relationships import EXCLUSION_CODES
+        if outcome not in {"usable", "exclude", "needs_evidence"}:
+            return None
+        if outcome == "exclude" and value.get("exclusion_code") not in EXCLUSION_CODES:
+            return None
+        if outcome == "needs_evidence" and not value.get("missing_evidence"):
+            return None
+        if not isinstance(value.get("additional_predicates"), list):
+            return None
     return {"supported": value["supported"], "confidence": max(0, min(1, confidence)),
             "target_role": value["target_role"], "alternative_unresolved": value["alternative_unresolved"],
             "reason": str(value.get("reason") or "")[:1000],
@@ -112,7 +127,7 @@ async def research(candidates, packet_for, fetch, model, persist, progress):
                         c["evidence"].append({"kind": "research_gap", "reason": type(exc).__name__})
                     break
                 for item in response.get("decisions", []):
-                    parsed = decision(item)
+                    parsed = decision(item, strict=True)
                     if parsed is not None and item.get("candidate_id") in current:
                         final[item["candidate_id"]] = parsed
                 added = False
@@ -145,7 +160,7 @@ async def research(candidates, packet_for, fetch, model, persist, progress):
                 value = final.get(c["id"])
                 if value:
                     c["evidence"].append({"kind": "model_semantic_review", **value})
-                    if value["supported"] and not any(e.get("kind") == "value_profile" for e in c["evidence"]):
+                    if value["query_outcome"] == "usable" and not any(e.get("kind") == "value_profile" for e in c["evidence"]):
                         try:
                             c["evidence"].append(await fetch(c, "profile"))
                         except Exception as exc:
@@ -155,18 +170,28 @@ async def research(candidates, packet_for, fetch, model, persist, progress):
             for group, fits_review in batches([packet_for(c) for c in supported], max_bytes=48000):
                 if not fits_review:
                     continue
-                try:
-                    result = await model.complete_json(REVIEW_SYSTEM, encoded({"candidates": group}))
-                    values = result.get("decisions", [])
-                    if not isinstance(values, list):
-                        continue
-                    for item in values:
-                        parsed = decision(item)
-                        if parsed is not None and item.get("candidate_id") in current:
-                            lookup[item["candidate_id"]]["evidence"].append({"kind": "independent_review", **parsed})
-                except Exception as exc:
-                    for c in supported:
-                        c["evidence"].append({"kind": "research_gap", "reason": type(exc).__name__})
+                allowed_ids = {p["candidate_id"] for p in group}
+                reviewed_ids = set()
+                for attempt in range(3):
+                    try:
+                        result = await model.complete_json(REVIEW_SYSTEM, encoded({
+                            "candidates": group, "required_decision_ids": sorted(allowed_ids - reviewed_ids),
+                            "format_repair": attempt > 0}))
+                        values = result.get("decisions", [])
+                        if not isinstance(values, list):
+                            continue
+                        for item in values:
+                            parsed = decision(item, strict=True)
+                            if parsed is not None and item.get("candidate_id") in allowed_ids:
+                                identifier = item["candidate_id"]
+                                lookup[identifier]["evidence"].append({"kind": "independent_review", **parsed})
+                                reviewed_ids.add(identifier)
+                        if reviewed_ids == allowed_ids:
+                            break
+                    except Exception as exc:
+                        if attempt == 2:
+                            for identifier in allowed_ids - reviewed_ids:
+                                lookup[identifier]["evidence"].append({"kind": "research_gap", "reason": type(exc).__name__})
             for c in entries:
                 if c["id"] in final:
                     c["evidence"].append({"kind": "research_complete", "version": VERSION})

@@ -11,7 +11,9 @@ def candidate(identifier):
 
 def verdict(identifier):
     return {"candidate_id": identifier, "supported": True, "confidence": .97,
-            "target_role": "reference", "alternative_unresolved": False, "reason": "supported by evidence"}
+            "target_role": "reference", "alternative_unresolved": False, "reason": "supported by evidence",
+            "query_outcome": "usable", "exclusion_code": "", "missing_evidence": [],
+            "query_role": "entity reference", "additional_predicates": []}
 
 
 def test_all_candidates_are_researched_and_foreign_keys_never_reenter_model_or_tools():
@@ -28,7 +30,7 @@ def test_all_candidates_are_researched_and_foreign_keys_never_reenter_model_or_t
             assert "foreign" not in ids
             assert len(user.encode()) < 48000
             calls.extend(ids)
-            if "可请求" in system and not all(any(e["kind"] == "value_profile" for e in p["evidence"]) for p in packets):
+            if "通过requests" in system and not all(any(e["kind"] == "value_profile" for e in p["evidence"]) for p in packets):
                 return {"requests": [{"candidate_id": i, "kind": "profile"} for i in ids], "decisions": []}
             return {"decisions": [verdict(i) for i in ids]}
 
