@@ -256,7 +256,6 @@ def discover_candidates(
                     _words(
                         target_columns_map.get(target_column, {}).get("description"),
                         target_columns_map.get(target_column, {}).get("comment"),
-                        target.get("description"),
                     )
                     - GENERIC_NAMES
                 )
@@ -297,7 +296,6 @@ def discover_candidates(
                             _words(
                                 target_columns_map.get(target_column, {}).get("description"),
                                 target_columns_map.get(target_column, {}).get("comment"),
-                                target.get("description"),
                             )
                             - GENERIC_NAMES
                         )
@@ -333,7 +331,6 @@ def discover_candidates(
                         _words(
                             target_columns_map.get(target_column, {}).get("description"),
                             target_columns_map.get(target_column, {}).get("comment"),
-                            target.get("description"),
                         )
                         - GENERIC_NAMES
                     )
@@ -345,7 +342,7 @@ def discover_candidates(
                                 "tokens": sorted(source_words & target_words)[:5],
                             }
                         )
-                if not chosen:
+                if not chosen or len(set(chosen)) != len(chosen):
                     continue
                 source_map_exact = {
                     str(column.get("name")): column for column in source.get("columns") or []
