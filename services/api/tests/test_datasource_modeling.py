@@ -58,6 +58,18 @@ def test_large_shared_primary_names_do_not_become_relationships():
     assert discover_candidates("source-a", tables) == []
 
 
+def test_storage_annotations_do_not_link_unrelated_meanings():
+    parent = table("parent", "alpha", [("a", "varchar", "事件编号；业务主键；原类型=VARCHAR2(40)")], primary=["a"])
+    child = table("child", "beta", [("b", "varchar", "对象类型；原类型=VARCHAR2(40)")], indexes=["b"])
+    assert discover_candidates("source", [parent, child]) == []
+
+
+def test_composite_mapping_cannot_reuse_a_source_column():
+    parent = table("parent", "alpha", [("a", "bigint", "关联编号"), ("b", "bigint", "关联编号")], primary=["a", "b"])
+    child = table("child", "beta", [("c", "bigint", "关联编号")], indexes=["c"])
+    assert discover_candidates("source", [parent, child]) == []
+
+
 def test_unique_composite_prefix_is_not_unique():
     from app.datasource_modeling import _indexed
     value = table("t", "t", [], primary=["tenant_id", "id"])
