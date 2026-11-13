@@ -91,16 +91,59 @@ def test_discovery_uses_evidence_after_complete_renaming(parent_name, key, child
     assert candidates[0]["status"] == "pending"
 
 
-def test_competing_targets_cannot_auto_accept_even_with_matching_values():
-    from app.datasource_modeling import profile_allows_acceptance
+def test_competing_targets_need_semantic_evidence_even_with_matching_values():
+    from app.relationship_evidence import finalize_relationships
     targets = [table(f"p{i}", f"p{i}", [("key", "bigint", "实体标识")], primary=["key"])
                for i in range(2)]
     source = table("child", "child", [("key", "bigint", "实体标识")], indexes=["key"])
     candidates = discover_candidates("a", [source] + targets)
     proposals = [c for c in candidates if c["source_table_id"] == "child"]
     assert len(proposals) == 2
-    assert all(not profile_allows_acceptance(c, {"source_nonnull_distinct_keys": 200,
-                    "directional_coverage": 1}) for c in proposals)
+    for candidate in proposals:
+        candidate["evidence"].append({"kind": "value_profile", "statistics": {
+            "source_nonnull_distinct_keys": 200, "directional_coverage": 1}})
+    finalize_relationships(proposals)
+    assert all(c["status"] == "pending" for c in proposals)
+
+
+def test_multiple_independent_targets_confirm_after_all_evidence_is_collected():
+    from app.relationship_evidence import finalize_relationships
+    proposals = []
+    for role in ("reference", "identity"):
+        proposals.append({"status": "pending", "confidence": .7, "evidence_grade": "medium",
+                          "evidence": [
+            {"kind": "competition", "ambiguous": True},
+            {"kind": "value_profile", "statistics": {"source_nonnull_distinct_keys": 100,
+                                                       "directional_coverage": .99}},
+            {"kind": "model_semantic_review", "supported": True, "confidence": .96,
+             "target_role": role, "alternative_unresolved": False}]})
+    finalize_relationships(proposals)
+    assert all(c["status"] == "accepted" for c in proposals)
+    # A later, concrete semantic diagnosis can still withhold confirmation.
+    proposals[0]["evidence"][-2]["target_role"] = "replica"
+    finalize_relationships(proposals)
+    assert proposals[0]["status"] == "pending"
+    assert proposals[1]["status"] == "accepted"
+
+
+def test_explicit_comment_reference_and_different_chinese_wording_are_recalled():
+    parent = table("registry", "registry", [("opaque", "bigint", "机构编号")], primary=["opaque"])
+    child = table("events", "events", [("owner", "bigint", "经办机构"),
+                                         ("ref", "bigint", "外部编号；registry.opaque")])
+    candidates = discover_candidates("source", [parent, child])
+    assert {tuple(c["source_columns"]) for c in candidates} == {("owner",), ("ref",)}
+    explicit = next(c for c in candidates if c["source_columns"] == ["ref"])
+    assert any(e["kind"] == "explicit_field_reference" for e in explicit["evidence"])
+
+
+def test_final_confirmation_keeps_missing_samples_and_unresolved_alternatives_pending():
+    from app.relationship_evidence import finalize_relationships
+    candidate = {"status": "pending", "confidence": .7, "evidence_grade": "medium", "evidence": [
+        {"kind": "model_semantic_review", "supported": True, "confidence": .99,
+         "target_role": "reference", "alternative_unresolved": False}]}
+    finalize_relationships([candidate])
+    assert candidate["status"] == "pending"
+    assert "value_verification_missing" in candidate["evidence"][-1]["reasons"]
 
 
 def test_retire_only_obsolete_unconfirmed_candidates():

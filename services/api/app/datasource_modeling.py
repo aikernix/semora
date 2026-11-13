@@ -18,8 +18,9 @@ import psycopg
 
 from .datasource_table_storage import tables_digest
 from .mdl_export import column_type
+from .relationship_evidence import recall_field_pairs, finalize_relationships
 
-GENERATOR_VERSION = "source-ontology-v2"
+GENERATOR_VERSION = "source-ontology-v3"
 PROFILE_VERSION = "indexed-directional-v1"
 TERMINAL = {"completed", "completed_with_pending", "failed", "cancelled"}
 GENERIC_NAMES = {"id", "code", "name", "type", "status", "date"}
@@ -408,6 +409,27 @@ def discover_candidates(
                 )
                 if item["id"] not in result or result[item["id"]]["confidence"] < confidence:
                     result[item["id"]] = item
+    for source, column, target, field, explicit in recall_field_pairs(
+        [{**t, "_source_id": datasource_a} for t in tables_a],
+        [{**t, "_source_id": datasource_b} for t in tables_b],
+    ):
+        if not column_type(column) or column_type(column) != column_type(field):
+            continue
+        evidence = [{"kind": "explicit_field_reference" if explicit else "semantic_recall"},
+                    {"kind": "type_compatible"}, {"kind": "target_unique_constraint"},
+                    {"kind": "source_index", "confirmed": _indexed(source, [column["name"]])},
+                    {"kind": "target_unique_index", "confirmed": True}]
+        item = _candidate(datasource_a, datasource_b, source, [column["name"]], target,
+                          [field["name"]], scope, evidence, .9 if explicit else .75,
+                          domain=domain)
+        previous = result.get(item["id"])
+        if previous and previous["evidence_grade"] == "foreign_key":
+            continue
+        if previous:
+            previous["evidence"].extend(evidence[:1])
+            previous["confidence"] = max(previous["confidence"], item["confidence"])
+        else:
+            result[item["id"]] = item
     return sorted(
         converge_candidates(list(result.values())),
         key=lambda item: (item["status"] != "accepted", -item["confidence"], item["id"]),
@@ -424,33 +446,24 @@ def converge_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]
             continue
         kinds = {entry["kind"] for entry in item["evidence"]}
         # A physical name shared across tables is not an entity reference.
-        if not kinds & {"entity_key_name", "comment_semantics", "comment_field_match"}:
+        if not kinds & {"entity_key_name", "comment_semantics", "comment_field_match", "semantic_recall", "explicit_field_reference"}:
             continue
         key = (item["source_datasource_id"], item["source_table_id"], tuple(item["source_columns"]))
         groups.setdefault(key, []).append(item)
     output = list(authoritative)
-    known = {(i["source_datasource_id"], i["source_table_id"], tuple(i["source_columns"])) for i in authoritative}
     for key, values in groups.items():
-        if key in known:
-            continue
+        # A declared FK does not prohibit another independently evidenced link.
         values.sort(key=lambda i: (-i["confidence"], i["id"]))
         competing = len(values) > 1 and values[0]["confidence"] - values[1]["confidence"] < 0.1
         # Broad collisions are discovery noise, not thousands of review tasks.
         if competing and len(values) > 3:
-            continue
+            values = [item for item in values if any(e["kind"] in
+                      {"explicit_field_reference", "entity_key_name", "semantic_recall"}
+                      for e in item["evidence"])]
         for item in values[:3]:
             item["evidence"].append({"kind": "competition", "ambiguous": competing})
             output.append(item)
     return output
-
-
-def profile_allows_acceptance(candidate, profile, *, cross_source=False):
-    evidence = candidate["evidence"]
-    return (
-        not any(e.get("kind") == "competition" and e.get("ambiguous") for e in evidence)
-        and profile.get("source_nonnull_distinct_keys", 0) >= (200 if cross_source else 100)
-        and profile.get("directional_coverage", 0) >= (0.99 if cross_source else 0.98)
-    )
 
 
 def package_relations(
@@ -1073,12 +1086,15 @@ class ModelingService:
         if not structured_model.configured:
             return
         system = """角色：数据关系语义核对员。
-任务：仅判断程序给出的候选关系是否表达同一实体标识，并判断基数。
-要求：不得新增、改写表或字段；不得生成 SQL。证据不足时 semantic_supported=false。
-输出 JSON：{"decisions":[{"candidate_id":"...","semantic_supported":true,"cardinality":"N:1","confidence":0.9,"reason":"简短原因"}]}。"""
+任务：判断候选是否构成合理的实体引用或身份映射，并判断基数及目标角色。
+要求：字段同名、值相同不能证明业务关联。区分实体引用(reference)、身份映射(identity)、数据副本(replica)、无法判断(unknown)。同一字段允许关联多个目标，仅在目标互相替代且证据不能区分时标记 alternative_unresolved=true。不得新增表、字段或SQL；证据不足时 semantic_supported=false。
+输出 JSON：{"decisions":[{"candidate_id":"...","semantic_supported":true,"target_role":"reference","alternative_unresolved":false,"cardinality":"N:1","confidence":0.9,"reason":"简短原因"}]}。"""
         reviewable = sorted(
             candidates,
-            key=lambda item: (item["status"] != "accepted", -item["confidence"]),
+            key=lambda item: (
+                not any(e["kind"] == "explicit_field_reference" for e in item["evidence"]),
+                not any(e["kind"] == "value_profile" and e.get("statistics", {}).get("source_nonnull_distinct_keys", 0) >= 100 for e in item["evidence"]),
+                -item["confidence"]),
         )[:60]
         for candidate in candidates:
             if candidate not in reviewable:
@@ -1125,6 +1141,11 @@ class ModelingService:
                             ],
                         },
                         "program_evidence": candidate["evidence"],
+                        "other_targets": [{"table": c["target_table_id"], "fields": c["target_columns"]}
+                                          for c in candidates if c["source_datasource_id"] == candidate["source_datasource_id"]
+                                          and c["source_table_id"] == candidate["source_table_id"]
+                                          and c["source_columns"] == candidate["source_columns"]
+                                          and c["id"] != candidate["id"]][:3],
                     }
                 )
             try:
@@ -1152,9 +1173,12 @@ class ModelingService:
                 candidate["evidence"].append(
                     {
                         "kind": "model_semantic_review",
-                        "supported": bool(decision.get("semantic_supported")),
+                        "supported": decision.get("semantic_supported") is True,
                         "confidence": max(0, min(1, float(confidence))),
                         "reason": str(decision.get("reason") or "")[:300],
+                        "target_role": decision.get("target_role") if decision.get("target_role") in
+                                       {"reference", "identity", "replica", "unknown"} else "unknown",
+                        "alternative_unresolved": decision.get("alternative_unresolved") is not False,
                     }
                 )
                 if decision.get("cardinality") in {"1:1", "1:N", "N:1", "N:N"}:
@@ -1254,17 +1278,12 @@ class ModelingService:
                                 },
                             }
                         )
-                        if profile_allows_acceptance(candidate, profile):
-                            candidate.update(
-                                status="accepted",
-                                evidence_grade="strong",
-                                confidence=max(candidate["confidence"], 0.98),
-                            )
                     except Exception as exc:
                         candidate["evidence"].append(
                             {"kind": "profile_unavailable", "reason": type(exc).__name__}
                         )
                 await self._semantic_review(candidates, {identifier: table_map})
+                finalize_relationships(candidates)
                 self.repository.replace_candidates(candidates, schema_hash, schema_hash)
                 self._update(job, "building", "building", 88)
                 current_candidates = [
@@ -1598,17 +1617,12 @@ class ModelingService:
                             "statistics": {k: v for k, v in profile.items() if k != "signature"},
                         }
                     )
-                    if profile_allows_acceptance(candidate, profile, cross_source=True):
-                        candidate.update(
-                            status="accepted",
-                            evidence_grade="strong",
-                            confidence=max(candidate["confidence"], 0.99),
-                        )
                 except Exception as exc:
                     candidate["evidence"].append(
                         {"kind": "profile_unavailable", "reason": type(exc).__name__}
                     )
             await self._semantic_review(candidates, {left.id: lmap, right.id: rmap})
+            finalize_relationships(candidates, cross_source=True)
             self.repository.replace_candidates(
                 candidates, left_package["schema_hash"], right_package["schema_hash"]
             )
