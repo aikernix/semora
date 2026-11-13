@@ -76,6 +76,7 @@ async def research(candidates, packet_for, fetch, model, persist, progress):
             seen = set()
             final = {}
             failures = 0
+            format_repairs = 0
             while True:
                 payload = [packet_for(c) for c in entries]
                 if len(encoded(payload).encode()) > 48000:
@@ -83,7 +84,9 @@ async def research(candidates, packet_for, fetch, model, persist, progress):
                         c["evidence"].append({"kind": "research_gap", "reason": "evidence_context_oversized"})
                     break
                 try:
-                    response = await model.complete_json(SYSTEM, encoded({"candidates": payload}))
+                    response = await model.complete_json(SYSTEM, encoded({"candidates": payload,
+                        "required_decision_ids": [key for key in current if key not in final],
+                        "format_repair": format_repairs > 0}))
                     if not isinstance(response.get("decisions", []), list) or not isinstance(response.get("requests", []), list):
                         raise ValueError("invalid research response")
                 except Exception as exc:
@@ -113,6 +116,12 @@ async def research(candidates, packet_for, fetch, model, persist, progress):
                     c["evidence"].append(evidence)
                     added = True
                 if not added:
+                    missing = [key for key in current if key not in final]
+                    if missing and format_repairs < 2:
+                        format_repairs += 1
+                        continue
+                    for key in missing:
+                        lookup[key]["evidence"].append({"kind": "research_gap", "reason": "missing_valid_structured_decision"})
                     break
                 await persist(entries)
             # Give every supported mapping a database check even if the analyst
