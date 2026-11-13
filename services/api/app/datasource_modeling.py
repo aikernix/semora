@@ -198,6 +198,23 @@ def discover_candidates(
     tables_b = tables_b or tables_a
     scope = "single_source" if datasource_a == datasource_b else "cross_source"
     result: dict[str, dict[str, Any]] = {}
+    # Learn boilerplate from this catalog rather than hard-coding field names.
+    key_documents = []
+    for table in tables_b:
+        columns = {c.get("name"): c for c in table.get("columns") or []}
+        for key in _keys(table, unique_only=True):
+            for name in key:
+                column = columns.get(name, {})
+                key_documents.append(_words(column.get("description"), column.get("comment")))
+    frequencies: dict[str, int] = {}
+    for document in key_documents:
+        for token in document:
+            frequencies[token] = frequencies.get(token, 0) + 1
+    boilerplate = {token for token, count in frequencies.items()
+                   if count >= max(4, len(key_documents) * 0.15)}
+
+    def semantic_words(*values):
+        return _words(*values) - boilerplate
     # Declared foreign keys are authoritative for the source-local package.
     if scope == "single_source":
         lookup = {table["id"]: table for table in tables_a}
@@ -235,7 +252,7 @@ def discover_candidates(
             name = str(column.get("name") or "").lower()
             if name:
                 source_columns_by_name.setdefault(name, []).append((source, column))
-            for token in _words(column.get("description"), column.get("comment")) - GENERIC_NAMES:
+            for token in semantic_words(column.get("description"), column.get("comment")) - GENERIC_NAMES:
                 source_columns_by_token.setdefault(token, []).append((source, column))
     for target in tables_b:
         target_columns_map = {
@@ -253,7 +270,7 @@ def discover_candidates(
                     f"{stem}_id",
                 }
                 target_tokens = (
-                    _words(
+                    semantic_words(
                         target_columns_map.get(target_column, {}).get("description"),
                         target_columns_map.get(target_column, {}).get("comment"),
                     )
@@ -293,7 +310,7 @@ def discover_candidates(
                     matched_by_name = name is not None
                     if not name:
                         target_tokens = (
-                            _words(
+                            semantic_words(
                                 target_columns_map.get(target_column, {}).get("description"),
                                 target_columns_map.get(target_column, {}).get("comment"),
                             )
@@ -302,7 +319,7 @@ def discover_candidates(
                         semantic_options = []
                         for source_name, source_column in source_map.items():
                             overlap = target_tokens & (
-                                _words(
+                                semantic_words(
                                     source_column.get("description"), source_column.get("comment")
                                 )
                                 - GENERIC_NAMES
@@ -324,11 +341,11 @@ def discover_candidates(
                         semantic += 0.62
                         evidence.append({"kind": "comment_field_match", "field": name})
                     source_words = (
-                        _words(source_map[name].get("description"), source_map[name].get("comment"))
+                        semantic_words(source_map[name].get("description"), source_map[name].get("comment"))
                         - GENERIC_NAMES
                     )
                     target_words = (
-                        _words(
+                        semantic_words(
                             target_columns_map.get(target_column, {}).get("description"),
                             target_columns_map.get(target_column, {}).get("comment"),
                         )
