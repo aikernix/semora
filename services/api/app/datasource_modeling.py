@@ -1164,7 +1164,7 @@ class ModelingService:
                     by_id[proposal["id"]]["evidence"].append(hint)
 
         def packet_for(candidate):
-            def card(source_id, table_id, fields):
+            def card(source_id, table_id, fields, *, directory=True):
                 table = table_maps[source_id][table_id]
                 selected = [c for c in table.get("columns", []) if c["name"] in fields]
                 return {"table_id": table_id, "name": table.get("name"),
@@ -1176,14 +1176,14 @@ class ModelingService:
                                         if name in fields or value == "discriminator"},
                         "context_fields": [c for c in table.get("columns", [])
                                            if roles.get(source_id, {}).get(table_id, {}).get("field_roles", {}).get(c["name"]) == "discriminator"],
-                        "field_directory": [c["name"] for c in table.get("columns", [])]}
+                        **({"field_directory": [c["name"] for c in table.get("columns", [])]} if directory else {})}
             return {"candidate_id": candidate["id"],
                     "source": card(candidate["source_datasource_id"], candidate["source_table_id"], candidate["source_columns"]),
                     "target": card(candidate["target_datasource_id"], candidate["target_table_id"], candidate["target_columns"]),
                     "key_pairs": candidate["key_pairs"],
                     "evidence": factual_evidence(candidate["evidence"]),
                     "other_targets": [{"candidate_id": c["id"],
-                                       "target": card(c["target_datasource_id"], c["target_table_id"], c["target_columns"])}
+                                       "target": card(c["target_datasource_id"], c["target_table_id"], c["target_columns"], directory=False)}
                                       for c in candidates if c["source_table_id"] == candidate["source_table_id"]
                                       and c["source_datasource_id"] == candidate["source_datasource_id"]
                                       and c["source_columns"] == candidate["source_columns"] and c["id"] != candidate["id"]][:8]}
