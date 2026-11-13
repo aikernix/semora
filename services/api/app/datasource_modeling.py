@@ -19,7 +19,7 @@ import psycopg
 from .datasource_table_storage import tables_digest
 from .mdl_export import column_type
 
-GENERATOR_VERSION = "source-ontology-v1"
+GENERATOR_VERSION = "source-ontology-v2"
 PROFILE_VERSION = "indexed-directional-v1"
 TERMINAL = {"completed", "completed_with_pending", "failed", "cancelled"}
 GENERIC_NAMES = {"id", "code", "name", "type", "status", "date"}
@@ -56,7 +56,7 @@ def _keys(table: dict[str, Any], unique_only: bool = False) -> list[list[str]]:
 def _indexed(table: dict[str, Any], columns: list[str], *, unique: bool = False) -> bool:
     wanted = [str(value).lower() for value in columns]
     return any(
-        [str(value).lower() for value in key[: len(wanted)]] == wanted
+        [str(value).lower() for value in (key if unique else key[: len(wanted)])] == wanted
         for key in _keys(table, unique_only=unique)
     )
 
@@ -229,6 +229,7 @@ def discover_candidates(
     # Index key registry keeps discovery sparse for large schemas.
     source_columns_by_name: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
     source_columns_by_token: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    source_tables_by_id = {table["id"]: table for table in tables_a}
     for source in tables_a:
         for column in source.get("columns") or []:
             name = str(column.get("name") or "").lower()
@@ -272,7 +273,7 @@ def discover_candidates(
                     }
                 )
             for source_id in set.intersection(*candidate_sets) if candidate_sets else set():
-                source = next(table for table in tables_a if table["id"] == source_id)
+                source = source_tables_by_id[source_id]
                 if datasource_a == datasource_b and source_id == target["id"]:
                     continue
                 source_map = {
@@ -391,8 +392,47 @@ def discover_candidates(
                 if item["id"] not in result or result[item["id"]]["confidence"] < confidence:
                     result[item["id"]] = item
     return sorted(
-        result.values(),
+        converge_candidates(list(result.values())),
         key=lambda item: (item["status"] != "accepted", -item["confidence"], item["id"]),
+    )
+
+
+def converge_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep bounded, evidenced alternatives per source key, never arbitrary pairs."""
+    groups: dict[tuple, list[dict[str, Any]]] = {}
+    authoritative = []
+    for item in candidates:
+        if item["evidence_grade"] == "foreign_key":
+            authoritative.append(item)
+            continue
+        kinds = {entry["kind"] for entry in item["evidence"]}
+        # A physical name shared across tables is not an entity reference.
+        if not kinds & {"entity_key_name", "comment_semantics", "comment_field_match"}:
+            continue
+        key = (item["source_datasource_id"], item["source_table_id"], tuple(item["source_columns"]))
+        groups.setdefault(key, []).append(item)
+    output = list(authoritative)
+    known = {(i["source_datasource_id"], i["source_table_id"], tuple(i["source_columns"])) for i in authoritative}
+    for key, values in groups.items():
+        if key in known:
+            continue
+        values.sort(key=lambda i: (-i["confidence"], i["id"]))
+        competing = len(values) > 1 and values[0]["confidence"] - values[1]["confidence"] < 0.1
+        # Broad collisions are discovery noise, not thousands of review tasks.
+        if competing and len(values) > 3:
+            continue
+        for item in values[:3]:
+            item["evidence"].append({"kind": "competition", "ambiguous": competing})
+            output.append(item)
+    return output
+
+
+def profile_allows_acceptance(candidate, profile, *, cross_source=False):
+    evidence = candidate["evidence"]
+    return (
+        not any(e.get("kind") == "competition" and e.get("ambiguous") for e in evidence)
+        and profile.get("source_nonnull_distinct_keys", 0) >= (200 if cross_source else 100)
+        and profile.get("directional_coverage", 0) >= (0.99 if cross_source else 0.98)
     )
 
 
@@ -422,7 +462,8 @@ def package_relations(
                     "label": "自动发现的关联",
                     "from": left["object"],
                     "to": right["object"],
-                    "joinType": "many_to_one",
+                    "joinType": {"1:1": "one_to_one", "1:N": "one_to_many",
+                                 "N:1": "many_to_one", "N:N": "many_to_many"}[candidate["cardinality"]],
                     "cardinality": candidate["cardinality"],
                     "condition": " AND ".join(pairs),
                     "metadata": {
@@ -547,6 +588,23 @@ class ModelingRepository:
                 (list(TERMINAL),),
             ).fetchall()
         return [self.get_job(row[0]) for row in ids]
+
+    def retire_pending(self, source_id, retained_ids):
+        """Discard obsolete automatic proposals; explicit decisions survive rebuilds."""
+        for identifier, item in list(self.memory_candidates.items()):
+            if (item["source_datasource_id"] == source_id
+                    and item["scope"] == "single_source" and item["status"] == "pending"
+                    and not item.get("reviewed_by")
+                    and identifier not in retained_ids):
+                del self.memory_candidates[identifier]
+        if self.dsn:
+            with self._connect() as connection:
+                connection.execute(
+                    """DELETE FROM semora_meta.relationship_candidates
+                    WHERE source_datasource_id=%s AND scope='single_source'
+                    AND status='pending' AND reviewed_by IS NULL AND NOT (id=ANY(%s))""",
+                    (source_id, list(retained_ids)),
+                )
 
     def replace_candidates(
         self, candidates: list[dict[str, Any]], source_hash: str, target_hash: str
@@ -951,7 +1009,8 @@ class ModelingService:
             try:
                 package = self.repository.get_package(source.id)
                 current_hash = tables_digest(source.scan_result["tables"])
-                if package["schema_hash"] == current_hash and package["status"] != "stale":
+                if (package["schema_hash"] == current_hash and package["status"] != "stale"
+                        and package.get("generator_version") == GENERATOR_VERSION):
                     continue
             except KeyError:
                 pass
@@ -1151,6 +1210,7 @@ class ModelingService:
                     tables,
                     declared_relationships=item.scan_result.get("foreign_keys") or [],
                 )
+                self.repository.retire_pending(identifier, {c["id"] for c in candidates})
                 self.repository.replace_candidates(candidates, schema_hash, schema_hash)
                 self._update(job, "profiling", "profiling", 68)
                 started = time.monotonic()
@@ -1177,10 +1237,7 @@ class ModelingService:
                                 },
                             }
                         )
-                        if (
-                            profile.get("source_nonnull_distinct_keys", 0) >= 100
-                            and profile.get("directional_coverage", 0) >= 0.98
-                        ):
+                        if profile_allows_acceptance(candidate, profile):
                             candidate.update(
                                 status="accepted",
                                 evidence_grade="strong",
@@ -1524,10 +1581,7 @@ class ModelingService:
                             "statistics": {k: v for k, v in profile.items() if k != "signature"},
                         }
                     )
-                    if (
-                        profile.get("source_nonnull_distinct_keys", 0) >= 200
-                        and profile.get("directional_coverage", 0) >= 0.99
-                    ):
+                    if profile_allows_acceptance(candidate, profile, cross_source=True):
                         candidate.update(
                             status="accepted",
                             evidence_grade="strong",

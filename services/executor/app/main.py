@@ -559,7 +559,10 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
     observed=[]
     for descending in (False,True):
         observed.extend(run_sample(body.datasource,body.source_table,body.source_columns,descending))
-    keys=list(dict.fromkeys(observed))[:body.sample_rows]
+    # Interleave both ends so the ascending window cannot consume the budget.
+    middle=len(observed)//2
+    interleaved=[value for pair in zip(observed[:middle],observed[middle:]) for value in pair]
+    keys=list(dict.fromkeys(interleaved+observed))[:body.sample_rows]
     target=body.target_datasource or body.datasource
     matched=set()
     dialect=adapter_registry.dialect(target)

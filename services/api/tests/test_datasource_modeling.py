@@ -52,6 +52,56 @@ def test_generic_integer_id_overlap_does_not_create_relation():
     assert discover_candidates("source-a", [left, right]) == []
 
 
+def test_large_shared_primary_names_do_not_become_relationships():
+    tables = [table(f"public.t{i}", f"t{i}", [("serialno", "bigint", "流水号")],
+                    primary=["serialno"]) for i in range(161)]
+    assert discover_candidates("source-a", tables) == []
+
+
+def test_unique_composite_prefix_is_not_unique():
+    from app.datasource_modeling import _indexed
+    value = table("t", "t", [], primary=["tenant_id", "id"])
+    assert _indexed(value, ["tenant_id"])
+    assert not _indexed(value, ["tenant_id"], unique=True)
+
+
+@pytest.mark.parametrize("parent_name,key,child_name,reference", [
+    ("customer", "id", "orders", "customer_id"),
+    ("alpha_registry", "opaque_key", "beta_events", "owner_token"),
+    ("资产", "唯一标识", "流水", "归属标识"),
+])
+def test_discovery_uses_evidence_after_complete_renaming(parent_name, key, child_name, reference):
+    parent = table("parent", parent_name, [(key, "bigint", "归属实体唯一标识")], primary=[key])
+    child = table("child", child_name, [(reference, "bigint", "归属实体唯一标识")], indexes=[reference])
+    candidates = discover_candidates("arbitrary-source", [parent, child])
+    assert len(candidates) == 1
+    assert candidates[0]["key_pairs"] == [{"source": reference, "target": key}]
+    assert candidates[0]["status"] == "pending"
+
+
+def test_competing_targets_cannot_auto_accept_even_with_matching_values():
+    from app.datasource_modeling import profile_allows_acceptance
+    targets = [table(f"p{i}", f"p{i}", [("key", "bigint", "实体标识")], primary=["key"])
+               for i in range(2)]
+    source = table("child", "child", [("key", "bigint", "实体标识")], indexes=["key"])
+    candidates = discover_candidates("a", [source] + targets)
+    proposals = [c for c in candidates if c["source_table_id"] == "child"]
+    assert len(proposals) == 2
+    assert all(not profile_allows_acceptance(c, {"source_nonnull_distinct_keys": 200,
+                    "directional_coverage": 1}) for c in proposals)
+
+
+def test_retire_only_obsolete_unconfirmed_candidates():
+    repository = ModelingRepository(dsn="")
+    repository.memory_candidates = {
+        name: {"source_datasource_id": "a", "scope": "single_source", "status": status}
+        for name, status in [("noise", "pending"), ("keep", "pending"),
+                             ("accepted", "accepted"), ("rejected", "rejected")]
+    }
+    repository.retire_pending("a", {"keep"})
+    assert set(repository.memory_candidates) == {"keep", "accepted", "rejected"}
+
+
 def test_comments_can_recall_differently_named_indexed_fields_without_auto_accepting():
     customer = table(
         "public.customer",
