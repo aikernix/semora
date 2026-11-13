@@ -25,6 +25,10 @@ def restore_checkpoint(candidate, previous, source_hash, target_hash):
     for key in ("evidence", "status", "condition_template", "cardinality", "confidence", "evidence_grade"):
         if key in previous:
             candidate[key] = previous[key]
+    contract = next((e for e in reversed(previous.get("evidence", []))
+                     if e.get("kind") == "join_contract"), None)
+    if contract and contract.get("valid") and "guards" in contract:
+        candidate["condition_template"] = {**candidate.get("condition_template", {}), "guards": contract["guards"]}
     return True
 CONTRACT = """输出唯一JSON结构：
 {"requests":[{"candidate_id":"实际ID","kind":"metadata或definition或profile"}],"decisions":[{"candidate_id":"实际ID","supported":true,"target_role":"reference","alternative_unresolved":false,"confidence":0.95,"reason":"可核验的依据","query_outcome":"usable","exclusion_code":"","missing_evidence":[],"query_role":"连接的查询用途","additional_predicates":[]}]}。
