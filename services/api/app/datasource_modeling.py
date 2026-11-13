@@ -214,7 +214,10 @@ def discover_candidates(
                    if count >= max(4, len(key_documents) * 0.15)}
 
     def semantic_words(*values):
-        return _words(*values) - boilerplate
+        # The leading description names the field; trailing clauses often hold
+        # storage types, migration notes and constraints rather than its meaning.
+        meanings = [re.split(r"[;；\n]", str(value or ""), maxsplit=1)[0] for value in values]
+        return {word for word in _words(*meanings) - boilerplate if not word.isdigit()}
     # Declared foreign keys are authoritative for the source-local package.
     if scope == "single_source":
         lookup = {table["id"]: table for table in tables_a}
