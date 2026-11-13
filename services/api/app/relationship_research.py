@@ -59,7 +59,7 @@ async def research(candidates, packet_for, fetch, model, persist, progress):
                         for e in c["evidence"])]
     packets = [packet_for(c) for c in todo]
     lookup = {c["id"]: c for c in todo}
-    workers = max(1, min(8, int(os.getenv("RELATIONSHIP_MODEL_CONCURRENCY", "4"))))
+    workers = max(1, min(16, int(os.getenv("RELATIONSHIP_MODEL_CONCURRENCY", "4"))))
     semaphore = asyncio.Semaphore(workers)
     completed = 0
 

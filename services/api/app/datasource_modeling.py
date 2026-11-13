@@ -1127,7 +1127,10 @@ class ModelingService:
                     "key_pairs": candidate["key_pairs"],
                     "evidence": [e for e in candidate["evidence"] if e.get("kind") not in
                                  {"source_code", "confirmation", "model_review_deferred", "research_complete"}],
-                    "other_targets": [{"table": c["target_table_id"], "fields": c["target_columns"]}
+                    "other_targets": [{"candidate_id": c["id"], "status": c["status"],
+                                       "target": card(c["target_datasource_id"], c["target_table_id"], c["target_columns"]),
+                                       "role": next((e.get("target_role") for e in reversed(c["evidence"])
+                                                    if e.get("kind") == "independent_review"), None)}
                                       for c in candidates if c["source_table_id"] == candidate["source_table_id"]
                                       and c["source_datasource_id"] == candidate["source_datasource_id"]
                                       and c["source_columns"] == candidate["source_columns"] and c["id"] != candidate["id"]][:8]}
