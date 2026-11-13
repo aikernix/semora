@@ -113,6 +113,7 @@ def test_multiple_independent_targets_confirm_after_all_evidence_is_collected():
         proposals.append({"status": "pending", "confidence": .7, "evidence_grade": "medium",
                           "evidence": [
             {"kind": "competition", "ambiguous": True},
+            {"kind": "target_unique_index", "confirmed": True},
             {"kind": "value_profile", "statistics": {"source_nonnull_distinct_keys": 100,
                                                        "directional_coverage": .99}},
             {"kind": "model_semantic_review", "supported": True, "confidence": .96,
@@ -120,14 +121,14 @@ def test_multiple_independent_targets_confirm_after_all_evidence_is_collected():
     finalize_relationships(proposals)
     assert all(c["status"] == "accepted" for c in proposals)
     # A later, concrete semantic diagnosis can still withhold confirmation.
-    proposals[0]["evidence"][-2]["target_role"] = "replica"
+    next(e for e in proposals[0]["evidence"] if e["kind"] == "model_semantic_review")["target_role"] = "replica"
     finalize_relationships(proposals)
     assert proposals[0]["status"] == "pending"
     assert proposals[1]["status"] == "accepted"
 
 
 def test_explicit_comment_reference_and_different_chinese_wording_are_recalled():
-    parent = table("registry", "registry", [("opaque", "bigint", "机构编号")], primary=["opaque"])
+    parent = table("registry", "registry", [("opaque", "bigint", "机构编号")], primary=["opaque"], description="机构资料")
     child = table("events", "events", [("owner", "bigint", "经办机构"),
                                          ("ref", "bigint", "外部编号；registry.opaque")])
     candidates = discover_candidates("source", [parent, child])

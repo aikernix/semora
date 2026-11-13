@@ -21,6 +21,10 @@ def recall_field_pairs(sources, targets):
     for table in targets:
         columns = {c["name"]: c for c in table.get("columns") or []}
         constraints = (table.get("primary_keys") or []) + (table.get("unique_constraints") or [])
+        if not constraints and str(table.get("kind", "")).upper() == "VIEW":
+            # Views can be recalled by an explicit reference or entity-key name;
+            # their uniqueness remains unproven and cannot be auto-confirmed.
+            constraints = [{"columns": [name]} for name in columns]
         for constraint in constraints:
             names = constraint.get("columns") or []
             if len(names) != 1 or names[0] not in columns:
@@ -43,11 +47,18 @@ def recall_field_pairs(sources, targets):
             # clauses after the field's descriptive title.
             text = str(column.get("description") or column.get("comment") or "").lower()
             explicit = set()
+            named = set()
             for index, (target, field, _) in enumerate(keys):
                 pattern = r"(?<![\w])" + re.escape(str(target.get("name", ""))) + r"\." + re.escape(field["name"]) + r"(?![\w])"
                 if re.search(pattern, text, re.I):
                     explicit.add(index)
                     scores[index] += 100
+                parts = re.findall(r"[a-z0-9]+", str(target.get("name", "")).lower())
+                source_name = re.sub(r"[^a-z0-9]", "", column["name"].lower())
+                field_name = re.sub(r"[^a-z0-9]", "", field["name"].lower())
+                if any(len(part) >= 3 and source_name == part + field_name for part in parts):
+                    named.add(index)
+                    scores[index] += 20
             ranked = []
             for index, score in scores.items():
                 target, field, target_tokens = keys[index]
@@ -56,7 +67,13 @@ def recall_field_pairs(sources, targets):
                 overlap = tokens & target_tokens & postings.keys()
                 # One meaningful bigram (e.g. an entity name) is sufficient for
                 # recall, but never sufficient for automatic confirmation.
-                if index not in explicit and not overlap:
+                if index not in explicit and index not in named and not overlap:
+                    continue
+                if index not in explicit and index not in named:
+                    table_tokens = meaning_tokens({"description": target.get("description") or target.get("comment")})
+                    if len(overlap) < 2 and not overlap & table_tokens:
+                        continue
+                if not (target.get("primary_keys") or target.get("unique_constraints")) and index not in explicit and index not in named:
                     continue
                 ranked.append((score, target["id"], field["name"], index))
             ranked.sort(key=lambda value: (-value[0], value[1], value[2]))
@@ -80,6 +97,8 @@ def finalize_relationships(candidates, *, cross_source=False):
         review = next((e for e in reversed(evidence)
                        if e.get("kind") == "model_semantic_review"), {})
         reasons = []
+        if not any(e.get("kind") == "target_unique_index" and e.get("confirmed") is True for e in evidence):
+            reasons.append("target_uniqueness_unverified")
         if not profile:
             reasons.append("value_verification_missing")
         elif profile.get("source_nonnull_distinct_keys", 0) < (200 if cross_source else 100):

@@ -418,7 +418,7 @@ def discover_candidates(
         evidence = [{"kind": "explicit_field_reference" if explicit else "semantic_recall"},
                     {"kind": "type_compatible"}, {"kind": "target_unique_constraint"},
                     {"kind": "source_index", "confirmed": _indexed(source, [column["name"]])},
-                    {"kind": "target_unique_index", "confirmed": True}]
+                    {"kind": "target_unique_index", "confirmed": _indexed(target, [field["name"]], unique=True)}]
         item = _candidate(datasource_a, datasource_b, source, [column["name"]], target,
                           [field["name"]], scope, evidence, .9 if explicit else .75,
                           domain=domain)
