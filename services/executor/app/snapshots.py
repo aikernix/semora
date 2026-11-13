@@ -47,7 +47,7 @@ def supplement_native(result, dsn, kind):
                         if tc: item[7].append(tc)
                     constraints=list(grouped.values())
                 for t in tables.values():
-                    t.update(primary_keys=[], unique_constraints=[], foreign_keys=[])
+                    t.update(primary_keys=[], unique_constraints=[], foreign_keys=[], indexes=[])
                 fks=[]
                 for schema,name,key,ctype,cols,ts,tn,target,definition in constraints:
                     t=tables.get((schema,name))
@@ -59,6 +59,36 @@ def supplement_native(result, dsn, kind):
                         fks.append({**entry,"source_table":f"{schema}.{name}","origin":"declared"})
                     elif ctype in {"p","u"}: t["primary_keys" if ctype=="p" else "unique_constraints"].append(entry)
                 result["foreign_keys"]=fks
+                if kind == "postgresql":
+                    cur.execute("""SELECT n.nspname,c.relname,ci.relname,i.indisunique,
+                        array_agg(a.attname ORDER BY k.ord)
+                        FROM pg_index i JOIN pg_class c ON c.oid=i.indrelid
+                        JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_class ci ON ci.oid=i.indexrelid
+                        JOIN LATERAL unnest(i.indkey) WITH ORDINALITY k(attnum,ord) ON true
+                        JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=k.attnum
+                        WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+                        AND i.indpred IS NULL AND i.indexprs IS NULL AND has_table_privilege(c.oid,'SELECT')
+                        GROUP BY n.nspname,c.relname,ci.relname,i.indisunique""")
+                    index_rows = cur.fetchall()
+                else:
+                    cur.execute("""SELECT TABLE_SCHEMA,TABLE_NAME,INDEX_NAME,NON_UNIQUE,
+                        SEQ_IN_INDEX,COLUMN_NAME FROM information_schema.STATISTICS
+                        WHERE TABLE_SCHEMA=DATABASE() ORDER BY TABLE_SCHEMA,TABLE_NAME,INDEX_NAME,SEQ_IN_INDEX""")
+                    grouped_indexes = {}
+                    for schema,name,index_name,non_unique,position,column in cur.fetchall():
+                        if not index_name or not column:
+                            continue
+                        entry = grouped_indexes.setdefault(
+                            (schema,name,index_name), [schema,name,index_name,not bool(non_unique),[]]
+                        )
+                        entry[4].append(column)
+                    index_rows = list(grouped_indexes.values())
+                for schema,name,index_name,unique,columns in index_rows:
+                    table = tables.get((schema,name))
+                    if table and columns:
+                        table["indexes"].append(
+                            {"name":index_name,"columns":list(columns),"unique":bool(unique)}
+                        )
             connection.rollback()
     except Exception as exc:
         # Never represent inaccessible constraints as absent, nor erase the original scan.

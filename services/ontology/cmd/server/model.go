@@ -58,21 +58,28 @@ type DefaultFilter struct {
 	Value    any    `json:"value"`
 }
 
+type SourcePackageRef struct {
+	DataSourceID string `json:"dataSourceId"`
+	SchemaHash   string `json:"schemaHash"`
+	Version      string `json:"version"`
+}
+
 type Ontology struct {
-	SourceScopes     map[string]string `json:"sourceScopes,omitempty"`
-	Metadata         map[string]any    `json:"metadata,omitempty"`
-	Domain           string            `json:"domain"`
-	Name             string            `json:"name"`
-	Version          string            `json:"version"`
-	Description      string            `json:"description,omitempty"`
-	ScopeField       string            `json:"scopeField,omitempty"`
-	TimeField        string            `json:"timeField,omitempty"`
-	DataSourceID     string            `json:"dataSourceId"`
-	KnowledgeBaseIDs []string          `json:"knowledgeBaseIds"`
-	Objects          []ObjectClass     `json:"objects"`
-	Relations        []RelationClass   `json:"relations"`
-	Metrics          []Metric          `json:"metrics"`
-	DefaultFilters   []DefaultFilter   `json:"defaultFilters,omitempty"`
+	SourceScopes      map[string]string  `json:"sourceScopes,omitempty"`
+	Metadata          map[string]any     `json:"metadata,omitempty"`
+	Domain            string             `json:"domain"`
+	Name              string             `json:"name"`
+	Version           string             `json:"version"`
+	Description       string             `json:"description,omitempty"`
+	ScopeField        string             `json:"scopeField,omitempty"`
+	TimeField         string             `json:"timeField,omitempty"`
+	DataSourceID      string             `json:"dataSourceId"`
+	KnowledgeBaseIDs  []string           `json:"knowledgeBaseIds"`
+	Objects           []ObjectClass      `json:"objects"`
+	Relations         []RelationClass    `json:"relations"`
+	Metrics           []Metric           `json:"metrics"`
+	DefaultFilters    []DefaultFilter    `json:"defaultFilters,omitempty"`
+	SourcePackageRefs []SourcePackageRef `json:"sourcePackageRefs,omitempty"`
 }
 
 type Snapshot struct {

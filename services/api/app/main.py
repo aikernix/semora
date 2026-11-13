@@ -1,8 +1,13 @@
 from __future__ import annotations
 from semora_agent.prompts import PROBE_JSON, PROBE_TOOL
 
+import base64
+import binascii
+import hashlib
+import hmac
 import json
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import Literal
 from urllib.parse import quote
@@ -38,7 +43,7 @@ from .knowledge_settings import KnowledgeConfigInput, knowledge_settings
 from .settings import settings_service
 from .model_settings import model_settings, ModelConfigInput
 from .candidate_extraction import CandidateExtractionError, candidate_extractor
-from .database_routes import router as database_router
+from .database_routes import router as database_router, modeling_service
 
 
 @asynccontextmanager
@@ -50,6 +55,7 @@ async def lifespan(_: FastAPI):
         saver = await context_manager.__aenter__()
         workflow.configure_checkpointer(saver)
     workflow.resume_pending_alignments()
+    modeling_service.resume()
     try:
         yield
     finally:
@@ -127,6 +133,12 @@ class DataSourceCreate(BaseModel):
     type: Literal["postgresql", "oracle", "mysql", "sqlserver", "oceanbase", "goldendb", "vastbase", "jdbc"] = "postgresql"
     secret_ref: str | None = Field(default=None, pattern=r"^DATASOURCE_[A-Z0-9_]+_URL$", max_length=200)
     connection: "DataSourceConnection | None" = None
+    test_receipt: str | None = Field(default=None, max_length=2000)
+
+
+class DataSourceRename(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    name: str = Field(min_length=1, max_length=200)
 
 
 DataSourceConnection = DatabaseConnection
@@ -139,6 +151,59 @@ def connection_payload(body: DataSourceCreate):
         raise HTTPException(422, "请填写与数据库类型一致的连接参数")
     return {**body.connection.model_dump(exclude={"password"}),
             "password": body.connection.password.get_secret_value()}
+
+
+def _connection_receipt_secret() -> bytes:
+    return os.getenv(
+        "DATASOURCE_TEST_RECEIPT_SECRET", os.getenv("INTERNAL_TOKEN", "semora-dev-internal")
+    ).encode()
+
+
+def _connection_fingerprint(body: DataSourceCreate) -> str:
+    canonical = json.dumps(
+        {"type": body.type, "connection": connection_payload(body)},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hmac.new(_connection_receipt_secret(), canonical, hashlib.sha256).hexdigest()
+
+
+def _issue_connection_receipt(body: DataSourceCreate) -> str:
+    payload = json.dumps(
+        {"fingerprint": _connection_fingerprint(body), "expires_at": int(time.time()) + 600},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    signature = hmac.new(_connection_receipt_secret(), payload, hashlib.sha256).digest()
+    encoded_payload = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+    encoded_signature = base64.urlsafe_b64encode(signature).decode().rstrip("=")
+    return encoded_payload + "." + encoded_signature
+
+
+def _verify_connection_receipt(body: DataSourceCreate) -> None:
+    if not body.test_receipt:
+        raise HTTPException(422, "请先完成当前连接参数的连接测试")
+    try:
+        encoded_payload, encoded_signature = body.test_receipt.split(".", 1)
+        payload = base64.urlsafe_b64decode(
+            (encoded_payload + "=" * (-len(encoded_payload) % 4)).encode()
+        )
+        signature = base64.urlsafe_b64decode(
+            (encoded_signature + "=" * (-len(encoded_signature) % 4)).encode()
+        )
+        expected = hmac.new(_connection_receipt_secret(), payload, hashlib.sha256).digest()
+        value = json.loads(payload)
+        if not isinstance(value, dict):
+            raise ValueError("invalid receipt payload")
+    except (ValueError, TypeError, json.JSONDecodeError, binascii.Error):
+        raise HTTPException(422, "连接测试凭证无效，请重新测试") from None
+    if not hmac.compare_digest(signature, expected):
+        raise HTTPException(422, "连接测试凭证无效，请重新测试")
+    if int(value.get("expires_at", 0)) < int(time.time()):
+        raise HTTPException(422, "连接测试凭证已过期，请重新测试")
+    if not hmac.compare_digest(str(value.get("fingerprint", "")), _connection_fingerprint(body)):
+        raise HTTPException(422, "连接参数已变化，请重新测试")
 
 
 @app.get("/api/v1/settings/knowledge")
@@ -746,13 +811,18 @@ def datasources() -> list[dict]:
 @app.post("/api/v1/datasources", status_code=201)
 async def create_datasource(body: DataSourceCreate) -> dict:
     if body.connection is None and body.secret_ref:
-        return datasource_service.repository.create(body.name, body.type, body.secret_ref).public()
+        item=datasource_service.repository.create(body.name, body.type, body.secret_ref)
+        job=modeling_service.start(item.id)
+        return {**item.public(),"onboarding_job_id":job["id"]}
+    _verify_connection_receipt(body)
     identifier = str(uuid4())
     item = DataSourceRecord(id=identifier, name=body.name, type=body.type,
                             secret_ref=f"DATASOURCE_{identifier.replace('-', '').upper()}_URL")
     try:
         await datasource_service.executor.configuration(item, connection_payload(body))
-        return datasource_service.repository.save(item).public()
+        item=datasource_service.repository.save(item)
+        job=modeling_service.start(item.id)
+        return {**item.public(),"onboarding_job_id":job["id"]}
     except RuntimeError as exc:
         raise HTTPException(502, str(exc)) from exc
 
@@ -770,25 +840,20 @@ async def get_datasource_connection(datasource_id: str):
 @app.put("/api/v1/datasources/{datasource_id}")
 async def update_datasource(datasource_id: str, body: DataSourceCreate):
     try:
+        datasource_service.repository.get(datasource_id)
+    except KeyError as exc:
+        raise HTTPException(404, "数据源不存在") from exc
+    raise HTTPException(409, "数据源连接参数创建后不可修改；请新建数据源")
+
+
+@app.patch("/api/v1/datasources/{datasource_id}")
+async def rename_datasource(datasource_id: str, body: DataSourceRename):
+    try:
         item = datasource_service.repository.get(datasource_id)
-        if body.type != item.type:
-            raise HTTPException(422, "数据库类型不可直接更改，请新增数据源")
-        old = await datasource_service.executor.configuration(item)
-        payload = connection_payload(body)
-        await datasource_service.executor.configuration(item, payload)
         item.name = body.name
-        item.status = "unverified"
-        item.scan_result.pop("capabilities",None)
-        item.scan_result.get("connection",{}).pop("probes",None)
-        if any(old.get(key) != payload.get(key) for key in ("host", "port", "database", "username", "schema_name", "catalog", "driver_id", "jdbc_url", "properties", "compatibility_mode", "service_kind")):
-            item.objects = 0
-            item.scan_result = {}
-            item.last_scan_at = None
         return datasource_service.repository.save(item).public()
     except KeyError as exc:
         raise HTTPException(404, "数据源不存在") from exc
-    except RuntimeError as exc:
-        raise HTTPException(502, str(exc)) from exc
 
 
 @app.post("/api/v1/datasource-connection-test")
@@ -799,7 +864,10 @@ async def test_datasource_configuration(body: DataSourceCreate, datasource_id: s
                                  secret_ref="DATASOURCE_CONNECTION_PREVIEW_URL"))
         if item.type != body.type:
             raise HTTPException(422, "数据库类型不一致")
-        return await datasource_service.executor.configuration(item, connection_payload(body), test=True)
+        result = await datasource_service.executor.configuration(
+            item, connection_payload(body), test=True
+        )
+        return {**result, "test_receipt": _issue_connection_receipt(body)}
     except KeyError as exc:
         raise HTTPException(404, "数据源不存在") from exc
     except RuntimeError as exc:

@@ -69,6 +69,48 @@ def field_candidates(objects, text, limit=48):
     return [{"object": o, "field": f, "label": label} for _, _, o, f, label in rows[:limit]]
 
 
+def lightweight_object_catalog(available, relations, text, limit=50):
+    """Rank a large catalog deterministically; relationship expansion uses stored graph edges."""
+    folded = text.casefold()
+
+    def tokens(value):
+        value = str(value or "").casefold()
+        words = set(re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]{2,}", value))
+        for word in list(words):
+            if re.search(r"[\u4e00-\u9fff]", word):
+                words.update(word[index:index + 2] for index in range(len(word) - 1))
+        return words
+
+    query_tokens = tokens(text)
+    ranked = []
+    for name, obj in available.items():
+        labels = [name, obj.get("label"), obj.get("description"), *(obj.get("aliases") or [])]
+        labels += [prop.get("label") for prop in obj.get("properties", [])]
+        object_tokens = set().union(*(tokens(value) for value in labels))
+        overlap = len(query_tokens & object_tokens)
+        exact = sum(3 for value in labels if value and str(value).casefold() in folded)
+        ranked.append((overlap + exact, name))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    seeds = [name for score, name in ranked if score > 0][:20]
+    if not seeds:
+        seeds = [name for _, name in ranked[: min(20, limit)]]
+    selected = list(seeds)
+    selected_set = set(selected)
+    for relation in relations:
+        if len(selected) >= limit:
+            break
+        if relation.get("from") in selected_set and relation.get("to") in available:
+            selected_set.add(relation["to"]); selected.append(relation["to"])
+        elif relation.get("to") in selected_set and relation.get("from") in available:
+            selected_set.add(relation["from"]); selected.append(relation["from"])
+    for _, name in ranked:
+        if len(selected) >= limit:
+            break
+        if name not in selected_set:
+            selected_set.add(name); selected.append(name)
+    return {name: available[name] for name in selected}
+
+
 
 def input_binding(run, ontology, scope):
     facts = {f.question_id: {"field": f.field, "value": f.value} for f in run.user_answers}
@@ -172,6 +214,9 @@ def authorized_objects(run, ontology):
 
 def context_packet(workflow, run, ontology, names):
     available = authorized_objects(run, ontology)
+    identity_objects = lightweight_object_catalog(
+        available, ontology.get("relations", []), getattr(run, "question", ""), limit=50
+    )
     selected = set(names)
     if not selected <= available.keys():
         raise ValueError("上下文请求包含未发布或未授权对象")
@@ -253,7 +298,7 @@ def context_packet(workflow, run, ontology, names):
         "selected_objects": sorted(selected),
         "identity_catalog": [
             {"object": o["name"], "label": o.get("label"), "primaryKey": o["primaryKey"]}
-            for o in available.values()
+            for o in identity_objects.values()
             if o.get("primaryKey")
         ],
         "objects": objects,
@@ -284,6 +329,11 @@ async def prepare_context(workflow, run, question, ontology, scope):
     facts = run.agent_memory.get("confirmed_fact_context") or [
         f.model_dump(mode="json") for f in run.user_answers
     ]
+    catalog = lightweight_object_catalog(
+        available,
+        ontology.get("relations", []),
+        question + " " + " ".join(str(f.get("value", "")) for f in facts),
+    )
     retrieval = await retrieve_knowledge(
         workflow.model, question, kb_ids, client=knowledge_service,
         confirmed_answers=facts, evidence=run.evidence,
@@ -312,17 +362,17 @@ async def prepare_context(workflow, run, question, ontology, scope):
                     "knowledge": packet["knowledge"],
                     "object_catalog": [
                         {k: o.get(k) for k in ("name", "label", "description", "primaryKey")}
-                        for o in available.values()
+                        for o in catalog.values()
                     ],
                     "field_candidates": field_candidates(
-                        available, question + " " + " ".join(str(f.get("value", "")) for f in facts)
+                        catalog, question + " " + " ".join(str(f.get("value", "")) for f in facts)
                     ),
                     "relation_catalog": {
                         "columns": ["name", "from", "to"],
                         "rows": [
                             [r.get(k) for k in ("name", "from", "to")]
                             for r in ontology.get("relations", [])
-                            if r.get("from") in available and r.get("to") in available
+                            if r.get("from") in catalog and r.get("to") in catalog
                         ],
                     },
                     "metrics": [

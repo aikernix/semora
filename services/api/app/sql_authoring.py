@@ -318,9 +318,16 @@ async def analyse(workflow, run, question, ontology, scope):
         toolkit.task_guard = guard
         task = context(workflow, run, question)
         task["clarification_policy"] = policy
+        from .prepared_context import lightweight_object_catalog
+        available_catalog = {obj["name"]: obj for obj in ontology.get("objects", [])}
+        bounded_catalog = lightweight_object_catalog(
+            available_catalog,
+            ontology.get("relations", []),
+            question + " " + " ".join(str(item.get("value", "")) for item in confirmed_fact_context(workflow, run)),
+        )
         task["object_catalog"] = [
             {k: o.get(k) for k in ("name", "label", "description")}
-            for o in ontology.get("objects", [])
+            for o in bounded_catalog.values()
         ]
         task["knowledge_base_ids"] = ontology.get("knowledgeBaseIds", [])
         submission = create_model(

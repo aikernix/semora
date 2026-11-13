@@ -51,7 +51,7 @@ class OntologyCoreClient:
         # Go encodes nil slices as null. Consumers use collection semantics even
         # when a domain has no formal metrics, relations or knowledge bindings.
         ontology = dict(value)
-        for key in ('objects', 'relations', 'metrics', 'knowledgeBaseIds', 'defaultFilters'):
+        for key in ('objects', 'relations', 'metrics', 'knowledgeBaseIds', 'defaultFilters', 'sourcePackageRefs'):
             items = ontology.get(key)
             if items is not None and not isinstance(items, list):
                 raise OntologyCoreError(f'本体字段 {key} 必须是数组')

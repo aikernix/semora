@@ -111,7 +111,7 @@ def test_connection_preview_role_policy():
     assert required_roles("POST", "/api/v1/datasource-connection-test") == frozenset({"data_steward", "admin"})
 
 
-def test_create_edit_and_preview_keep_id_reference_and_no_password_in_metadata(monkeypatch):
+def test_create_requires_current_test_receipt_and_connection_is_immutable(monkeypatch):
     from app import main
     from app.datasources import DataSourceRepository, DataSourceService
 
@@ -128,22 +128,24 @@ def test_create_edit_and_preview_keep_id_reference_and_no_password_in_metadata(m
     client = TestClient(main.app)
     body = {"name": "Reporting", "type": "mysql", "connection": {
         **settings().model_dump(exclude={"password"}), "password": "only-executor"}}
+    assert client.post("/api/v1/datasources", json=body).status_code == 422
+    preview = client.post("/api/v1/datasource-connection-test", json=body)
+    assert preview.status_code == 200
+    body["test_receipt"] = preview.json()["test_receipt"]
     response = client.post("/api/v1/datasources", json=body)
     assert response.status_code == 201
     item = response.json()
     assert "only-executor" not in response.text
     record = service.repository.get(item["id"])
     assert "only-executor" not in repr(record)
-    record.objects = 12
-    record.scan_result = {"tables": ["old"]}
     body["connection"]["host"] = "new.example"
     body["connection"]["password"] = ""
+    assert client.post("/api/v1/datasources", json=body).status_code == 422
     response = client.put(f"/api/v1/datasources/{item['id']}", json=body)
-    assert response.status_code == 200
-    assert response.json()["id"] == item["id"]
-    assert response.json()["secret_ref"] == item["secret_ref"]
-    assert response.json()["objects"] == 0
-    assert record.scan_result == {}
+    assert response.status_code == 409
+    assert client.patch(
+        f"/api/v1/datasources/{item['id']}", json={"name": "Renamed"}
+    ).json()["name"] == "Renamed"
     before = len(service.repository.list())
     response = client.post("/api/v1/datasource-connection-test", json=body)
     assert response.status_code == 200

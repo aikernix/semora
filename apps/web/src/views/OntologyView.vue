@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RelationIcon } from 'tdesign-icons-vue-next'
 import { api } from '../api'
 
@@ -7,6 +7,11 @@ const domains = ref<any[]>([])
 const selectedDomain = ref('')
 const ontology = ref<any>(null)
 const dataSources = ref<any[]>([])
+const sourcePackages = ref<Record<string, any>>({})
+const crossLeft = ref('')
+const crossRight = ref('')
+const crossJob = ref<any>(null)
+let crossTimer: ReturnType<typeof setTimeout> | undefined
 const saving = ref(false)
 const error = ref('')
 const message = ref('')
@@ -34,7 +39,44 @@ async function loadDomains() {
   const [items, sources] = await Promise.all([api.get('/ontology/configurations'), api.get('/datasources')])
   domains.value = items.data
   dataSources.value = sources.data
+  const packages: Record<string, any> = {}
+  await Promise.all(dataSources.value.map(async source => {
+    try { packages[source.id] = (await api.get(`/datasources/${source.id}/source-ontology`)).data }
+    catch (reason: any) { if (reason.response?.status !== 404) throw reason }
+  }))
+  sourcePackages.value = packages
   if (!domains.value.some(item => item.domain === selectedDomain.value)) selectedDomain.value = domains.value[0]?.domain || ''
+}
+const boundSourceIds = computed(() => new Set([
+  ...(ontology.value?.sourcePackageRefs || []).map((item: any) => item.dataSourceId),
+  ...(ontology.value?.objects || []).map((item: any) => item.dataSourceId || ontology.value?.dataSourceId),
+].filter(Boolean)))
+const crossSources = computed(() => dataSources.value.filter(source => boundSourceIds.value.has(source.id) && ['ready','ready_with_pending'].includes(sourcePackages.value[source.id]?.status)))
+async function bindSource(sourceId: string) {
+  saving.value = true; error.value = ''
+  try { ontology.value = mapped((await api.post(`/ontology/configurations/${selectedDomain.value}/sources/${sourceId}`)).data); message.value = '数据源本体包已绑定。' }
+  catch (reason: any) { error.value = reason.response?.data?.detail || '绑定数据源失败' }
+  finally { saving.value = false }
+}
+async function pollCross() {
+  if (!crossJob.value) return
+  try {
+    crossJob.value = (await api.get(`/ontology/configurations/${selectedDomain.value}/cross-source-analysis/${crossJob.value.id}`)).data
+    if (!['completed','completed_with_pending','failed'].includes(crossJob.value.status)) crossTimer = setTimeout(() => { void pollCross() }, 1500)
+    else { await loadDomain(); message.value = crossJob.value.status === 'failed' ? '' : '跨源关系分析已完成。'; if (crossJob.value.error) error.value = crossJob.value.error }
+  } catch (reason: any) { error.value = reason.response?.data?.detail || '无法读取跨源分析状态' }
+}
+async function analyzeCrossSource() {
+  error.value = ''
+  try { crossJob.value = (await api.post(`/ontology/configurations/${selectedDomain.value}/cross-source-analysis`, { left_source_id: crossLeft.value, right_source_id: crossRight.value })).data; await pollCross() }
+  catch (reason: any) { error.value = reason.response?.data?.detail || '无法启动跨源分析' }
+}
+async function decideCrossCandidate(candidate: any, status: string) {
+  try {
+    const updated = (await api.put(`/relationship-candidates/${candidate.id}`, { status, note: '' })).data
+    Object.assign(candidate, updated)
+    if (status === 'accepted') await loadDomain()
+  } catch (reason: any) { error.value = reason.response?.data?.detail || '无法更新候选关系' }
 }
 async function loadDomain() {
   const domain = selectedDomain.value
@@ -141,6 +183,7 @@ async function deleteRelation() {
   finally { saving.value = false }
 }
 onMounted(load)
+onUnmounted(() => { if (crossTimer) clearTimeout(crossTimer) })
 </script>
 
 <template>
@@ -159,6 +202,31 @@ onMounted(load)
       <section class="domain-summary panel">
         <div class="domain-heading"><div><strong>{{ ontology.name }}</strong><small>{{ ontology.domain }}</small></div><t-tag variant="light" :theme="ontology.objects.length ? 'success' : 'default'">{{ ontology.objects.length ? '已配置' : '待配置' }}</t-tag></div>
         <div class="ontology-stats"><span>表映射 <b>{{ ontology.objects.length }}</b></span><span>关联关系 <b>{{ ontology.relations.length }}</b></span></div>
+      </section>
+      <section class="panel source-package-panel">
+        <div class="panel-title">数据源本体包</div>
+        <div class="package-list">
+          <article v-for="source in dataSources" :key="source.id" class="package-row">
+            <div><strong>{{ source.name }}</strong><small>{{ source.type }} · {{ sourcePackages[source.id]?.object_count || 0 }} 个对象 · {{ sourcePackages[source.id]?.relation_count || 0 }} 条关系</small></div>
+            <t-tag variant="light" :theme="sourcePackages[source.id] ? 'success' : 'default'">{{ sourcePackages[source.id]?.status || '尚未完成建模' }}</t-tag>
+            <t-button size="small" variant="outline" :disabled="saving || !sourcePackages[source.id] || boundSourceIds.has(source.id)" @click="bindSource(source.id)">{{ boundSourceIds.has(source.id) ? '已绑定' : '绑定到当前业务域' }}</t-button>
+          </article>
+        </div>
+        <div class="cross-analysis">
+          <div><strong>分析两个数据源的关联</strong><small>仅分析当前选择的两个已绑定数据源，不遍历其他数据源。</small></div>
+          <t-select v-model="crossLeft" placeholder="选择数据源 A" style="width:210px"><t-option v-for="source in crossSources" :key="source.id" :value="source.id" :label="source.name" /></t-select>
+          <t-select v-model="crossRight" placeholder="选择数据源 B" style="width:210px"><t-option v-for="source in crossSources.filter(item => item.id !== crossLeft)" :key="source.id" :value="source.id" :label="source.name" /></t-select>
+          <t-button :disabled="!crossLeft || !crossRight || !!crossJob && !['completed','completed_with_pending','failed'].includes(crossJob.status)" @click="analyzeCrossSource">分析关联</t-button>
+        </div>
+        <t-alert v-if="crossJob" :theme="crossJob.status === 'failed' ? 'error' : 'info'" :message="`跨源分析：${crossJob.phase} · ${crossJob.progress}%${crossJob.details?.accepted !== undefined ? ` · 自动采用 ${crossJob.details.accepted} 条，待确认 ${crossJob.details.pending} 条` : ''}`" />
+        <div v-if="crossJob?.candidates?.length" class="cross-candidates">
+          <article v-for="candidate in crossJob.candidates" :key="candidate.id">
+            <div><strong>{{ candidate.source_table_id }} → {{ candidate.target_table_id }}</strong>
+            <small>{{ candidate.source_columns.join(', ') }} ↔ {{ candidate.target_columns.join(', ') }} · {{ candidate.evidence_grade }} · 置信度 {{ candidate.confidence }} · {{ candidate.status }}</small></div>
+            <t-button v-if="candidate.status === 'pending'" size="small" variant="outline" @click="decideCrossCandidate(candidate, 'accepted')">采用</t-button>
+            <t-button v-if="candidate.status === 'pending'" size="small" variant="text" @click="decideCrossCandidate(candidate, 'rejected')">忽略</t-button>
+          </article>
+        </div>
       </section>
       <section class="panel model-panel">
         <div class="panel-title">表之间的关联关系</div>
@@ -210,6 +278,6 @@ onMounted(load)
 </template>
 
 <style scoped>
-.header-actions{display:flex;gap:10px;align-items:center}.domain-summary{margin-bottom:20px;overflow:hidden}.domain-heading{display:flex;justify-content:space-between;align-items:center;padding:20px 22px}.domain-heading strong{font-size:18px}.domain-heading small{display:block;color:var(--semora-muted);margin-top:6px}.ontology-stats{display:flex;border-top:1px solid var(--semora-line)}.ontology-stats span{flex:1;padding:14px 16px;text-align:center;color:var(--semora-muted)}.ontology-stats b{color:var(--semora-ink);margin-left:8px}.model-panel{overflow:hidden;margin-bottom:20px}.relation-list{display:grid;gap:16px;padding:18px}.relation-card{border:1px solid var(--semora-line);border-radius:10px;min-width:0;padding:18px}.relation-header{display:flex;justify-content:space-between;align-items:center;gap:12px}.relation-header small{display:block;margin-top:5px;color:var(--semora-muted);overflow-wrap:anywhere}.relation-actions{display:flex;flex:none}.relation-path{display:grid;grid-template-columns:minmax(0,1fr) 120px minmax(0,1fr);align-items:center;gap:16px;margin:18px 0}.table-node{background:var(--semora-page);border:1px solid var(--semora-line);border-radius:8px;padding:14px;overflow-wrap:anywhere}.table-node small{display:block;color:var(--semora-muted);margin-top:8px}.relation-link{display:flex;flex-direction:column;align-items:center;gap:6px;color:var(--semora-green)}.relation-link small{color:var(--semora-muted)}.relation-condition{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;font-size:12px}.relation-condition>span{color:var(--semora-muted)}.relation-condition code{overflow-wrap:anywhere;flex:1;min-width:0}.domain-form,.relation-form{display:flex;flex-direction:column;gap:20px;padding-top:6px}.domain-form label,.relation-form label{display:flex;flex-direction:column;gap:8px;min-width:0}.domain-form small,.relation-form small{color:var(--semora-muted);line-height:1.6}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.dialog-actions{display:flex;justify-content:flex-end;gap:10px}.empty-hint{padding:30px;text-align:center;color:var(--semora-muted)}
-@media(max-width:800px){.header-actions{flex-wrap:wrap}.page-header{flex-wrap:wrap;gap:16px}.relation-path{grid-template-columns:1fr}.relation-link svg{transform:rotate(90deg)}.form-grid{grid-template-columns:1fr}.relation-header{align-items:flex-start}}
+.header-actions{display:flex;gap:10px;align-items:center}.domain-summary{margin-bottom:20px;overflow:hidden}.domain-heading{display:flex;justify-content:space-between;align-items:center;padding:20px 22px}.domain-heading strong{font-size:18px}.domain-heading small{display:block;color:var(--semora-muted);margin-top:6px}.ontology-stats{display:flex;border-top:1px solid var(--semora-line)}.ontology-stats span{flex:1;padding:14px 16px;text-align:center;color:var(--semora-muted)}.ontology-stats b{color:var(--semora-ink);margin-left:8px}.source-package-panel{margin-bottom:20px;overflow:hidden}.package-list{display:grid}.package-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:14px;align-items:center;padding:14px 18px;border-top:1px solid var(--semora-line)}.package-row small,.cross-analysis small,.cross-candidates small{display:block;color:var(--semora-muted);margin-top:5px}.cross-analysis{display:flex;gap:12px;align-items:center;padding:18px;border-top:1px solid var(--semora-line);background:var(--semora-page)}.cross-analysis>div{flex:1}.cross-candidates{display:grid;gap:1px;background:var(--semora-line)}.cross-candidates article{display:flex;align-items:center;gap:8px;padding:12px 18px;background:var(--semora-surface)}.cross-candidates article>div{flex:1}.model-panel{overflow:hidden;margin-bottom:20px}.relation-list{display:grid;gap:16px;padding:18px}.relation-card{border:1px solid var(--semora-line);border-radius:10px;min-width:0;padding:18px}.relation-header{display:flex;justify-content:space-between;align-items:center;gap:12px}.relation-header small{display:block;margin-top:5px;color:var(--semora-muted);overflow-wrap:anywhere}.relation-actions{display:flex;flex:none}.relation-path{display:grid;grid-template-columns:minmax(0,1fr) 120px minmax(0,1fr);align-items:center;gap:16px;margin:18px 0}.table-node{background:var(--semora-page);border:1px solid var(--semora-line);border-radius:8px;padding:14px;overflow-wrap:anywhere}.table-node small{display:block;color:var(--semora-muted);margin-top:8px}.relation-link{display:flex;flex-direction:column;align-items:center;gap:6px;color:var(--semora-green)}.relation-link small{color:var(--semora-muted)}.relation-condition{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;font-size:12px}.relation-condition>span{color:var(--semora-muted)}.relation-condition code{overflow-wrap:anywhere;flex:1;min-width:0}.domain-form,.relation-form{display:flex;flex-direction:column;gap:20px;padding-top:6px}.domain-form label,.relation-form label{display:flex;flex-direction:column;gap:8px;min-width:0}.domain-form small,.relation-form small{color:var(--semora-muted);line-height:1.6}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.dialog-actions{display:flex;justify-content:flex-end;gap:10px}.empty-hint{padding:30px;text-align:center;color:var(--semora-muted)}
+@media(max-width:800px){.header-actions,.cross-analysis{flex-wrap:wrap}.page-header{flex-wrap:wrap;gap:16px}.package-row{grid-template-columns:1fr}.relation-path{grid-template-columns:1fr}.relation-link svg{transform:rotate(90deg)}.form-grid{grid-template-columns:1fr}.relation-header{align-items:flex-start}}
 </style>

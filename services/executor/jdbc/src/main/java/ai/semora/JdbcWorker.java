@@ -180,6 +180,17 @@ public final class JdbcWorker {
                 for(String n:unsupportedIndices){indices.remove(n);gaps.add(tableId+":conditional_or_expression_unique_index:"+n);}
                 List<Map<String,Object>> unique=new ArrayList<>();indices.forEach((k,v)->unique.add(map("name",k,"columns",new ArrayList<>(v.values()),"origin","unique_index")));t.put("unique_constraints",unique);
             }catch(SQLException e){gaps.add(tableId+":unique_constraints:"+e.getSQLState());}
+            if(!q.path("metadata_queries").has("constraints"))try { Map<String,SortedMap<Integer,String>> indices=new TreeMap<>();Map<String,Boolean> uniqueness=new HashMap<>();Set<String> unsupportedIndices=new HashSet<>();
+                try(ResultSet r=m.getIndexInfo(tc,ts,tn,false,false)) { while(r.next()) {
+                    if(r.getShort("TYPE")==DatabaseMetaData.tableIndexStatistic)continue;
+                    String n=r.getString("INDEX_NAME"),col=r.getString("COLUMN_NAME");
+                    String filter=r.getString("FILTER_CONDITION");
+                    if(n!=null&&(col==null||(filter!=null&&!filter.isEmpty())))unsupportedIndices.add(n);
+                    if(n!=null&&col!=null){indices.computeIfAbsent(n,k->new TreeMap<>()).put(r.getInt("ORDINAL_POSITION"),col);uniqueness.put(n,!r.getBoolean("NON_UNIQUE"));}
+                }}
+                for(String n:unsupportedIndices){indices.remove(n);gaps.add(tableId+":conditional_or_expression_index:"+n);}
+                List<Map<String,Object>> allIndices=new ArrayList<>();indices.forEach((k,v)->allIndices.add(map("name",k,"columns",new ArrayList<>(v.values()),"unique",uniqueness.getOrDefault(k,false))));t.put("indexes",allIndices);
+            }catch(SQLException e){gaps.add(tableId+":indexes:"+e.getSQLState());}
             tables.add(t);
             try { PROTOCOL.println(JSON.writeValueAsString(map("progress",map("completed_tables",tables.size(),"visible_tables",tableRows.size(),"phase","metadata")))); PROTOCOL.flush(); }
             catch(IOException e) { throw new SQLException("progress serialization failed","HY000"); }

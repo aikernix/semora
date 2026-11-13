@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import os
 import re
 import threading
@@ -512,39 +514,77 @@ def execution_progress(execution_id: str, x_semora_internal_token: str | None = 
 
 class ProfileInput(BaseModel):
     datasource: DataSourceInput
+    target_datasource: DataSourceInput | None = None
     source_table: str = Field(min_length=1,max_length=800)
     source_columns: list[str] = Field(min_length=1,max_length=8)
     target_table: str = Field(min_length=1,max_length=800)
     target_columns: list[str] = Field(min_length=1,max_length=8)
     sample_rows: int = Field(default=200,ge=10,le=500)
+    source_index_confirmed: bool = False
+    target_unique_index_confirmed: bool = False
 
 
 @app.post("/internal/v1/datasources/profile-relationship")
 def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None = Header(default=None)):
     require_internal_token(x_semora_internal_token)
     if len(body.source_columns)!=len(body.target_columns):raise HTTPException(422,"复合键字段数不一致")
-    dialect=adapter_registry.dialect(body.datasource)
-    def sample(table, columns):
-        # Identifiers are always quoted; samples never leave this service.
+    if not body.source_index_confirmed or not body.target_unique_index_confirmed:
+        raise HTTPException(422,"自动关系验证只允许使用已确认的来源索引和目标唯一索引")
+
+    def table_expr(table):
         parts=table.split(".")
         if any(not p or len(p)>255 for p in parts):raise HTTPException(422,"表标识无效")
-        tree=exp.select(*(exp.column(c,quoted=True) for c in columns)).from_(exp.Table(
+        return exp.Table(
             this=exp.to_identifier(parts[-1],quoted=True),
             db=exp.to_identifier(parts[-2],quoted=True) if len(parts)>1 else None,
-            catalog=exp.to_identifier(parts[-3],quoted=True) if len(parts)>2 else None)).limit(body.sample_rows)
+            catalog=exp.to_identifier(parts[-3],quoted=True) if len(parts)>2 else None)
+
+    def run_sample(datasource, table, columns, descending=False):
+        dialect=adapter_registry.dialect(datasource)
+        tree=exp.select(*(exp.column(c,quoted=True) for c in columns)).from_(table_expr(table))
+        tree=tree.where(exp.and_(*(exp.column(c,quoted=True).is_(exp.null()).not_() for c in columns)))
+        tree=tree.order_by(*(exp.Ordered(this=exp.column(c,quoted=True),desc=descending) for c in columns)).limit(body.sample_rows)
         from semora_contracts.sql_compat import apply_pagination
         pagination="baseline"
-        if adapter_registry.is_jdbc(body.datasource.type):
-            driver,_,_=jdbc_adapter.configuration(jdbc_adapter.settings(body.datasource))
+        if adapter_registry.is_jdbc(datasource.type):
+            driver,_,_=jdbc_adapter.configuration(jdbc_adapter.settings(datasource))
             pagination=driver["effective_pagination"]
         tree=apply_pagination(tree,dialect,pagination)
-        result=execute_query(QueryInput(sql=tree.sql(dialect=dialect),datasource=body.datasource,
+        result=execute_query(QueryInput(sql=tree.sql(dialect=dialect),datasource=datasource,
             timeout_ms=3000,max_rows=body.sample_rows,max_bytes=1024*1024),x_semora_internal_token)
-        return [tuple(json.dumps(v,sort_keys=True,default=str) for v in row) for row in result["rows"] if all(v is not None for v in row)]
-    left=sample(body.source_table,body.source_columns);right=sample(body.target_table,body.target_columns)
-    rset=set(right)
-    return {"method":"bounded_independent_samples","sample_budget_per_table":body.sample_rows,
-            "source_nonnull_sample_rows":len(left),"target_nonnull_sample_rows":len(right),
-            "target_sample_distinct_keys":len(rset),"source_keys_observed_in_target_sample":sum(k in rset for k in left),
-            "global_uniqueness":"not_established","global_referential_integrity":"not_established",
-            "warning":"独立采样中的缺失不代表全表无关联，样本唯一不代表全表唯一"}
+        return [tuple(json.dumps(v,sort_keys=True,default=str) for v in row)
+                for row in result["rows"] if all(v is not None for v in row)]
+
+    # Two index-ordered windows reduce first-page bias without random sorts or OFFSET.
+    observed=[]
+    for descending in (False,True):
+        observed.extend(run_sample(body.datasource,body.source_table,body.source_columns,descending))
+    keys=list(dict.fromkeys(observed))[:body.sample_rows]
+    target=body.target_datasource or body.datasource
+    matched=set()
+    dialect=adapter_registry.dialect(target)
+    batch_size=100 if len(body.target_columns)>1 else 200
+    for start in range(0,len(keys),batch_size):
+        batch=keys[start:start+batch_size]
+        parameters={};disjunction=[]
+        for row_index,row in enumerate(batch):
+            conjunction=[]
+            for column_index,(column,value) in enumerate(zip(body.target_columns,row)):
+                name=f"k_{row_index}_{column_index}";parameters[name]=json.loads(value)
+                conjunction.append(exp.EQ(this=exp.column(column,quoted=True),expression=exp.Placeholder(this=name)))
+            disjunction.append(exp.and_(*conjunction))
+        tree=exp.select(*(exp.column(c,quoted=True) for c in body.target_columns)).from_(table_expr(body.target_table))
+        tree=tree.where(exp.or_(*disjunction)).limit(len(batch))
+        sql=tree.sql(dialect=dialect)
+        for name in parameters:sql=sql.replace(f":{name}",f"%({name})s")
+        result=execute_query(QueryInput(sql=sql,parameters=parameters,datasource=target,
+            timeout_ms=3000,max_rows=max(1,len(batch)),max_bytes=1024*1024),x_semora_internal_token)
+        matched.update(tuple(json.dumps(v,sort_keys=True,default=str) for v in row) for row in result["rows"])
+    secret=os.getenv("RELATIONSHIP_PROFILE_HMAC_KEY",os.getenv("INTERNAL_TOKEN","semora-dev-internal")).encode()
+    signatures=sorted(hmac.new(secret,"\x1f".join(row).encode(),hashlib.sha256).hexdigest()[:24] for row in keys)[:64]
+    return {"method":"indexed_directional_membership_v1","sample_budget":body.sample_rows,
+            "source_nonnull_distinct_keys":len(keys),"matched_keys":len(set(keys)&matched),
+            "directional_coverage":round(len(set(keys)&matched)/len(keys),6) if keys else 0,
+            "target_uniqueness":"declared_constraint","index_verified_by_metadata":True,
+            "signature_version":"hmac-sha256-v1","signature":signatures,
+            "raw_values_retained":False}

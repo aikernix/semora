@@ -192,6 +192,80 @@ class DataSourceRepository:
         except KeyError as exc:
             raise KeyError("data source not found") from exc
 
+    def table_page(self, datasource_id: str, query: str = "", page: int = 1, page_size: int = 20):
+        self.get(datasource_id)
+        query = query.strip()
+        if self._dsn:
+            pattern = f"%{query}%"
+            where = """datasource_id=%s AND (%s='' OR object_name ILIKE %s
+                OR schema_name ILIKE %s OR description ILIKE %s)"""
+            params = (datasource_id, query, pattern, pattern, pattern)
+            with self._connect() as connection:
+                total = connection.execute(
+                    f"SELECT count(*) FROM semora_meta.datasource_tables WHERE {where}", params
+                ).fetchone()[0]
+                rows = connection.execute(
+                    f"""SELECT table_id,catalog_name,schema_name,object_name,object_kind,description,
+                    COALESCE(jsonb_array_length(columns),0),COALESCE(primary_keys,'[]'::jsonb)
+                    FROM semora_meta.datasource_tables WHERE {where}
+                    ORDER BY ordinal LIMIT %s OFFSET %s""",
+                    (*params, page_size, (page - 1) * page_size),
+                ).fetchall()
+            items = [
+                {
+                    "id": row[0], "catalog": row[1], "schema": row[2], "name": row[3],
+                    "kind": row[4], "description": row[5] or "", "column_count": row[6],
+                    "primary_keys": row[7] or [],
+                }
+                for row in rows
+            ]
+        else:
+            values = list(self.get(datasource_id).scan_result.get("tables") or [])
+            folded = query.casefold()
+            if folded:
+                values = [
+                    item for item in values
+                    if folded in " ".join(str(item.get(key) or "") for key in (
+                        "catalog", "schema", "name", "description"
+                    )).casefold()
+                ]
+            total = len(values)
+            window = values[(page - 1) * page_size:page * page_size]
+            items = [
+                {
+                    "id": item.get("id"), "catalog": item.get("catalog"),
+                    "schema": item.get("schema"), "name": item.get("name"),
+                    "kind": item.get("kind"), "description": item.get("description") or "",
+                    "column_count": len(item.get("columns") or []),
+                    "primary_keys": item.get("primary_keys") or [],
+                }
+                for item in window
+            ]
+        return {"items": items, "page": page, "page_size": page_size, "total": total}
+
+    def table_detail(self, datasource_id: str, table_id: str):
+        item = self.get(datasource_id)
+        if self._dsn:
+            from .datasource_table_storage import decode_table
+            with self._connect() as connection:
+                row = connection.execute(
+                    """SELECT table_id,ordinal,catalog_name,schema_name,object_name,table_name,
+                    object_kind,description,columns,primary_keys,unique_constraints,foreign_keys,
+                    indexes,extra,present_fields FROM semora_meta.datasource_tables
+                    WHERE datasource_id=%s AND table_id=%s""",
+                    (datasource_id, table_id),
+                ).fetchone()
+            if not row:
+                raise KeyError(table_id)
+            return decode_table(row)
+        value = next(
+            (table for table in item.scan_result.get("tables") or [] if table.get("id") == table_id),
+            None,
+        )
+        if value is None:
+            raise KeyError(table_id)
+        return value
+
     @staticmethod
     def invalidate_changed_metadata(item, fresh):
         previous=item.scan_result.get("connection",{})
