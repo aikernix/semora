@@ -5,17 +5,27 @@ import asyncio
 import json
 import os
 
-VERSION = "relationship-research-v1"
+VERSION = "query-relationship-research-v2"
 SYSTEM = """角色：数据结构关系分析员。
-任务：根据字段含义、约束和数据库证据逐条判断实体引用或身份映射。资料不足时请求具体资料，获得资料后继续判断。
+任务：生成可用于正确SQL的连接骨架，而非罗列字段相关性。根据表职责、行粒度、引用角色和完整连接条件判断每条候选。资料不足时请求具体资料，获得资料后继续判断。
 规则：同名和值相同不能单独证明关联；同一字段可以有多个有效目标。区分引用(reference)、身份映射(identity)、副本(replica)、未知(unknown)。仅在替代目标无法区分时标记alternative_unresolved。空表表示没有数据证据，不表示关系错误。字段注释中的明确引用可以作为文档证据，但不能自行猜测关联条件或唯一性。
 可请求：metadata（完整关联字段与约束）、definition（视图定义）、profile（限量键值匹配统计）。只使用给出的candidate_id；不要生成SQL或原始数据请求。重复请求不会带来新资料。
 输出JSON：{"requests":[{"candidate_id":"...","kind":"profile"}],"decisions":[{"candidate_id":"...","supported":true,"target_role":"reference","alternative_unresolved":false,"confidence":0.95,"reason":"简短证据和判断"}]}。
 每个候选最终都应提交判断；无法证明时supported=false并写清缺口。"""
+SYSTEM += """
+决策必须额外包含query_outcome(usable/exclude/needs_evidence)、exclusion_code、missing_evidence、query_role、additional_predicates。
+usable表示独立且有意义的查询连接；exclude仅用于明确不合理或对查询冗余的映射；needs_evidence必须明确缺少什么事实。confidence表示对本次判断的把握，不是关联成立的概率。
+排除码：meaning_mismatch(度量/日期/标志与实体标识含义不符)、replica(副本)、lineage_only(视图到底表的血缘)、redundant_identity(相同数据对象重复映射)、transitive_only(仅因共用主实体而推导的明细之间关联)、wrong_target(明确指向另一个对象)。缺证据不能伪装成排除。
+优先保留记录到实体主表、明细到主记录、关联表到两端实体的引用。扩展表共享主键不代表应互相JOIN；不要把所有同标识表两两相连。同一表对的不同引用角色要分别保留，不机械删除环路。
+连接若需要类型等附加条件必须完整表达：additional_predicates=[{"side":"source或target","field":"实际字段","operator":"eq","value":"有资料依据的固定值"}]；无附加条件用[]。不得猜测固定值；缺少条件资料时needs_evidence。不得把目标唯一性未知直接等同于关系不存在。
+例外码不适用时exclusion_code=""。missing_evidence为具体缺口列表；query_role简述这条连接的查询用途。仅通过已有资料判断，不使用特定行业规则。"""
 REVIEW_SYSTEM = """角色：关系证据复核员。
 任务：独立核对给出的字段映射是否被资料支持，不把分析员的结论当作事实。
 检查实体含义、引用方向、替代目标、数据副本、约束和数据反证。相同字段可以引用多个目标，样本不足或空表不构成反证。不能仅凭相同名称或相同值批准关系。
 输出JSON：{"decisions":[{"candidate_id":"...","supported":true,"target_role":"reference","alternative_unresolved":false,"confidence":0.95,"reason":"简短证据或具体缺口"}]}。"""
+REVIEW_SYSTEM += """
+同时核对查询用途、表职责、连接基数及附加条件是否完整。返回query_outcome(usable/exclude/needs_evidence)、exclusion_code、missing_evidence、query_role、additional_predicates；使用分析员相同的结构。confidence表示对本次判断的把握，明确排除也可以有高把握。排除码仅限meaning_mismatch、replica、lineage_only、redundant_identity、transitive_only、wrong_target。只有资料明确支持不合理或冗余时exclude，无法证明时needs_evidence。独立判断，不因分析员已选择目标或给出置信度就批准。
+视图与底表的投影血缘、数据副本不作为业务JOIN。不同实体的真正身份映射可以保留。不要把缺少外键或空表当成否定证据。"""
 
 
 def encoded(value):
@@ -49,7 +59,12 @@ def decision(value):
         return None
     return {"supported": value["supported"], "confidence": max(0, min(1, confidence)),
             "target_role": value["target_role"], "alternative_unresolved": value["alternative_unresolved"],
-            "reason": str(value.get("reason") or "")[:1000]}
+            "reason": str(value.get("reason") or "")[:1000],
+            "query_outcome": value.get("query_outcome") if value.get("query_outcome") in {"usable", "exclude", "needs_evidence"} else "usable" if value["supported"] else "needs_evidence",
+            "exclusion_code": str(value.get("exclusion_code") or ""),
+            "missing_evidence": value.get("missing_evidence") if isinstance(value.get("missing_evidence"), list) else [],
+            "query_role": str(value.get("query_role") or "")[:300],
+            "additional_predicates": value.get("additional_predicates", [])}
 
 
 async def research(candidates, packet_for, fetch, model, persist, progress):
@@ -135,7 +150,8 @@ async def research(candidates, packet_for, fetch, model, persist, progress):
                             c["evidence"].append(await fetch(c, "profile"))
                         except Exception as exc:
                             c["evidence"].append({"kind": "profile_unavailable", "reason": type(exc).__name__})
-            supported = [c for c in entries if final.get(c["id"], {}).get("supported")]
+            supported = [c for c in entries if final.get(c["id"], {}).get("supported")
+                         or final.get(c["id"], {}).get("query_outcome") == "exclude"]
             for group, fits_review in batches([packet_for(c) for c in supported], max_bytes=48000):
                 if not fits_review:
                     continue

@@ -188,6 +188,9 @@ def _relationship_view(candidate):
         "origin": origin,
         "evidence_grade": grade,
         "confidence": float(candidate.get("confidence") or 0),
+        "decision_reason": next((e.get("reason") for e in reversed(candidate.get("evidence", [])) if e.get("kind") in {"automatic_exclusion", "independent_review", "model_semantic_review"}), ""),
+        "predicates": candidate.get("condition_template", {}).get("guards", []),
+        "automatically_excluded": candidate.get("status") == "rejected" and any(e.get("kind") == "automatic_exclusion" for e in candidate.get("evidence", [])),
     }
 
 
@@ -202,6 +205,8 @@ def relations(
     values = modeling_service.repository.list_candidates(identifier, "single_source")
     if status:
         values = [item for item in values if item.get("status") == status]
+    else:
+        values = [item for item in values if item.get("status") in {"accepted", "pending"}]
     values.sort(key=lambda item: ({"accepted": 0, "pending": 1, "rejected": 2, "stale": 3}.get(item.get("status"), 4), -float(item.get("confidence") or 0), item["id"]))
     total = len(values)
     window = values[(page - 1) * page_size:page * page_size]
@@ -257,6 +262,9 @@ async def edit_relationship(identifier: str, candidate_id: str, body: Relationsh
     if previous["scope"] != "single_source" or previous["source_datasource_id"] != identifier:
         raise HTTPException(404, "关联关系不存在")
     _, pairs, schema_hash = _validated_manual_candidate(identifier, body)
+    guards = previous.get("condition_template", {}).get("guards", [])
+    if guards and (previous["source_table_id"] != body.source_table_id or previous["target_table_id"] != body.target_table_id):
+        raise HTTPException(422, "该关系包含附加条件，更换关联表前需要重新定义完整连接条件")
     modeling_service.repository.decide_candidate(candidate_id, "rejected", "data-steward", "已由人工配置替代")
     manual_id = "manual_" + uuid4().hex
     candidate = {
@@ -269,7 +277,7 @@ async def edit_relationship(identifier: str, candidate_id: str, body: Relationsh
         "source_columns": [pair["source"] for pair in pairs],
         "target_columns": [pair["target"] for pair in pairs],
         "key_pairs": pairs,
-        "condition_template": {"operator": "and_equals", "pairs": [{"left": pair["source"], "right": pair["target"]} for pair in pairs]},
+        "condition_template": {"operator": "and_equals", "pairs": [{"left": pair["source"], "right": pair["target"]} for pair in pairs], "guards": guards},
         "evidence": [{"kind": "manual_configuration", "replaces": candidate_id}],
         "evidence_grade": "manual",
         "confidence": 1.0,
@@ -416,7 +424,8 @@ def onboarding_status(identifier: str):
     source(identifier)
     job=modeling_service.repository.latest_job(identifier)
     if not job:raise HTTPException(404,"数据源尚未开始自动建模")
-    return job
+    return {**job, "details": {key: value for key, value in job.get("details", {}).items()
+                               if key != "query_table_roles"}}
 
 
 @router.post("/datasources/{identifier}/onboarding/retry",status_code=202)

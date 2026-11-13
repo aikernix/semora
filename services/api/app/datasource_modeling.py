@@ -20,7 +20,7 @@ from .datasource_table_storage import tables_digest
 from .mdl_export import column_type
 from .relationship_evidence import recall_field_pairs, finalize_relationships, coverage_report
 
-GENERATOR_VERSION = "source-ontology-v4"
+GENERATOR_VERSION = "source-ontology-v5"
 PROFILE_VERSION = "indexed-directional-v1"
 TERMINAL = {"completed", "completed_with_pending", "failed", "cancelled"}
 GENERIC_NAMES = {"id", "code", "name", "type", "status", "date"}
@@ -491,6 +491,14 @@ def package_relations(
             pairs.append(
                 f"{left['object']}.{left[pair['source']]} = {right['object']}.{right[pair['target']]}"
             )
+        from sqlglot import exp
+        for guard in candidate.get("condition_template", {}).get("guards", []):
+            mapping_side = left if guard["side"] == "source" else right
+            if guard["field"] not in mapping_side:
+                pairs = []
+                break
+            pairs.append(exp.EQ(this=exp.column(mapping_side[guard["field"]], table=mapping_side["object"], quoted=True),
+                                expression=exp.convert(guard["value"])).sql(dialect="postgres"))
         if pairs:
             result.append(
                 {
@@ -505,6 +513,7 @@ def package_relations(
                     "metadata": {
                         "candidateId": candidate["id"],
                         "evidenceGrade": candidate["evidence_grade"],
+                        "queryRole": next((e.get("query_role") for e in reversed(candidate["evidence"]) if e.get("kind") == "independent_review"), ""),
                     },
                 }
             )
@@ -648,7 +657,7 @@ class ModelingRepository:
         existing_status = {
             identifier: value["status"]
             for identifier, value in self.memory_candidates.items()
-            if value.get("status") == "rejected"
+            if (value.get("status") == "rejected" and not any(e.get("kind") == "automatic_exclusion" for e in value.get("evidence", [])))
             or (
                 value.get("status") == "accepted"
                 and (value.get("evidence_grade") == "manual" or value.get("reviewed_by"))
@@ -660,7 +669,7 @@ class ModelingRepository:
             with self._connect() as connection:
                 rows = connection.execute(
                     """SELECT id,status FROM semora_meta.relationship_candidates
-                    WHERE id=ANY(%s) AND (status='rejected' OR
+                    WHERE id=ANY(%s) AND ((status='rejected' AND NOT evidence @> '[{"kind":"automatic_exclusion"}]'::jsonb) OR
                     (status='accepted' AND (evidence_grade='manual' OR reviewed_by IS NOT NULL)
                     AND source_schema_hash=%s AND target_schema_hash=%s))""",
                     ([item["id"] for item in candidates], source_hash, target_hash),
@@ -716,14 +725,17 @@ class ModelingRepository:
                         VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT(id) DO UPDATE SET evidence=excluded.evidence,evidence_grade=excluded.evidence_grade,
                         cardinality=excluded.cardinality,profile_version=excluded.profile_version,
-                        confidence=excluded.confidence,status=CASE WHEN relationship_candidates.status='rejected' THEN relationship_candidates.status ELSE excluded.status END,
+                        condition_template=excluded.condition_template,
+                        confidence=excluded.confidence,status=CASE WHEN relationship_candidates.status='rejected'
+                        AND NOT relationship_candidates.evidence @> '[{"kind":"automatic_exclusion"}]'::jsonb
+                        THEN relationship_candidates.status ELSE excluded.status END,
                         source_schema_hash=excluded.source_schema_hash,target_schema_hash=excluded.target_schema_hash,updated_at=now()""",
                         values,
                     )
 
     def mark_candidates_stale(self, datasource_id: str, schema_hash: str):
         for candidate in self.memory_candidates.values():
-            if candidate.get("status") == "rejected":
+            if candidate.get("status") == "rejected" and not any(e.get("kind") == "automatic_exclusion" for e in candidate.get("evidence", [])):
                 continue
             changed_source = (
                 candidate["source_datasource_id"] == datasource_id
@@ -739,7 +751,8 @@ class ModelingRepository:
             with self._connect() as connection:
                 connection.execute(
                     """UPDATE semora_meta.relationship_candidates SET status='stale',updated_at=now()
-                    WHERE status<>'rejected' AND ((source_datasource_id=%s AND source_schema_hash<>%s)
+                    WHERE (status<>'rejected' OR evidence @> '[{"kind":"automatic_exclusion"}]'::jsonb)
+                    AND ((source_datasource_id=%s AND source_schema_hash<>%s)
                        OR (target_datasource_id=%s AND target_schema_hash<>%s))""",
                     (datasource_id, schema_hash, datasource_id, schema_hash),
                 )
@@ -1095,6 +1108,7 @@ class ModelingService:
     async def _semantic_review(self, candidates, table_maps, job=None, persisted_only=False):
         from semora_agent.model import structured_model
         from .relationship_research import research
+        from .query_relationships import classify_tables, validated_guards, entity_references, contextual_references
         schema_hashes = {source_id: tables_digest(list(tables.values())) for source_id, tables in table_maps.items()}
         for candidate in candidates:
             if candidate["evidence_grade"] in {"foreign_key", "manual"}:
@@ -1114,6 +1128,40 @@ class ModelingService:
                     candidate["evidence"].append({"kind": "research_gap", "reason": "model_unconfigured"})
             return
 
+        roles = (job or {}).get("details", {}).get("query_table_roles", {})
+        for source_id, tables in table_maps.items():
+            async def save_roles(values, source_id=source_id):
+                roles[source_id] = values
+                if job:
+                    self._update(job, "profiling", "understanding_tables", 68,
+                                 details={**job.get("details", {}), "query_table_roles": roles})
+            roles[source_id] = await classify_tables(list(tables.values()), structured_model,
+                                                     roles.get(source_id), save_roles)
+        if len(table_maps) == 1:
+            source_id = next(iter(table_maps))
+            by_id = {c["id"]: c for c in candidates}
+            for source, column, target, field in entity_references(list(table_maps[source_id].values()), roles[source_id]):
+                if not column_type(column) or column_type(column) != column_type(field):
+                    continue
+                proposal = _candidate(source_id, source_id, source, [column["name"]], target, [field["name"]],
+                    "single_source", [{"kind": "entity_role_reference"}, {"kind": "target_unique_index", "confirmed": True},
+                    {"kind": "source_index", "confirmed": _indexed(source, [column["name"]])}], .8)
+                if proposal["id"] not in by_id:
+                    candidates.append(proposal)
+                    by_id[proposal["id"]] = proposal
+                elif not any(e.get("kind") == "entity_role_reference" for e in by_id[proposal["id"]]["evidence"]):
+                    by_id[proposal["id"]]["evidence"].append({"kind": "entity_role_reference"})
+            for source, column, target, field, hint in contextual_references(list(table_maps[source_id].values()), roles[source_id]):
+                if not column_type(column) or column_type(column) != column_type(field):
+                    continue
+                proposal = _candidate(source_id, source_id, source, [column["name"]], target, [field["name"]],
+                    "single_source", [hint, {"kind": "target_unique_index", "confirmed": True}], .85)
+                if proposal["id"] not in by_id:
+                    candidates.append(proposal)
+                    by_id[proposal["id"]] = proposal
+                elif hint not in by_id[proposal["id"]]["evidence"]:
+                    by_id[proposal["id"]]["evidence"].append(hint)
+
         def packet_for(candidate):
             def card(source_id, table_id, fields):
                 table = table_maps[source_id][table_id]
@@ -1121,7 +1169,10 @@ class ModelingService:
                 return {"table_id": table_id, "name": table.get("name"),
                         "description": table.get("description"), "kind": table.get("kind"),
                         "fields": selected, "primary_keys": table.get("primary_keys", []),
-                        "unique_constraints": table.get("unique_constraints", [])}
+                        "unique_constraints": table.get("unique_constraints", []),
+                        "table_understanding": {k: v for k, v in roles.get(source_id, {}).get(table_id, {}).items() if k != "field_roles"},
+                        "field_roles": {name: roles.get(source_id, {}).get(table_id, {}).get("field_roles", {}).get(name, "unknown") for name in fields},
+                        "field_directory": [c["name"] for c in table.get("columns", [])]}
             return {"candidate_id": candidate["id"],
                     "source": card(candidate["source_datasource_id"], candidate["source_table_id"], candidate["source_columns"]),
                     "target": card(candidate["target_datasource_id"], candidate["target_table_id"], candidate["target_columns"]),
@@ -1155,6 +1206,16 @@ class ModelingService:
         async def persist(entries):
             # Incremental writes are also the restart checkpoint.
             for candidate in entries:
+                analyses = [next((e for e in reversed(candidate["evidence"]) if e.get("kind") == kind), {})
+                            for kind in ("model_semantic_review", "independent_review")]
+                guards = [validated_guards(candidate, e.get("additional_predicates", []), table_maps) for e in analyses[-2:]]
+                if len(guards) == 2 and all(g is not None for g in guards) and guards[0] == guards[1]:
+                    candidate["condition_template"]["guards"] = guards[0]
+                    candidate["evidence"] = [e for e in candidate["evidence"] if e.get("kind") != "join_contract"]
+                    candidate["evidence"].append({"kind": "join_contract", "valid": True, "guards": guards[0]})
+                elif any(analyses):
+                    candidate["evidence"] = [e for e in candidate["evidence"] if e.get("kind") != "join_contract"]
+                    candidate["evidence"].append({"kind": "join_contract", "valid": False})
                 source = table_maps[candidate["source_datasource_id"]][candidate["source_table_id"]]
                 target = table_maps[candidate["target_datasource_id"]][candidate["target_table_id"]]
                 source_unique = _indexed(source, candidate["source_columns"], unique=True)
@@ -1240,13 +1301,15 @@ class ModelingService:
                 for candidate in candidates:
                     prior = saved.get(candidate["id"])
                     if (not force or job.get("details", {}).get("resume_research")) and prior and prior.get("source_schema_hash") == schema_hash:
-                        if any(e.get("kind") == "research_complete" and e.get("version") == "relationship-research-v1" for e in prior["evidence"]):
+                        if any(e.get("kind") == "research_complete" and e.get("version") == "query-relationship-research-v2" for e in prior["evidence"]):
                             candidate.update(evidence=prior["evidence"], status=prior["status"])
                 # Persist restored checkpoints before starting any new calls;
                 # otherwise another restart would erase the completed batches.
                 self.repository.replace_candidates(candidates, schema_hash, schema_hash)
                 await self._semantic_review(candidates, {identifier: table_map}, job, persisted_only)
                 finalize_relationships(candidates)
+                from .query_relationships import deduplicate_query_edges
+                deduplicate_query_edges(candidates)
                 self.repository.replace_candidates(candidates, schema_hash, schema_hash)
                 self._update(job, "building", "building", 88)
                 current_candidates = [
@@ -1556,6 +1619,8 @@ class ModelingService:
             rmap = {table["id"]: table for table in right.scan_result.get("tables") or []}
             await self._semantic_review(candidates, {left.id: lmap, right.id: rmap}, job)
             finalize_relationships(candidates, cross_source=True)
+            from .query_relationships import deduplicate_query_edges
+            deduplicate_query_edges(candidates)
             self.repository.replace_candidates(
                 candidates, left_package["schema_hash"], right_package["schema_hash"]
             )

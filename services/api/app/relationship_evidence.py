@@ -106,7 +106,7 @@ def recall_field_pairs(sources, targets):
 def finalize_relationships(candidates, *, cross_source=False):
     """Confirmation runs after both database and semantic evidence are present."""
     for candidate in candidates:
-        if candidate["evidence_grade"] in {"foreign_key", "manual"}:
+        if candidate["evidence_grade"] in {"foreign_key", "manual"} or candidate.get("reviewed_by"):
             continue
         evidence = candidate["evidence"]
         profile = next((e.get("statistics", {}) for e in reversed(evidence)
@@ -115,6 +115,15 @@ def finalize_relationships(candidates, *, cross_source=False):
                        if e.get("kind") == "model_semantic_review"), {})
         independent = next((e for e in reversed(evidence)
                            if e.get("kind") == "independent_review"), {})
+        from .query_relationships import triage
+        excluded = triage(candidate, review, independent)
+        if excluded:
+            candidate["status"] = "rejected"
+            candidate["evidence"] = [e for e in evidence if e.get("kind") not in {"confirmation", "automatic_exclusion"}]
+            candidate["evidence"].append({"kind": "automatic_exclusion", "code": excluded,
+                                           "reason": independent.get("reason")})
+            candidate["evidence"].append({"kind": "confirmation", "decision": "rejected", "reasons": [excluded]})
+            continue
         documented = any(e.get("kind") == "explicit_field_reference" for e in evidence)
         samples = profile.get("source_nonnull_distinct_keys", 0)
         coverage = profile.get("directional_coverage", 0)
@@ -123,7 +132,7 @@ def finalize_relationships(candidates, *, cross_source=False):
         # A concrete documented field reference is a separate proof path.
         # Empty data is unknown; observed contradictory data still blocks it.
         documented_path = documented and not (samples > 0 and coverage < .98)
-        semantic_structure = any(e.get("kind") in {"entity_key_name", "semantic_recall"} for e in evidence) or (
+        semantic_structure = any(e.get("kind") in {"entity_key_name", "semantic_recall", "entity_role_reference", "contextual_reference_hint"} for e in evidence) or (
             any(e.get("kind") == "same_name" for e in evidence)
             and any(e.get("kind") == "comment_semantics" for e in evidence))
         structural_path = (unique and semantic_structure
@@ -132,6 +141,11 @@ def finalize_relationships(candidates, *, cross_source=False):
                            and not (samples > 0 and coverage < .98))
         non_data_path = documented_path or structural_path
         reasons = []
+        if review.get("query_outcome") not in (None, "usable") or independent.get("query_outcome") not in (None, "usable"):
+            reasons.append("query_use_not_confirmed")
+        join_contract = next((e for e in reversed(evidence) if e.get("kind") == "join_contract"), None)
+        if join_contract and not join_contract.get("valid"):
+            reasons.append("join_predicates_unresolved")
         if not unique and not non_data_path:
             reasons.append("target_uniqueness_unverified")
         if not profile and not non_data_path:
