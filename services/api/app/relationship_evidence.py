@@ -122,14 +122,14 @@ def finalize_relationships(candidates, *, cross_source=False):
         data_path = unique and samples >= (200 if cross_source else 100) and coverage >= (.99 if cross_source else .98)
         # A concrete documented field reference is a separate proof path.
         # Empty data is unknown; observed contradictory data still blocks it.
-        documented_path = documented and not (samples >= 10 and coverage < .98)
+        documented_path = documented and not (samples > 0 and coverage < .98)
         semantic_structure = any(e.get("kind") in {"entity_key_name", "semantic_recall"} for e in evidence) or (
             any(e.get("kind") == "same_name" for e in evidence)
             and any(e.get("kind") == "comment_semantics" for e in evidence))
         structural_path = (unique and semantic_structure
                            and review.get("supported") is True and review.get("confidence", 0) >= .95
                            and independent.get("supported") is True and independent.get("confidence", 0) >= .95
-                           and not (samples >= 10 and coverage < .98))
+                           and not (samples > 0 and coverage < .98))
         non_data_path = documented_path or structural_path
         reasons = []
         if not unique and not non_data_path:
