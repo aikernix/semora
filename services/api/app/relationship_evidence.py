@@ -31,6 +31,13 @@ def recall_field_pairs(sources, targets):
                 continue
             entry = (table, columns[names[0]], meaning_tokens(columns[names[0]]))
             keys.append(entry)
+    references, named_keys = defaultdict(list), defaultdict(list)
+    for index, (target, field, _) in enumerate(keys):
+        references[(str(target.get("name", "")).lower(), field["name"].lower())].append(index)
+        field_name = re.sub(r"[^a-z0-9]", "", field["name"].lower())
+        for part in re.findall(r"[a-z0-9]+", str(target.get("name", "")).lower()):
+            if len(part) >= 3 and field_name:
+                named_keys[part + field_name].append(index)
     frequency = Counter(token for _, _, tokens in keys for token in tokens)
     for index, (_, _, tokens) in enumerate(keys):
         for token in tokens:
@@ -48,17 +55,14 @@ def recall_field_pairs(sources, targets):
             text = str(column.get("description") or column.get("comment") or "").lower()
             explicit = set()
             named = set()
-            for index, (target, field, _) in enumerate(keys):
-                pattern = r"(?<![\w])" + re.escape(str(target.get("name", ""))) + r"\." + re.escape(field["name"]) + r"(?![\w])"
-                if re.search(pattern, text, re.I):
-                    explicit.add(index)
-                    scores[index] += 100
-                parts = re.findall(r"[a-z0-9]+", str(target.get("name", "")).lower())
-                source_name = re.sub(r"[^a-z0-9]", "", column["name"].lower())
-                field_name = re.sub(r"[^a-z0-9]", "", field["name"].lower())
-                if any(len(part) >= 3 and source_name == part + field_name for part in parts):
-                    named.add(index)
-                    scores[index] += 20
+            for table_name, field_name in re.findall(r"(?<![\w])([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)(?![\w])", text):
+                explicit.update(references.get((table_name, field_name), []))
+            source_name = re.sub(r"[^a-z0-9]", "", column["name"].lower())
+            named.update(named_keys.get(source_name, []) if source_name else [])
+            for index in explicit:
+                scores[index] += 100
+            for index in named:
+                scores[index] += 20
             ranked = []
             for index, score in scores.items():
                 target, field, target_tokens = keys[index]
