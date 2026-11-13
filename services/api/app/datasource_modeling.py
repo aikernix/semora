@@ -280,6 +280,8 @@ def discover_candidates(
                     )
                     - GENERIC_NAMES
                 )
+                names = {name for name in names if name not in GENERIC_NAMES
+                         and (len(source_columns_by_name.get(name, [])) <= 3 or target_tokens)}
                 candidate_sets.append(
                     {
                         source["id"]

@@ -58,6 +58,12 @@ def test_large_shared_primary_names_do_not_become_relationships():
     assert discover_candidates("source-a", tables) == []
 
 
+def test_three_thousand_unrelated_tables_do_not_produce_dense_candidates():
+    tables = [table(f"s.t{i}", f"t{i}", [("id", "bigint", "")], primary=["id"])
+              for i in range(3000)]
+    assert discover_candidates("large-source", tables) == []
+
+
 def test_storage_annotations_do_not_link_unrelated_meanings():
     parent = table("parent", "alpha", [("a", "varchar", "事件编号；业务主键；原类型=VARCHAR2(40)")], primary=["a"])
     child = table("child", "beta", [("b", "varchar", "对象类型；原类型=VARCHAR2(40)")], indexes=["b"])

@@ -62,7 +62,9 @@ def recall_field_pairs(sources, targets):
             for index in explicit:
                 scores[index] += 100
             for index in named:
-                scores[index] += 20
+                target = keys[index][0]
+                parts = re.findall(r"[a-z0-9]+", str(target.get("name", "")).lower())
+                scores[index] += 20 / max(1, len(parts))
             ranked = []
             for index, score in scores.items():
                 target, field, target_tokens = keys[index]
@@ -75,7 +77,7 @@ def recall_field_pairs(sources, targets):
                     continue
                 if index not in explicit and index not in named:
                     table_tokens = meaning_tokens({"description": target.get("description") or target.get("comment")})
-                    if len(overlap) < 2 and not overlap & table_tokens:
+                    if not overlap & table_tokens:
                         continue
                 if not (target.get("primary_keys") or target.get("unique_constraints")) and index not in explicit and index not in named:
                     continue
