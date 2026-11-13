@@ -715,6 +715,7 @@ class ModelingRepository:
                          key_pairs,condition_template,evidence,evidence_grade,confidence,cardinality,status,source_schema_hash,target_schema_hash,profile_version,domain)
                         VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT(id) DO UPDATE SET evidence=excluded.evidence,evidence_grade=excluded.evidence_grade,
+                        cardinality=excluded.cardinality,profile_version=excluded.profile_version,
                         confidence=excluded.confidence,status=CASE WHEN relationship_candidates.status='rejected' THEN relationship_candidates.status ELSE excluded.status END,
                         source_schema_hash=excluded.source_schema_hash,target_schema_hash=excluded.target_schema_hash,updated_at=now()""",
                         values,
@@ -1032,6 +1033,7 @@ class ModelingService:
         for job in self.repository.interrupted_jobs():
             active_sources.add(job["datasource_id"])
             job.update(status="queued", phase="resuming", error=None)
+            job.setdefault("details", {})["resume_research"] = True
             self.repository.save_job(job)
             if job.get("kind") == "cross_source":
                 self.tasks[job["id"]] = asyncio.create_task(self._run_cross_source(job))
@@ -1226,7 +1228,7 @@ class ModelingService:
                 table_map = {table["id"]: table for table in tables}
                 for candidate in candidates:
                     prior = saved.get(candidate["id"])
-                    if not force and prior and prior.get("source_schema_hash") == schema_hash:
+                    if (not force or job.get("details", {}).get("resume_research")) and prior and prior.get("source_schema_hash") == schema_hash:
                         if any(e.get("kind") == "research_complete" and e.get("version") == "relationship-research-v1" for e in prior["evidence"]):
                             candidate.update(evidence=prior["evidence"], status=prior["status"])
                 await self._semantic_review(candidates, {identifier: table_map}, job, persisted_only)

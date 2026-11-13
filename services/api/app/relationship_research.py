@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 VERSION = "relationship-research-v1"
 SYSTEM = """角色：数据结构关系分析员。
@@ -58,7 +59,8 @@ async def research(candidates, packet_for, fetch, model, persist, progress):
                         for e in c["evidence"])]
     packets = [packet_for(c) for c in todo]
     lookup = {c["id"]: c for c in todo}
-    semaphore = asyncio.Semaphore(4)
+    workers = max(1, min(8, int(os.getenv("RELATIONSHIP_MODEL_CONCURRENCY", "4"))))
+    semaphore = asyncio.Semaphore(workers)
     completed = 0
 
     async def run_batch(initial, fits):
@@ -155,4 +157,4 @@ async def research(candidates, packet_for, fetch, model, persist, progress):
         while not queue.empty():
             group, fits = queue.get_nowait()
             await run_batch(group, fits)
-    await asyncio.gather(*(worker() for _ in range(4)))
+    await asyncio.gather(*(worker() for _ in range(workers)))
