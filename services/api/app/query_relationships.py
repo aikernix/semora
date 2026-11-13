@@ -133,9 +133,12 @@ def entity_references(tables, profiles):
     frequency = Counter(token for _, _, tokens in anchors for token in tokens)
     common = {token for token, count in frequency.items() if count >= max(4, len(anchors) * .5)}
     for source in tables:
-        field_roles = profiles.get(source["id"], {}).get("field_roles", {})
+        source_profile = profiles.get(source["id"], {})
+        field_roles = source_profile.get("field_roles", {})
         for column in source.get("columns", []):
-            if field_roles.get(column["name"]) not in {"reference", "polymorphic_reference"}:
+            shared_identifier = (field_roles.get(column["name"]) == "identifier"
+                                 and source_profile.get("role") in {"extension", "history", "detail", "bridge"})
+            if field_roles.get(column["name"]) not in {"reference", "polymorphic_reference"} and not shared_identifier:
                 continue
             tokens = meaning_tokens(column) - common
             ranked = [(len(tokens & terms), target["id"], field["name"], target, field)
