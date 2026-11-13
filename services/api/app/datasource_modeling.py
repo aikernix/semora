@@ -980,7 +980,7 @@ class ModelingService:
         if current and current["status"] not in TERMINAL:
             return current
         job = self.repository.create_job(
-            datasource_id, details={"persisted_only": True} if persisted_only else {}
+            datasource_id, details={"persisted_only": persisted_only, "force": force}
         )
         self.tasks[job["id"]] = asyncio.create_task(self._run_onboarding(job, force=force))
         return job
@@ -997,7 +997,7 @@ class ModelingService:
                 self.tasks[job["id"]] = asyncio.create_task(self._run_package_rebuild(job))
             else:
                 self.tasks[job["id"]] = asyncio.create_task(
-                    self._run_onboarding(job, force=False)
+                    self._run_onboarding(job, force=bool(job.get("details", {}).get("force")))
                 )
         # Backfill already-scanned sources without touching the business database.
         for source in self.datasources.repository.list():

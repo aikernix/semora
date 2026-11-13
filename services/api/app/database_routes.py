@@ -420,13 +420,13 @@ def onboarding_status(identifier: str):
 
 
 @router.post("/datasources/{identifier}/onboarding/retry",status_code=202)
-def retry_onboarding(identifier: str):
+async def retry_onboarding(identifier: str):
     source(identifier)
     return modeling_service.start(identifier,force=False)
 
 
 @router.post("/datasources/{identifier}/rescan",status_code=202)
-def rescan(identifier: str):
+async def rescan(identifier: str):
     source(identifier)
     return modeling_service.start(identifier,force=True)
 
