@@ -1093,6 +1093,10 @@ class ModelingService:
     async def _semantic_review(self, candidates, table_maps, job=None, persisted_only=False):
         from semora_agent.model import structured_model
         from .relationship_research import research
+        if persisted_only:
+            # Offline backfill must not stamp an unverified research checkpoint.
+            # Explicit onboarding/rescan runs the online research stage.
+            return
         if not structured_model.configured:
             for candidate in candidates:
                 if candidate["evidence_grade"] != "foreign_key":
@@ -1120,8 +1124,7 @@ class ModelingService:
 
         async def fetch(candidate, kind):
             if kind == "metadata":
-                packet = packet_for(candidate)
-                return {"kind": "metadata_checked", "source": packet["source"], "target": packet["target"]}
+                return {"kind": "metadata_checked", "status": "complete_fields_and_constraints_in_packet"}
             if persisted_only:
                 return {"kind": "tool_unavailable", "tool": kind, "reason": "offline_metadata_backfill"}
             item = self.datasources.repository.get(candidate["source_datasource_id"])
