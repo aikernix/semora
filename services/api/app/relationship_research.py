@@ -14,6 +14,18 @@ def factual_evidence(evidence):
                 "model_semantic_review", "independent_review", "join_contract",
                 "automatic_exclusion", "research_gap", "competition"}
     return [entry for entry in evidence if entry.get("kind") not in excluded]
+
+
+def restore_checkpoint(candidate, previous, source_hash, target_hash):
+    if (not previous or previous.get("source_schema_hash") != source_hash
+            or previous.get("target_schema_hash") != target_hash
+            or not any(e.get("kind") == "research_complete" and e.get("version") == VERSION
+                       for e in previous.get("evidence", []))):
+        return False
+    for key in ("evidence", "status", "condition_template", "cardinality", "confidence", "evidence_grade"):
+        if key in previous:
+            candidate[key] = previous[key]
+    return True
 CONTRACT = """输出唯一JSON结构：
 {"requests":[{"candidate_id":"实际ID","kind":"metadata或definition或profile"}],"decisions":[{"candidate_id":"实际ID","supported":true,"target_role":"reference","alternative_unresolved":false,"confidence":0.95,"reason":"可核验的依据","query_outcome":"usable","exclusion_code":"","missing_evidence":[],"query_role":"连接的查询用途","additional_predicates":[]}]}。
 query_outcome只能是usable、exclude、needs_evidence：

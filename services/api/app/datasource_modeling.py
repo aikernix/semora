@@ -1163,6 +1163,12 @@ class ModelingService:
                 elif hint not in by_id[proposal["id"]]["evidence"]:
                     by_id[proposal["id"]]["evidence"].append(hint)
 
+            if (job or {}).get("details", {}).get("resume_research"):
+                from .relationship_research import restore_checkpoint
+                saved = {c["id"]: c for c in self.repository.list_candidates(source_id, "single_source")}
+                for candidate in candidates:
+                    restore_checkpoint(candidate, saved.get(candidate["id"]), schema_hashes[source_id], schema_hashes[source_id])
+
         def packet_for(candidate):
             def card(source_id, table_id, fields, *, directory=True):
                 table = table_maps[source_id][table_id]
@@ -1311,9 +1317,8 @@ class ModelingService:
                 for candidate in candidates:
                     prior = saved.get(candidate["id"])
                     if (not force or job.get("details", {}).get("resume_research")) and prior and prior.get("source_schema_hash") == schema_hash:
-                        from .relationship_research import VERSION
-                        if any(e.get("kind") == "research_complete" and e.get("version") == VERSION for e in prior["evidence"]):
-                            candidate.update(evidence=prior["evidence"], status=prior["status"])
+                        from .relationship_research import restore_checkpoint
+                        restore_checkpoint(candidate, prior, schema_hash, schema_hash)
                 # Persist restored checkpoints before starting any new calls;
                 # otherwise another restart would erase the completed batches.
                 self.repository.replace_candidates(candidates, schema_hash, schema_hash)

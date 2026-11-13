@@ -13,6 +13,18 @@ def test_model_evidence_excludes_internal_decisions_and_old_model_opinions():
     assert factual_evidence(facts + opinions) == facts
 
 
+def test_resume_restores_complete_join_and_checks_both_schema_hashes():
+    from app.relationship_research import restore_checkpoint, VERSION
+    original = {"source_schema_hash": "a", "target_schema_hash": "b", "status": "accepted",
+                "condition_template": {"guards": [{"side": "source", "field": "kind", "operator": "eq", "value": "entity"}]},
+                "evidence": [{"kind": "research_complete", "version": VERSION}]}
+    restored = {}
+    assert not restore_checkpoint(restored, original, "a", "changed")
+    assert not restored
+    assert restore_checkpoint(restored, original, "a", "b")
+    assert restored["condition_template"] == original["condition_template"]
+
+
 def candidate(identifier):
     return {"id": identifier, "status": "pending", "evidence_grade": "medium", "confidence": .7,
             "evidence": [{"kind": "target_unique_index", "confirmed": True}]}
