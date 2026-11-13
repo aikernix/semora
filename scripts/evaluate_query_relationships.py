@@ -11,6 +11,7 @@ from sqlglot import exp
 
 
 def compare(payload):
+    payload = {**payload, "candidates": [c for c in payload["candidates"] if c["status"] != "stale"]}
     ontology = payload["ontology"]
     objects = {o["name"]: o for o in ontology["objects"]}
     def physical(column):

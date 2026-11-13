@@ -155,15 +155,18 @@ def test_final_confirmation_keeps_missing_samples_and_unresolved_alternatives_pe
     assert "value_verification_missing" in candidate["evidence"][-1]["reasons"]
 
 
-def test_retire_only_obsolete_unconfirmed_candidates():
+def test_retire_obsolete_inferred_edges_only_after_full_discovery():
     repository = ModelingRepository(dsn="")
     repository.memory_candidates = {
         name: {"source_datasource_id": "a", "scope": "single_source", "status": status}
         for name, status in [("noise", "pending"), ("keep", "pending"),
                              ("accepted", "accepted"), ("rejected", "rejected")]
     }
-    repository.retire_pending("a", {"keep"})
-    assert set(repository.memory_candidates) == {"keep", "accepted", "rejected"}
+    repository.memory_candidates['manual'] = {"source_datasource_id": "a", "scope": "single_source", "status": "accepted", "evidence_grade": "manual"}
+    repository.retire_generated("a", {"keep"})
+    assert repository.memory_candidates['keep']['status'] == 'pending'
+    assert repository.memory_candidates['manual']['status'] == 'accepted'
+    assert all(repository.memory_candidates[k]['status'] == 'stale' for k in ('noise','accepted','rejected'))
 
 
 def test_comments_can_recall_differently_named_indexed_fields_without_auto_accepting():

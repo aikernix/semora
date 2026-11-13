@@ -634,20 +634,21 @@ class ModelingRepository:
             ).fetchall()
         return [self.get_job(row[0]) for row in ids]
 
-    def retire_pending(self, source_id, retained_ids):
-        """Discard obsolete automatic proposals; explicit decisions survive rebuilds."""
+    def retire_generated(self, source_id, retained_ids):
+        """Retire obsolete inferred edges after global recall, including old accepted ones."""
         for identifier, item in list(self.memory_candidates.items()):
             if (item["source_datasource_id"] == source_id
-                    and item["scope"] == "single_source" and item["status"] == "pending"
+                    and item["scope"] == "single_source"
+                    and item.get("evidence_grade") not in {"foreign_key", "manual"}
                     and not item.get("reviewed_by")
                     and identifier not in retained_ids):
-                del self.memory_candidates[identifier]
+                item["status"] = "stale"
         if self.dsn:
             with self._connect() as connection:
                 connection.execute(
-                    """DELETE FROM semora_meta.relationship_candidates
+                    """UPDATE semora_meta.relationship_candidates SET status='stale',updated_at=now()
                     WHERE source_datasource_id=%s AND scope='single_source'
-                    AND status='pending' AND reviewed_by IS NULL AND NOT (id=ANY(%s))""",
+                    AND evidence_grade NOT IN ('foreign_key','manual') AND reviewed_by IS NULL AND NOT (id=ANY(%s))""",
                     (source_id, list(retained_ids)),
                 )
 
@@ -1394,7 +1395,6 @@ class ModelingService:
                     declared_relationships=item.scan_result.get("foreign_keys") or [],
                 )
                 saved = {c["id"]: c for c in self.repository.list_candidates(identifier, "single_source")}
-                self.repository.retire_pending(identifier, {c["id"] for c in candidates})
                 self._update(job, "profiling", "profiling", 68)
                 table_map = {table["id"]: table for table in tables}
                 for candidate in candidates:
@@ -1411,6 +1411,7 @@ class ModelingService:
                 deduplicate_query_edges(candidates)
                 self.repository.replace_candidates(candidates, schema_hash, schema_hash)
                 self._update(job, "building", "building", 88)
+                self.repository.retire_generated(identifier, {c["id"] for c in candidates})
                 current_candidates = [
                     candidate
                     for candidate in self.repository.list_candidates(identifier, "single_source")
