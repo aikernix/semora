@@ -4,6 +4,15 @@ from app.relationship_evidence import finalize_relationships
 from app.relationship_research import research, batches
 
 
+def test_model_evidence_excludes_internal_decisions_and_old_model_opinions():
+    from app.relationship_research import factual_evidence
+    facts = [{"kind": "explicit_field_reference"}, {"kind": "target_unique_index", "confirmed": True},
+             {"kind": "value_profile", "statistics": {"directional_coverage": .7}}]
+    opinions = [{"kind": kind} for kind in ("join_contract", "confirmation", "automatic_exclusion",
+                "model_semantic_review", "independent_review", "competition", "research_complete")]
+    assert factual_evidence(facts + opinions) == facts
+
+
 def candidate(identifier):
     return {"id": identifier, "status": "pending", "evidence_grade": "medium", "confidence": .7,
             "evidence": [{"kind": "target_unique_index", "confirmed": True}]}

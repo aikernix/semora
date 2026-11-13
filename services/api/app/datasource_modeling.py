@@ -1108,7 +1108,7 @@ class ModelingService:
 
     async def _semantic_review(self, candidates, table_maps, job=None, persisted_only=False):
         from semora_agent.model import structured_model
-        from .relationship_research import research
+        from .relationship_research import research, factual_evidence
         from .query_relationships import classify_tables, validated_guards, entity_references, contextual_references
         schema_hashes = {source_id: tables_digest(list(tables.values())) for source_id, tables in table_maps.items()}
         for candidate in candidates:
@@ -1181,12 +1181,9 @@ class ModelingService:
                     "source": card(candidate["source_datasource_id"], candidate["source_table_id"], candidate["source_columns"]),
                     "target": card(candidate["target_datasource_id"], candidate["target_table_id"], candidate["target_columns"]),
                     "key_pairs": candidate["key_pairs"],
-                    "evidence": [e for e in candidate["evidence"] if e.get("kind") not in
-                                 {"source_code", "confirmation", "model_review_deferred", "research_complete"}],
-                    "other_targets": [{"candidate_id": c["id"], "status": c["status"],
-                                       "target": card(c["target_datasource_id"], c["target_table_id"], c["target_columns"]),
-                                       "role": next((e.get("target_role") for e in reversed(c["evidence"])
-                                                    if e.get("kind") == "independent_review"), None)}
+                    "evidence": factual_evidence(candidate["evidence"]),
+                    "other_targets": [{"candidate_id": c["id"],
+                                       "target": card(c["target_datasource_id"], c["target_table_id"], c["target_columns"])}
                                       for c in candidates if c["source_table_id"] == candidate["source_table_id"]
                                       and c["source_datasource_id"] == candidate["source_datasource_id"]
                                       and c["source_columns"] == candidate["source_columns"] and c["id"] != candidate["id"]][:8]}

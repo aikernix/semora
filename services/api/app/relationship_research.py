@@ -5,7 +5,15 @@ import asyncio
 import json
 import os
 
-VERSION = "query-relationship-research-v5"
+VERSION = "query-relationship-research-v6"
+
+
+def factual_evidence(evidence):
+    """Internal decisions and previous model opinions are not source evidence."""
+    excluded = {"source_code", "confirmation", "model_review_deferred", "research_complete",
+                "model_semantic_review", "independent_review", "join_contract",
+                "automatic_exclusion", "research_gap", "competition"}
+    return [entry for entry in evidence if entry.get("kind") not in excluded]
 CONTRACT = """输出唯一JSON结构：
 {"requests":[{"candidate_id":"实际ID","kind":"metadata或definition或profile"}],"decisions":[{"candidate_id":"实际ID","supported":true,"target_role":"reference","alternative_unresolved":false,"confidence":0.95,"reason":"可核验的依据","query_outcome":"usable","exclusion_code":"","missing_evidence":[],"query_role":"连接的查询用途","additional_predicates":[]}]}。
 query_outcome只能是usable、exclude、needs_evidence：
@@ -88,6 +96,12 @@ async def research(candidates, packet_for, fetch, model, persist, progress):
     todo = [c for c in candidates if c["evidence_grade"] not in {"foreign_key", "manual"}
             and not any(e.get("kind") == "research_complete" and e.get("version") == VERSION
                         for e in c["evidence"])]
+    for c in todo:
+        c["evidence"] = [e for e in factual_evidence(c["evidence"])
+                         if not (e.get("kind") == "value_profile"
+                                 and e.get("statistics", {}).get("guards_applied"))]
+        if "condition_template" in c:
+            c["condition_template"]["guards"] = []
     packets = [packet_for(c) for c in todo]
     lookup = {c["id"]: c for c in todo}
     workers = max(1, min(16, int(os.getenv("RELATIONSHIP_MODEL_CONCURRENCY", "4"))))
