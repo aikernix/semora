@@ -1231,7 +1231,6 @@ class ModelingService:
                 )
                 saved = {c["id"]: c for c in self.repository.list_candidates(identifier, "single_source")}
                 self.repository.retire_pending(identifier, {c["id"] for c in candidates})
-                self.repository.replace_candidates(candidates, schema_hash, schema_hash)
                 self._update(job, "profiling", "profiling", 68)
                 table_map = {table["id"]: table for table in tables}
                 for candidate in candidates:
@@ -1239,6 +1238,9 @@ class ModelingService:
                     if (not force or job.get("details", {}).get("resume_research")) and prior and prior.get("source_schema_hash") == schema_hash:
                         if any(e.get("kind") == "research_complete" and e.get("version") == "relationship-research-v1" for e in prior["evidence"]):
                             candidate.update(evidence=prior["evidence"], status=prior["status"])
+                # Persist restored checkpoints before starting any new calls;
+                # otherwise another restart would erase the completed batches.
+                self.repository.replace_candidates(candidates, schema_hash, schema_hash)
                 await self._semantic_review(candidates, {identifier: table_map}, job, persisted_only)
                 finalize_relationships(candidates)
                 self.repository.replace_candidates(candidates, schema_hash, schema_hash)
