@@ -1095,6 +1095,14 @@ class ModelingService:
     async def _semantic_review(self, candidates, table_maps, job=None, persisted_only=False):
         from semora_agent.model import structured_model
         from .relationship_research import research
+        for candidate in candidates:
+            if candidate["evidence_grade"] in {"foreign_key", "manual"}:
+                continue
+            source = table_maps[candidate["source_datasource_id"]][candidate["source_table_id"]]
+            target = table_maps[candidate["target_datasource_id"]][candidate["target_table_id"]]
+            left_unique = _indexed(source, candidate["source_columns"], unique=True)
+            right_unique = _indexed(target, candidate["target_columns"], unique=True)
+            candidate["cardinality"] = ("1:1" if left_unique else "N:1") if right_unique else ("1:N" if left_unique else "N:N")
         if persisted_only:
             # Offline backfill must not stamp an unverified research checkpoint.
             # Explicit onboarding/rescan runs the online research stage.
