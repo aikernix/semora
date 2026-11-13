@@ -1171,7 +1171,10 @@ class ModelingService:
                         "fields": selected, "primary_keys": table.get("primary_keys", []),
                         "unique_constraints": table.get("unique_constraints", []),
                         "table_understanding": {k: v for k, v in roles.get(source_id, {}).get(table_id, {}).items() if k != "field_roles"},
-                        "field_roles": {name: roles.get(source_id, {}).get(table_id, {}).get("field_roles", {}).get(name, "unknown") for name in fields},
+                        "field_roles": {name: value for name, value in roles.get(source_id, {}).get(table_id, {}).get("field_roles", {}).items()
+                                        if name in fields or value == "discriminator"},
+                        "context_fields": [c for c in table.get("columns", [])
+                                           if roles.get(source_id, {}).get(table_id, {}).get("field_roles", {}).get(c["name"]) == "discriminator"],
                         "field_directory": [c["name"] for c in table.get("columns", [])]}
             return {"candidate_id": candidate["id"],
                     "source": card(candidate["source_datasource_id"], candidate["source_table_id"], candidate["source_columns"]),
