@@ -16,7 +16,8 @@ from .datasources import datasource_service
 from .mdl_export import build_mdl, merge_snapshot, column_type
 from .datasource_table_storage import tables_digest
 from .ontology import ontology_service
-from .datasource_modeling import ModelingService, TERMINAL, _indexed
+from .datasource_modeling import ModelingService, TERMINAL, _indexed, package_objects, package_relations, GENERATOR_VERSION
+from .relation_output import clean_relations
 
 router=APIRouter(prefix="/api/v1")
 TASKS={}
@@ -101,10 +102,9 @@ async def start_scan(identifier: str,body: ScanRequest):
             if job["status"]!="running":return
             # A connection edit invalidates the old task before it can publish stale metadata.
             if source(identifier).scan_result.get("scan_job",{}).get("id")!=job["id"]:return
-            job.update(status="completed",phase="complete",completed_tables=len(result.get("tables",[])))
-            result["scan_job"]=job
+            result['scan_job']=job
             datasource_service.repository.record_scan(identifier,result)
-            modeling_service.start(identifier)
+            job.update(status="completed",phase="complete",completed_tables=len(result.get("tables",[])))
         except asyncio.CancelledError:job.update(status="cancelled",phase="cancelled")
         except Exception as exc:
             job.update(status="failed",phase="failed",error=exc.detail if isinstance(exc,HTTPException) else type(exc).__name__)
@@ -113,7 +113,8 @@ async def start_scan(identifier: str,body: ScanRequest):
                 source(identifier).scan_result["scan_job"]=job;datasource_service.repository.save(source(identifier))
             TASKS.pop(job["id"],None)
     TASKS[job["id"]]=asyncio.create_task(work())
-    return job
+    from .relation_output import clean_relations
+    return clean_relations(job)
 
 @router.get("/datasources/{identifier}/scan-jobs/{job_id}")
 async def scan_status(identifier: str,job_id: str):
@@ -124,7 +125,8 @@ async def scan_status(identifier: str,job_id: str):
     if job.get("status")=="running":
         progress=await executor_request("GET",f"executions/{job_id}/progress")
         job.update(progress)
-    return job
+    from .relation_output import clean_relations
+    return clean_relations(job)
 
 @router.post("/datasources/{identifier}/scan-jobs/{job_id}/cancel")
 async def cancel_scan(identifier: str,job_id: str):
@@ -135,7 +137,8 @@ async def cancel_scan(identifier: str,job_id: str):
         task=TASKS.get(job_id)
         if task:task.cancel()
         datasource_service.repository.save(source(identifier))
-    return job
+    from .relation_output import clean_relations
+    return clean_relations(job)
 
 class Decision(BaseModel):
     status: str=Field(pattern=r"^(accepted|rejected|pending)$")
@@ -170,7 +173,7 @@ class RelationshipEdit(BaseModel):
     source_table_id: str = Field(min_length=1, max_length=512)
     target_table_id: str = Field(min_length=1, max_length=512)
     key_pairs: list[RelationshipKeyPair] = Field(min_length=1, max_length=8)
-    cardinality: Literal["1:1", "1:N", "N:1", "N:N"]
+    cardinality: Literal["1:1", "1:N", "N:1", "N:N", "unknown"]
 
 
 def _relationship_view(candidate):
@@ -187,7 +190,6 @@ def _relationship_view(candidate):
         "status": candidate["status"],
         "origin": origin,
         "evidence_grade": grade,
-        "confidence": float(candidate.get("confidence") or 0),
         "decision_reason": next((e.get("reason") for e in reversed(candidate.get("evidence", [])) if e.get("kind") in {"automatic_exclusion", "independent_review", "model_semantic_review"}), ""),
         "predicates": candidate.get("condition_template", {}).get("guards", []),
         "automatically_excluded": candidate.get("status") == "rejected" and any(e.get("kind") == "automatic_exclusion" for e in candidate.get("evidence", [])),
@@ -202,30 +204,15 @@ def relations(
     page_size: int = Query(default=20, ge=1, le=100),
 ):
     source(identifier)
-    values = modeling_service.repository.list_candidates(identifier, "single_source")
-    # Discovery hypotheses remain internal; they are not a user confirmation queue.
-    values = [item for item in values if item.get("status") != "pending"]
-    if status:
-        values = [item for item in values if item.get("status") == status]
-    else:
-        values = [item for item in values if item.get("status") == "accepted"]
+    try:
+        values = modeling_service.repository.get_package(identifier)["payload"].get("relationshipRecords", [])
+    except KeyError:
+        values = []
+    values = [v for v in values if v.get("status") == "accepted"] if status in {"", "accepted"} else []
     values.sort(key=lambda item: ({"accepted": 0, "pending": 1, "rejected": 2, "stale": 3}.get(item.get("status"), 4), -float(item.get("confidence") or 0), item["id"]))
     total = len(values)
     window = values[(page - 1) * page_size:page * page_size]
     return {"items": [_relationship_view(item) for item in window], "page": page, "page_size": page_size, "total": total}
-
-
-def _type_family(column):
-    value = column_type(column)
-    if not value:
-        return ""
-    if value.startswith("decimal") or value in {"smallint", "integer", "bigint", "real", "double"}:
-        return "number"
-    if value in {"varchar", "char", "uuid"}:
-        return "text"
-    if value in {"date", "time", "timestamp", "timestamptz"}:
-        return "temporal"
-    return value
 
 
 def _validated_manual_candidate(identifier: str, body: RelationshipEdit):
@@ -243,97 +230,94 @@ def _validated_manual_candidate(identifier: str, body: RelationshipEdit):
         source_column, target_column = left_columns.get(pair["source"]), right_columns.get(pair["target"])
         if not source_column or not target_column:
             raise HTTPException(422, "关联关系引用了不存在的字段")
-        if not _type_family(source_column) or _type_family(source_column) != _type_family(target_column):
-            raise HTTPException(422, "关联字段类型不兼容")
     schema_hash = tables_digest(list(tables.values()))
     try:
         package = modeling_service.repository.get_package(identifier)
     except KeyError:
-        raise HTTPException(409, "单源本体尚未生成完成") from None
+        package = {"schema_hash": schema_hash, "status": "ready"}
     if package["schema_hash"] != schema_hash or package["status"] not in {"ready", "ready_with_pending"}:
         raise HTTPException(409, "单源本体正在更新，请完成后再编辑关系")
     return item, pairs, schema_hash
 
 
+async def _save_source_relations(identifier, records):
+    repository = modeling_service.repository
+    item = source(identifier)
+    schema_hash = tables_digest(item.scan_result.get("tables") or [])
+    try:
+        old = repository.get_package(identifier)
+    except KeyError:
+        old = {"payload": {"relations": []}}
+    objects, mapping = package_objects(identifier, item.scan_result["tables"])
+    records = clean_relations(records)
+    relations = package_relations(records, mapping)
+    payload = {"datasourceId": identifier, "schemaHash": schema_hash, "objects": objects,
+               "relations": relations, "relationshipRecords": records}
+    await modeling_service._commit_source_package(identifier,schema_hash,payload,item.scan_result['tables'])
+    repository.memory_candidates = {k:v for k,v in repository.memory_candidates.items() if v.get("source_datasource_id") != identifier}
+
+
+async def _write_manual_relation(identifier, body, candidate_id=None):
+    current = modeling_service.repository.latest_job(identifier)
+    if current and current["status"] not in TERMINAL:
+        raise HTTPException(409, "关联分析正在运行，请先取消任务再编辑")
+    _, pairs, _ = _validated_manual_candidate(identifier, body)
+    async with modeling_service.source_locks.setdefault(identifier, asyncio.Lock()):
+        try:
+            records = list(modeling_service.repository.get_package(identifier)["payload"].get("relationshipRecords", []))
+        except KeyError:
+            records = []
+        previous = next((r for r in records if r["id"] == candidate_id), None)
+        if candidate_id and not previous:
+            raise HTTPException(404, "关联关系不存在")
+        record = {**(previous or {}), "id": candidate_id or uuid4().hex,
+            "scope": "single_source", "source_datasource_id": identifier, "target_datasource_id": identifier,
+            "source_table_id": body.source_table_id, "target_table_id": body.target_table_id,
+            "source_columns": [p["source"] for p in pairs], "target_columns": [p["target"] for p in pairs],
+            "key_pairs": pairs, "cardinality": body.cardinality, "status": "accepted",
+            "evidence_grade": "manual", "reviewed_by": "data-steward",
+            "condition_template": {"operator": "and_equals", "guards": (previous or {}).get("condition_template", {}).get("guards", [])},
+            "evidence": [{"kind": "manual", "reason": "用户配置"}]}
+        await _save_source_relations(identifier, [r for r in records if r["id"] != candidate_id] + [record])
+        return _relationship_view(record)
+
+
+@router.post("/datasources/{identifier}/relationships", status_code=201)
+async def add_relationship(identifier: str, body: RelationshipEdit):
+    return await _write_manual_relation(identifier, body)
+
+
 @router.put("/datasources/{identifier}/relationships/{candidate_id}")
 async def edit_relationship(identifier: str, candidate_id: str, body: RelationshipEdit):
-    try:
-        previous = modeling_service.repository.get_candidate(candidate_id)
-    except KeyError:
-        raise HTTPException(404, "关联关系不存在") from None
-    if previous["scope"] != "single_source" or previous["source_datasource_id"] != identifier:
-        raise HTTPException(404, "关联关系不存在")
-    _, pairs, schema_hash = _validated_manual_candidate(identifier, body)
-    guards = previous.get("condition_template", {}).get("guards", [])
-    if guards and (previous["source_table_id"] != body.source_table_id or previous["target_table_id"] != body.target_table_id):
-        raise HTTPException(422, "该关系包含附加条件，更换关联表前需要重新定义完整连接条件")
-    modeling_service.repository.decide_candidate(candidate_id, "rejected", "data-steward", "已由人工配置替代")
-    manual_id = "manual_" + uuid4().hex
-    candidate = {
-        "id": manual_id,
-        "scope": "single_source",
-        "source_datasource_id": identifier,
-        "target_datasource_id": identifier,
-        "source_table_id": body.source_table_id,
-        "target_table_id": body.target_table_id,
-        "source_columns": [pair["source"] for pair in pairs],
-        "target_columns": [pair["target"] for pair in pairs],
-        "key_pairs": pairs,
-        "condition_template": {"operator": "and_equals", "pairs": [{"left": pair["source"], "right": pair["target"]} for pair in pairs], "guards": guards},
-        "evidence": [{"kind": "manual_configuration", "replaces": candidate_id}],
-        "evidence_grade": "manual",
-        "confidence": 1.0,
-        "cardinality": body.cardinality,
-        "status": "accepted",
-        "domain": None,
-    }
-    modeling_service.repository.replace_candidates([candidate], schema_hash, schema_hash)
-    job = modeling_service.start_package_rebuild(identifier)
-    return {
-        **_relationship_view(modeling_service.repository.get_candidate(manual_id)),
-        "modeling_job_id": job["id"],
-    }
+    return await _write_manual_relation(identifier, body, candidate_id)
 
 
 @router.delete("/datasources/{identifier}/relationships/{candidate_id}")
 async def delete_relationship(identifier: str, candidate_id: str):
-    try:
-        candidate = modeling_service.repository.get_candidate(candidate_id)
-    except KeyError:
-        raise HTTPException(404, "关联关系不存在") from None
-    if candidate["scope"] != "single_source" or candidate["source_datasource_id"] != identifier:
-        raise HTTPException(404, "关联关系不存在")
-    try:
-        package = modeling_service.repository.get_package(identifier)
-    except KeyError:
-        raise HTTPException(409, "单源本体尚未生成完成") from None
-    if package["schema_hash"] != tables_digest(source(identifier).scan_result.get("tables") or []):
-        raise HTTPException(409, "单源本体正在更新，请完成后再停用关系")
-    candidate = modeling_service.repository.decide_candidate(
-        candidate_id, "rejected", "data-steward", "人工停用"
-    )
-    job = modeling_service.start_package_rebuild(identifier)
-    return {**_relationship_view(candidate), "modeling_job_id": job["id"]}
+    current = modeling_service.repository.latest_job(identifier)
+    if current and current["status"] not in TERMINAL:
+        raise HTTPException(409, "关联分析正在运行，请先取消任务再编辑")
+    source(identifier)
+    async with modeling_service.source_locks.setdefault(identifier, asyncio.Lock()):
+        try:
+            package = modeling_service.repository.get_package(identifier)
+        except KeyError:
+            raise HTTPException(404, "关联关系不存在") from None
+        if package['schema_hash']!=tables_digest(source(identifier).scan_result.get('tables',[])):
+            raise HTTPException(409,'结构已变化，请先更新关联关系')
+        records = package["payload"].get("relationshipRecords", [])
+        if not any(r["id"] == candidate_id for r in records):
+            raise HTTPException(404, "关联关系不存在")
+        await _save_source_relations(identifier, [r for r in records if r["id"] != candidate_id])
+        if modeling_service.repository.dsn:
+            with modeling_service.repository._connect() as connection:
+                connection.execute("DELETE FROM semora_meta.relationship_candidates WHERE id=%s AND source_datasource_id=%s", (candidate_id, identifier))
+        return {"id": candidate_id, "deleted": True}
 
 
 @router.post("/datasources/{identifier}/relationships/{candidate_id}/restore")
 async def restore_relationship(identifier: str, candidate_id: str):
-    item = source(identifier)
-    try:
-        candidate = modeling_service.repository.get_candidate(candidate_id)
-        package = modeling_service.repository.get_package(identifier)
-    except KeyError:
-        raise HTTPException(404, "关联关系不存在") from None
-    if candidate["scope"] != "single_source" or candidate["source_datasource_id"] != identifier:
-        raise HTTPException(404, "关联关系不存在")
-    current_hash = tables_digest(item.scan_result.get("tables") or [])
-    if package["schema_hash"] != current_hash or candidate.get("source_schema_hash") != current_hash:
-        raise HTTPException(409, "数据结构已变化，不能恢复旧关系；请重新配置")
-    candidate = modeling_service.repository.decide_candidate(
-        candidate_id, "accepted", "data-steward", "人工恢复"
-    )
-    job = modeling_service.start_package_rebuild(identifier)
-    return {**_relationship_view(candidate), "modeling_job_id": job["id"]}
+    raise HTTPException(410, "排除关系不再存储，请新增或重新分析关系")
 
 @router.get("/datasources/{identifier}/mdl-report")
 def mdl_report(identifier: str):
@@ -394,31 +378,7 @@ class OntologyRelationInput(BaseModel):
 
 @router.post("/datasources/{identifier}/relationships/{candidate_id}/ontology-candidate")
 async def ontology_candidate(identifier: str,candidate_id: str,body: OntologyRelationInput):
-    from .ontology import ontology_service,OntologyCoreError
-    from .mdl_export import quoted
-    item=source(identifier)
-    candidate=next((r for r in item.scan_result.get("relationship_candidates",[]) if r["id"]==candidate_id),None)
-    if not candidate:raise HTTPException(404,"候选不存在")
-    try:
-        draft=await ontology_service.get_configuration(body.domain)
-        objects={o["name"]:o for o in draft.get("objects",[])}
-        left,right=objects.get(body.source_object),objects.get(body.target_object)
-        if not left or not right:raise HTTPException(422,"请先在本体维护中建立两端对象")
-        for obj,table in [(left,candidate["source_table"]),(right,candidate["target_table"])]:
-            sid=obj.get("dataSourceId") or draft.get("dataSourceId")
-            if sid!=identifier or obj.get("table")!=table:raise HTTPException(422,"对象物理表或数据源与候选不一致")
-        def fields(obj, columns):
-            mapping={p.get("column"):p["name"] for p in obj.get("properties",[])}
-            if any(c not in mapping for c in columns):raise HTTPException(422,"请先补齐本体字段映射")
-            return [mapping[c] for c in columns]
-        a,b=fields(left,candidate["columns"]),fields(right,candidate["target_columns"])
-        condition=" AND ".join(f"{quoted(left['name'])}.{quoted(x)} = {quoted(right['name'])}.{quoted(y)}" for x,y in zip(a,b))
-        # This creates a review candidate; publishing stays with existing ontology maintenance.
-        return await ontology_service.create_candidate({"domain":body.domain,"term":"r_"+candidate_id,
-            "source":"datasource:"+identifier,"proposal":"结构推断关系，需人工确认业务含义","kind":"relation",
-            "patch":{"name":"r_"+candidate_id,"from":left["name"],"to":right["name"],"condition":condition,"cardinality":"N:1","joinType":"many_to_one"},
-            "evidence":{"locator":"schema-scan","excerpt":"；".join(candidate["evidence"])}})
-    except OntologyCoreError as exc:raise HTTPException(exc.status_code,str(exc)) from exc
+    raise HTTPException(410, "请直接在业务域本体配置中添加关联关系")
 
 
 @router.get("/datasources/{identifier}/onboarding")
@@ -433,13 +393,110 @@ def onboarding_status(identifier: str):
 @router.post("/datasources/{identifier}/onboarding/retry",status_code=202)
 async def retry_onboarding(identifier: str):
     source(identifier)
-    return modeling_service.start(identifier,force=False)
+    previous=modeling_service.repository.latest_job(identifier)
+    return modeling_service.start(identifier,force=False,metadata_only=bool((previous or {}).get('details',{}).get('metadata_only',True)))
+
+
+@router.post("/datasources/{identifier}/onboarding/{job_id}/resume", status_code=202)
+async def resume_failed_analysis(identifier: str, job_id: str):
+    source(identifier)
+    try:
+        return modeling_service.resume_failed(identifier, job_id)
+    except KeyError:
+        raise HTTPException(404, '分析任务不存在') from None
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/datasources/{identifier}/onboarding/{job_id}/cancel")
+async def cancel_onboarding(identifier: str, job_id: str):
+    source(identifier)
+    try:
+        return await modeling_service.cancel(identifier, job_id)
+    except KeyError:
+        raise HTTPException(404, "分析任务不存在") from None
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/datasources/{identifier}/relationships/analyze", status_code=202)
+async def analyze_relationships(identifier: str):
+    item = source(identifier)
+    if 'tables' not in item.scan_result:
+        raise HTTPException(409, "尚无已扫描结构，请先重新扫描")
+    current=modeling_service.repository.latest_job(identifier)
+    if current and current['status'] not in TERMINAL:
+        raise HTTPException(409,'任务正在运行，不能重新分析')
+    return modeling_service.start(identifier, relations_only=True, fresh=True)
+
+
+class RelationshipStageInput(BaseModel):
+    stage:Literal['keywords','retrieval','organization','discovery']
+    job_id:str|None=None
+
+
+@router.post('/datasources/{identifier}/relationships/analysis-stages', status_code=202)
+async def run_relationship_stage(identifier:str, body:RelationshipStageInput):
+    source(identifier)
+    try:
+        return modeling_service.start_relationship_stage(identifier,body.stage,body.job_id)
+    except KeyError:
+        raise HTTPException(404,'阶段任务不存在') from None
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
+
+
+@router.get('/datasources/{identifier}/relationships/analysis-stages/{job_id}')
+def relationship_stage_result(identifier:str,job_id:str,section:Literal['keywords','retrieval','organization','proposals']='keywords',
+                              keyword:str|None=None,page:int=Query(1,ge=1),page_size:int=Query(50,ge=1,le=200)):
+    source(identifier)
+    try:
+        job=modeling_service.repository.get_job(job_id)
+        if job['datasource_id']!=identifier or not job.get('details',{}).get('stage_only'):
+            raise KeyError(job_id)
+        from .relationship_work import RelationshipWork,job_input_hash,normalize_keyword
+        from .relationship_inputs import digest
+        repository=modeling_service.repository
+        previous=job_input_hash(repository,job)
+        engine=None
+        if previous and repository.dsn:
+            work=RelationshipWork(repository,job_id,previous,{},lambda:None)
+        else:
+            engine=modeling_service.relationship_stage_context(job)
+            work=engine.work
+        def stage_result(stage):
+            record=work.get('stage',digest(stage))
+            return record['payload'] if record and record['status']=='completed' else {}
+        if section=='keywords': values=work.keywords()
+        elif section=='retrieval':
+            # A read endpoint must not perform retrieval or create work records.
+            if keyword is None:
+                values=[{'keyword':k,'total':v} for k,v in stage_result('retrieval').get('counts',{}).items()]
+            else:
+                found=work.get('retrieval',digest(normalize_keyword(keyword)))
+                values=found['payload']['items'] if found and found['status']=='completed' else []
+                try:
+                    engine=engine or modeling_service.relationship_stage_context(job)
+                except ValueError:
+                    pass  # Historical hits remain readable without substituting current metadata.
+                if engine is not None: values=[engine.brief(v) for v in values]
+        elif section=='organization':
+            organized=stage_result('organization')
+            values=[{'kind':'group',**g} for g in organized.get('groups',[])]+[
+                {'kind':'excluded',**h} for h in organized.get('excluded',[])]
+        else: values=stage_result('discovery').get('proposals',[])
+        return {'job':job,'section':section,'items':values[(page-1)*page_size:page*page_size],
+                'page':page,'page_size':page_size,'total':len(values)}
+    except KeyError:
+        raise HTTPException(404,'阶段任务不存在') from None
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
 
 
 @router.post("/datasources/{identifier}/rescan",status_code=202)
 async def rescan(identifier: str):
     source(identifier)
-    return modeling_service.start(identifier,force=True)
+    return modeling_service.start(identifier,force=True,metadata_only=True)
 
 
 @router.get("/datasources/{identifier}/source-ontology")
@@ -448,42 +505,30 @@ def source_ontology(identifier: str):
     try:package=modeling_service.repository.get_package(identifier)
     except KeyError:raise HTTPException(404,"数据源尚未生成单源本体包") from None
     package["candidates"]=[c for c in modeling_service.repository.list_candidates(identifier,"single_source") if c["status"] == "accepted"]
-    return package
+    from .relation_output import clean_relations
+    return clean_relations(package)
 
 
 @router.put("/relationship-candidates/{candidate_id}")
 async def decide_discovered_candidate(candidate_id: str, body: Decision):
-    try:
-        return await modeling_service.decide_candidate(
-            candidate_id, body.status, reviewer="data-steward", note=body.note
-        )
-    except KeyError:
-        raise HTTPException(404,"关系候选不存在") from None
-    except ValueError as exc:
-        raise HTTPException(422,str(exc)) from exc
+    raise HTTPException(410, "关联生成后自动生效，不再提供候选确认接口")
 
 
 @router.post("/ontology/configurations/{domain}/sources/{identifier}")
 async def bind_source_package(domain: str,identifier: str):
     item=source(identifier)
     try:package=modeling_service.repository.get_package(identifier)
-    except KeyError:raise HTTPException(409,"请先完成数据源自动建模") from None
+    except KeyError:raise HTTPException(409,"请先手动更新关联关系") from None
     from .datasource_table_storage import tables_digest
     tables=item.scan_result.get("tables") or []
     if (item.status!="healthy" or not tables or package["schema_hash"]!=tables_digest(tables)
             or package["status"] not in {"ready","ready_with_pending"}):
-        raise HTTPException(409,"数据源自动建模尚未完成或结构已过期")
+        raise HTTPException(409,"请先手动更新关联关系，使其与当前结构一致")
     try:configuration=await ontology_service.get_configuration(domain)
     except Exception as exc:raise HTTPException(404,"业务域不存在") from exc
-    objects={obj["name"]:obj for obj in configuration.get("objects",[])}
-    for obj in package["payload"].get("objects",[]):objects[obj["name"]]=obj
-    relations={relation["name"]:relation for relation in configuration.get("relations",[])}
-    for relation in package["payload"].get("relations",[]):
-        relation={**relation,"metadata":{**relation.get("metadata",{}),"sourcePackageId":identifier}}
-        relations[relation["name"]]=relation
     refs={ref["dataSourceId"]:ref for ref in configuration.get("sourcePackageRefs",[]) if ref.get("dataSourceId")}
-    refs[identifier]={"dataSourceId":identifier,"schemaHash":package["schema_hash"],"version":package["generator_version"]}
-    configuration.update(objects=list(objects.values()),relations=list(relations.values()),sourcePackageRefs=list(refs.values()))
+    refs[identifier]={"dataSourceId":identifier,"schemaHash":package["schema_hash"]}
+    configuration['sourcePackageRefs']=list(refs.values())
     configuration["dataSourceId"]=configuration.get("dataSourceId") or item.id
     return await ontology_service.save_configuration(domain,configuration)
 
@@ -506,12 +551,14 @@ async def start_cross_source(domain: str,body: CrossSourceInput):
 
 
 @router.get("/ontology/configurations/{domain}/cross-source-analysis/{job_id}")
-def cross_source_status(domain: str,job_id: str):
+async def cross_source_status(domain: str,job_id: str):
     try:job=modeling_service.repository.get_job(job_id)
     except KeyError:raise HTTPException(404,"跨源分析任务不存在") from None
     if job.get("domain")!=domain or job.get("kind")!="cross_source":raise HTTPException(404,"跨源分析任务不存在")
     if job["status"] in TERMINAL:
-        job["candidates"]=[c for c in modeling_service.repository.list_cross_candidates(
-            job["datasource_id"],job["peer_datasource_id"],domain
-        ) if c["status"] == "accepted"]
-    return {**job, "details": {k: v for k, v in job.get("details", {}).items() if k not in {"query_table_roles", "pending"}}}
+        configuration = await ontology_service.get_configuration(domain)
+        job["candidates"] = [r.get("metadata", {}).get("relationshipRecord") for r in configuration.get("relations", [])
+            if r.get("metadata", {}).get("relationshipRecord", {}).get("scope") == "cross_source"
+            and {r["metadata"]["relationshipRecord"]["source_datasource_id"], r["metadata"]["relationshipRecord"]["target_datasource_id"]}
+            == {job["datasource_id"], job["peer_datasource_id"]}]
+    return clean_relations({**job, "details": {k: v for k, v in job.get("details", {}).items() if k not in {"query_table_roles", "pending"}}})

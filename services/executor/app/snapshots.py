@@ -2,16 +2,17 @@
 from collections import defaultdict
 import psycopg
 from . import mysql_adapter, scan_control
+from .timeouts import scan_timeout_ms
 
 def supplement_native(result, dsn, kind):
     tables = {(t["schema"],t["name"]): t for t in result.get("tables", [])}
     gaps = result.setdefault("permission_gaps", [])
-    factory = (lambda: mysql_adapter.connect(dsn,30000)) if kind == "mysql" else (lambda: psycopg.connect(dsn,connect_timeout=5))
+    factory = (lambda: mysql_adapter.connect(dsn,scan_timeout_ms())) if kind == "mysql" else (lambda: psycopg.connect(dsn,connect_timeout=5))
     try:
         with scan_control.track(factory()) as connection:
             with connection.cursor() as cur:
-                if kind == "mysql": mysql_adapter.begin_readonly(connection,30000)
-                else: cur.execute("SET TRANSACTION READ ONLY");cur.execute("SET LOCAL statement_timeout='30s'")
+                if kind == "mysql": mysql_adapter.begin_readonly(connection,scan_timeout_ms())
+                else: cur.execute("SET TRANSACTION READ ONLY");cur.execute("SELECT set_config('statement_timeout', %s, true)",(str(scan_timeout_ms()),))
                 if kind == "postgresql":
                     cur.execute("""SELECT n.nspname,c.relname,c.relkind,obj_description(c.oid),a.attname,
                         format_type(a.atttypid,a.atttypmod),col_description(c.oid,a.attnum)

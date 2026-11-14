@@ -73,8 +73,12 @@ class StructuredModel:
             raise ModelError("LLM 未配置")
         from .context_budget import prepare_context
         messages,_=prepare_context([{'role':'system','content':system},{'role':'user','content':user}],[])
-        raw = await self._request({'model':self.model,'temperature':0.3,'response_format':{'type':'json_object'},
-            'messages':messages},on_request_event)
+        from .model_diagnostics import current_json_options
+        options=current_json_options()
+        body={'model':self.model,'temperature':0.3,'messages':messages}
+        if not options or options[0]=='json_object':
+            body['response_format']={'type':'json_object'}
+        raw = await self._request(body,on_request_event)
         content = raw.get('content')
         if not isinstance(content, str):
             raise ModelError("模型未返回 JSON 文本")
@@ -105,7 +109,13 @@ class StructuredModel:
         body=dict(body)
         argument_limit=body.pop('_semora_tool_argument_limit',None)
         thinking=os.getenv('LLM_ENABLE_THINKING','').strip().lower()
-        delivery_seconds=float(os.getenv('LLM_NO_DELIVERY_SECONDS','60'))
+        from .model_diagnostics import current_json_options
+        options=current_json_options()
+        if options and options[1]!='inherit':
+            thinking='' if options[1]=='omit' else options[1]
+        from .model_diagnostics import current_delivery_budget
+        scoped_budget = current_delivery_budget()
+        delivery_seconds=float(scoped_budget[0] if scoped_budget else os.getenv('LLM_NO_DELIVERY_SECONDS','60'))
         if delivery_seconds < 0:
             raise ModelError('LLM_NO_DELIVERY_SECONDS 不能为负数')
         if thinking not in {'','true','false'}:
@@ -150,7 +160,7 @@ class StructuredModel:
                 diagnostic.data['timeout_kind']='no_delivery_deadline'
                 diagnostic.data['retryable']=False
                 diagnostic.emit('agent.request.timeout',f'模型 {delivery_seconds:g} 秒未交付答案或工具参数，停止本次请求，不自动重试；部分产物不执行')
-                raise NoDeliveryError(NoDeliveryError.public_message) from exc
+                raise NoDeliveryError(scoped_budget[1] if scoped_budget else NoDeliveryError.public_message) from exc
             except (httpx.ReadTimeout,TimeoutError) as exc:
                 diagnostic.data['timeout_kind']='read_idle' if isinstance(exc,httpx.ReadTimeout) else 'request_deadline'
                 diagnostic.emit('agent.request.timeout',f'模型请求达到 {self.timeout_seconds:g} 秒等待限制；已保留响应进度')

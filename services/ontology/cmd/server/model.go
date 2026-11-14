@@ -61,7 +61,7 @@ type DefaultFilter struct {
 type SourcePackageRef struct {
 	DataSourceID string `json:"dataSourceId"`
 	SchemaHash   string `json:"schemaHash"`
-	Version      string `json:"version"`
+	Version      string `json:"version,omitempty"`
 }
 
 type Ontology struct {

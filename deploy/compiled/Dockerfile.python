@@ -27,7 +27,7 @@ RUN python /build/compile_modules.py && python /build/verify_payload.py /compile
 
 FROM dependencies AS runtime
 ARG SERVICE=api
-ENV PYTHONPATH=/app PYTHONDONTWRITEBYTECODE=1 SEMORA_SERVICE=$SERVICE
+ENV PYTHONPATH=/app PYTHONDONTWRITEBYTECODE=1 SEMORA_SERVICE=$SERVICE RELATIONSHIP_CHECKPOINT_DIR=/var/lib/semora/relationship-checkpoints
 COPY --from=compiler /compiled/ /app/
 COPY --from=jdbc /build/target/jdbc-worker-1.0.0.jar /opt/semora-jdbc/
 COPY --from=jdbc /build/target/lib /opt/semora-jdbc/lib
@@ -37,6 +37,8 @@ COPY deploy/compiled/verify_payload.py /usr/local/bin/semora-verify-payload
 RUN mkdir -p /data/config && chown 10001:10001 /data/config \
     && addgroup --system --gid 10001 semora \
     && adduser --system --uid 10001 --ingroup semora --no-create-home semora \
+    && mkdir -p /var/lib/semora/relationship-checkpoints \
+    && chown -R semora:semora /var/lib/semora \
     && python /usr/local/bin/semora-verify-payload /app
 USER 10001:10001
 CMD ["python", "-c", "import os, uvicorn; uvicorn.run('app.main:app', host='0.0.0.0', port=8002 if os.environ['SEMORA_SERVICE'] == 'executor' else 8000)"]

@@ -310,3 +310,36 @@ def test_public_argument_limit_discards_unfinished_payload_and_logs_only_counts(
     limited=next(d for n,d in events if n=='agent.request.output_limit')
     assert limited['failure_kind']=='public_output_limit' and limited['argument_chars']>1000
     assert limited['repeated_blocks']>0 and secret not in json.dumps(events)
+
+
+def test_local_relation_adapter_omits_optional_parameters_without_affecting_queries(monkeypatch):
+    from app.relationship_context import complete
+    monkeypatch.setenv('RELATIONSHIP_RESPONSE_FORMAT','text')
+    monkeypatch.setenv('RELATIONSHIP_THINKING_MODE','omit')
+    monkeypatch.setenv('LLM_ENABLE_THINKING','false')
+    seen=[]
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(200,json={'choices':[{'message':{'content':'{"ok":true}'},'finish_reason':'stop'}]})
+    client=client_with_transport(monkeypatch,handler)
+    async def run():
+        assert await complete(client,'generic',{'tables':[]})=={'ok':True}
+        assert await client.complete_json('generic','data')=={'ok':True}
+    asyncio.run(run())
+    assert 'response_format' not in seen[0] and 'enable_thinking' not in seen[0]
+    assert seen[1]['response_format']=={'type':'json_object'}
+    assert seen[1]['enable_thinking'] is False
+
+
+def test_relation_adapter_preserves_current_json_mode_and_disabled_thinking(monkeypatch):
+    from app.relationship_context import complete
+    monkeypatch.setenv('RELATIONSHIP_RESPONSE_FORMAT','json_object')
+    monkeypatch.setenv('RELATIONSHIP_THINKING_MODE','inherit')
+    monkeypatch.setenv('LLM_ENABLE_THINKING','false')
+    def handler(request):
+        body=json.loads(request.content)
+        assert body['response_format']=={'type':'json_object'}
+        assert body['enable_thinking'] is False
+        return httpx.Response(200,json={'choices':[{'message':{'content':'{"ok":true}'},'finish_reason':'stop'}]})
+    client=client_with_transport(monkeypatch,handler)
+    assert asyncio.run(complete(client,'generic',{'tables':[]}))=={'ok':True}

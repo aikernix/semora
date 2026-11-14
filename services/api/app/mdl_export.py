@@ -79,13 +79,13 @@ def candidates(snapshot):
                     if not name:break
                     source_cols.append(name)
                 if len(source_cols)!=len(cols):continue
-                r={"source_table":source["id"],"columns":source_cols,"target_table":target["id"],"target_columns":cols,"origin":"inferred","evidence":["同名字段","类型兼容","目标声明唯一键"],"status":"pending"}
+                r={"source_table":source["id"],"columns":source_cols,"target_table":target["id"],"target_columns":cols,"origin":"inferred","evidence":["同名字段","类型兼容","目标声明唯一键"],"status":"unresolved"}
                 r["id"]=relationship_id(r)
                 if r["id"] not in declared:result.append(r)
                 if len(result)>=500:return sorted(result,key=lambda r:r["id"])
     return sorted({r["id"]:r for r in result}.values(),key=lambda r:r["id"])
 
-def merge_snapshot(previous, current):
+def merge_snapshot(previous, current, *, infer_relationships=True):
     current=deepcopy(current)
     old={t.get("id") or ".".join(str(t.get(k)) for k in ("catalog","schema","name") if t.get(k)):t for t in previous.get("tables",[])}
     for t in current.get("tables",[]):
@@ -96,6 +96,9 @@ def merge_snapshot(previous, current):
         pc={c["name"]:c for c in prior.get("columns",[])}
         for c in t["columns"]:
             if "user_description" in pc.get(c["name"],{}):c["user_description"]=pc[c["name"]]["user_description"]
+    current["scan_diff"]={"added":sorted(set(t["id"] for t in current.get("tables",[]))-set(old)),"removed":sorted(set(old)-set(t["id"] for t in current.get("tables",[])))}
+    if not infer_relationships:
+        return current
     decisions=previous.get("relationship_decisions",{})
     current["relationship_decisions"]=decisions
     current["relationship_candidates"]=candidates(current)
@@ -117,7 +120,7 @@ def build_mdl(snapshot, product):
     connection=snapshot.get("connection",{})
     semantic_product="oracle" if product=="oracle" or connection.get("compatibility_mode")=="oracle" else product
     report={"builder_version":1,"wren_core_version":WREN_VERSION,"schema_commit":SCHEMA_COMMIT,
-            "issues":issues,"pending_relationships":[r for r in snapshot.get("relationship_candidates",[]) if r.get("status")=="pending"],
+            "issues":issues,"pending_relationships":[],
             "wren_target_execution":"unverified","schema_validation":"pending","wren_build":"pending"}
     if snapshot.get("scan_stale"):issues.append({"code":"stale_snapshot","message":"驱动配置已变化，请重新扫描并核对本体映射"})
     detected=connection.get("detected_compatibility_mode")

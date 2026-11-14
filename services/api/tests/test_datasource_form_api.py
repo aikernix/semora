@@ -37,7 +37,7 @@ def test_table_catalog_is_paginated_from_persisted_snapshot():
     assert repository.table_detail("source", page["items"][0]["id"])["columns"][0]["name"] == "id"
 
 
-def test_relation_edit_soft_delete_and_restore(monkeypatch):
+def test_relation_edit_delete_and_retired_confirmation(monkeypatch):
     tables = [
         _table("public.entity", "entity", [("id", "bigint")], ["id"]),
         _table("public.event", "event", [("id", "bigint"), ("entity_id", "bigint")], ["id"]),
@@ -87,19 +87,42 @@ def test_relation_edit_soft_delete_and_restore(monkeypatch):
 
     assert client.get("/api/v1/datasources/source/relationships").json()["total"] == 0
     assert client.get("/api/v1/datasources/source/relationships?status=pending").json()["total"] == 0
-    edited = client.put(
-        "/api/v1/datasources/source/relationships/candidate",
-        json={
-            "source_table_id": "public.event",
-            "target_table_id": "public.entity",
-            "key_pairs": [{"source": "entity_id", "target": "id"}],
-            "cardinality": "N:1",
-        },
-    )
-    assert edited.status_code == 200
-    manual_id = edited.json()["id"]
-    assert edited.json()["origin"] == "manual"
-    assert edited.json()["modeling_job_id"]
-    assert client.get("/api/v1/datasources/source/onboarding").json()["details"]["package_only"]
-    assert client.delete(f"/api/v1/datasources/source/relationships/{manual_id}").json()["status"] == "rejected"
-    assert client.post(f"/api/v1/datasources/source/relationships/{manual_id}/restore").json()["status"] == "accepted"
+    from copy import deepcopy
+    class Ontology:
+        def __init__(self):
+            self.configs={'bound':{'domain':'bound','sourcePackageRefs':[{'dataSourceId':'source'}],'relations':[{'name':'keep_cross','from':'x','to':'y'}]},
+                          'unrelated':{'domain':'unrelated','sourcePackageRefs':[],'relations':[]}}
+            self.published=[]
+            self.packages={}
+        async def update_source_package(self,value):
+            self.packages[value['dataSourceId']]=deepcopy(value['payload'])
+            self.published.extend(k for k,v in self.configs.items() if any(r['dataSourceId']==value['dataSourceId'] for r in v['sourcePackageRefs']))
+        async def list_drafts(self):return [{'domain':k} for k in self.configs]
+        async def get_configuration(self,domain):return deepcopy(self.configs[domain])
+        async def save_configuration(self,domain,value):
+            self.configs[domain]=deepcopy(value);self.published.append(domain);return value
+    ontology=Ontology()
+    modeling.ontology=ontology
+    monkeypatch.setattr(database_routes,'ontology_service',ontology)
+    # Manual mappings also use original types without a family whitelist.
+    record.scan_result['tables'][1]['columns'][1]['type']='VENDOR_IDENTIFIER'
+    record.scan_result['tables'][1]['columns'][1]['raw_type']='VENDOR_IDENTIFIER'
+    source_repository.save(record)
+    modeling_repository.memory_packages['source']['schema_hash']=tables_digest(record.scan_result['tables'])
+    body={'source_table_id':'public.event','target_table_id':'public.entity','key_pairs':[{'source':'entity_id','target':'id'}],'cardinality':'N:1'}
+    created=client.post('/api/v1/datasources/source/relationships',json=body)
+    assert created.status_code==201,created.text
+    identifier=created.json()['id']
+    assert 'confidence' not in created.json()
+    assert len(ontology.configs['bound']['relations'])==1
+    assert len(ontology.packages['source']['relations'])==1
+    assert ontology.published==['bound']
+    edited=client.put('/api/v1/datasources/source/relationships/'+identifier,json={**body,'cardinality':'1:1'})
+    assert edited.status_code==200,edited.text
+    assert ontology.packages['source']['relations'][-1]['cardinality']=='1:1'
+    assert client.delete('/api/v1/datasources/source/relationships/'+identifier).json()['deleted'] is True
+    assert ontology.configs['bound']['relations']==[{'name':'keep_cross','from':'x','to':'y'}]
+    assert ontology.configs['unrelated']['relations']==[]
+    assert modeling_repository.get_package('source')['payload']['relationshipRecords']==[]
+    assert client.get('/api/v1/datasources/source/relationships').json()['total']==0
+    assert client.post('/api/v1/datasources/source/relationships/'+identifier+'/restore').status_code==410

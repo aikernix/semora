@@ -35,3 +35,16 @@ def test_configuration_routes_save_effective_and_validate_sources(monkeypatch):
     assert client.put(path, json=body).status_code == 200
     assert calls[-1] == ("save", "example", body)
     assert len(calls) == 2  # no separate publish action
+
+
+def test_relation_decisions_do_not_require_or_return_scores():
+    from app.relationship_research import decision
+    from app.relation_output import clean_relations
+    value={'supported':True,'structure_sufficient':True,'reason':'complete record reference','target_role':'reference','alternative_unresolved':False,
+           'query_outcome':'usable','additional_predicates':[],'key_domain':'same',
+           'relationship_kind':'direct_record_reference','coverage_expectation':'complete'}
+    assert decision(value,strict=True)['supported']
+    assert 'confidence' not in decision({**value,'confidence':.9},strict=True)
+    old={'relations':[{'name':'r','metadata':{'confidence':.7}}]}
+    assert clean_relations(old)=={'relations':[{'name':'r','metadata':{}}]}
+    assert old['relations'][0]['metadata']['confidence']==.7

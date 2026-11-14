@@ -46,7 +46,7 @@ docker compose -f docker-compose.yml -f deploy/compose.mvp.yml up -d --build --r
 
 只有 SQL 原生执行链路。旧 QueryIntent 运算编译器、候选规划协议、Reviewer、审批、审计导出和独立语义规划服务已移除；历史记录只做数据读取兼容，不恢复旧执行路径。非测试查询历史与业务配置保留。升级已有环境前先备份元数据库；`007-retire-audit.sql` 会清除已退休的审计表，不清理外部业务数据库。旧 Helm 原型已移除，目前维护 Docker Compose 部署。
 
-具体流程、边界和维护规则见 [SQL 查询链路](docs/sql-generation-mvp.md)。
+具体流程、边界和维护规则见 [SQL 查询链路](docs/sql-generation-mvp.md)。表间关系自动发现、存储、迁移及回退见 [关联分析](docs/relationship-discovery.md)。
 
 本体发布直接保存规范化定义及内容哈希，不再生成 Wren MDL 或要求通过 Wren 投影。旧快照及数据库的历史产物列保留读取兼容，不重算、不覆盖；查询只消费本体定义。关系中的固定值和复合条件原样保留，去重对象的声明列检查独立于任何语义引擎。
 

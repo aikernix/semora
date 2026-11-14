@@ -2,13 +2,25 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import weakref
+import os
 import math
 import re
 import logging
 import time
+import hashlib
 from uuid import uuid4
 
 REQUEST_LIMIT = 64000
+_MODEL_LIMITERS = weakref.WeakKeyDictionary()
+
+
+def model_limiter():
+    loop = asyncio.get_running_loop()
+    if loop not in _MODEL_LIMITERS:
+        _MODEL_LIMITERS[loop] = asyncio.Semaphore(max(1, min(3, int(os.getenv("RELATIONSHIP_MODEL_CONCURRENCY", "3")))))
+    return _MODEL_LIMITERS[loop]
 
 
 def encoded(value):
@@ -34,7 +46,14 @@ async def complete(model, system, payload):
     logger.info(encoded(metrics))
     started = time.monotonic()
     try:
-        result = await model.complete_json(system, encoded(payload))
+        from semora_agent.model_diagnostics import delivery_budget, json_model_options
+        seconds = float(os.getenv("RELATIONSHIP_NO_DELIVERY_SECONDS", "300"))
+        if seconds <= 0:
+            raise ValueError("RELATIONSHIP_NO_DELIVERY_SECONDS must be positive")
+        async with model_limiter():
+            with delivery_budget(seconds, f"关联分析模型在{seconds:g}秒内未交付结果，本次任务已停止；已完成批次和检查点已保留，原生效关系不变。"):
+                with json_model_options(os.getenv("RELATIONSHIP_RESPONSE_FORMAT", "json_object"), os.getenv("RELATIONSHIP_THINKING_MODE", "inherit")):
+                    result = await model.complete_json(system, encoded(payload))
     except Exception as exc:
         logger.info(encoded({**metrics, "event": "relationship.model.failed", "error_type": type(exc).__name__}))
         raise
@@ -121,13 +140,13 @@ def table_card(table, columns):
 
 
 def table_batches(cards, system):
-    """Aim for 10 tables; balance the tail up to 15. Bytes always take priority."""
+    """At most twenty detailed tables, additionally constrained by request bytes."""
     n = len(cards)
-    count = max(1, math.ceil(n / 15), n // 10)
+    count = max(1, math.ceil(n / 20), n // 20)
     width, remainder = divmod(n, count)
     offset = 0
     for i in range(count):
-        amount = (10 if i == 0 else n - 10) if 15 < n < 20 else width + (i < remainder)
+        amount = width + (i < remainder)
         group = cards[offset:offset + amount]
         offset += len(group)
         batch = []
@@ -154,7 +173,8 @@ def table_batches(cards, system):
 
 def relation_payload(packets, required_ids=(), **extra):
     """Share each table card once; retain per-candidate field mappings and evidence."""
-    tables, candidates = {}, []
+    tables, candidates, proposal_catalog = {}, [], {}
+    target_domains = {}
     def ref(card):
         if not isinstance(card, dict) or "table_id" not in card:
             return card
@@ -174,13 +194,27 @@ def relation_payload(packets, required_ids=(), **extra):
         return {"table_ref": key, "fields": [c["name"] for c in card.get("fields", [])]}
     for packet in packets:
         candidate = {k: v for k, v in packet.items() if k not in {"source", "target", "other_targets"}}
+        neighbors = candidate.pop("other_proposals", [])
+        if neighbors:
+            candidate["other_proposal_ids"] = [r['id'] for r in neighbors]
+            for relation in neighbors:
+                compact = {k: v for k, v in relation.items() if k not in {'source_columns', 'target_columns', 'condition_template'}}
+                if relation.get('condition_template', {}).get('guards'):
+                    compact['guards'] = relation['condition_template']['guards']
+                proposal_catalog[relation['id']] = compact
+        observations = candidate.pop('target_domain_observations', [])
+        if observations:
+            key = hashlib.sha256(encoded(observations).encode()).hexdigest()[:20]
+            target_domains[key] = observations
+            candidate['target_domain_ref'] = key
         for side in ("source", "target"):
             if side in packet:
                 candidate[side] = ref(packet[side])
         if "other_targets" in packet:
             candidate["other_targets"] = [{**item, "target": ref(item["target"])} for item in packet["other_targets"]]
         candidates.append(candidate)
-    return {"tables": tables, "candidates": candidates, "required_decision_ids": list(required_ids), **extra}
+    return {"tables": tables, "candidates": candidates, "other_proposals": proposal_catalog,
+            "target_domains": target_domains, "required_decision_ids": list(required_ids), **extra}
 
 
 def relation_batches(packets, system):
@@ -189,8 +223,7 @@ def relation_batches(packets, system):
         trial = relation_payload(batch + [packet], [p["candidate_id"] for p in batch + [packet]])
         current_count = len(relation_payload(batch)["tables"]) if batch else 0
         new_count = len(trial["tables"])
-        if batch and (len(batch) >= 80 or new_count > 15 or (current_count >= 10 and new_count > current_count)
-                      or request_size(system, trial) > REQUEST_LIMIT - 512):
+        if batch and (len(batch) >= 20 or new_count > 40 or request_size(system, trial) > REQUEST_LIMIT - 512):
             yield batch, True
             batch = []
             trial = relation_payload([packet], [packet["candidate_id"]])

@@ -273,3 +273,33 @@ async def read_response(response,diagnostics):
     if calls:
         diagnostics.data.update(public_argument_stats(''.join(c['function']['arguments'] for c in calls.values())))
     return {'content':''.join(parts) or None,'tool_calls':[calls[i] for i in sorted(calls)],'finish_reason':finish}
+
+
+_delivery_budget = ContextVar('semora_delivery_budget', default=None)
+
+@contextmanager
+def delivery_budget(seconds, message):
+    token = _delivery_budget.set((seconds, message))
+    try:
+        yield
+    finally:
+        _delivery_budget.reset(token)
+
+def current_delivery_budget():
+    return _delivery_budget.get()
+
+
+_json_options = ContextVar('semora_json_options', default=None)
+
+@contextmanager
+def json_model_options(response_format, thinking):
+    if response_format not in {'json_object', 'text'} or thinking not in {'inherit', 'omit', 'false', 'true'}:
+        raise ValueError('Invalid JSON model adapter options')
+    token=_json_options.set((response_format, thinking))
+    try:
+        yield
+    finally:
+        _json_options.reset(token)
+
+def current_json_options():
+    return _json_options.get()

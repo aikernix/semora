@@ -173,6 +173,9 @@ class DataSourceRepository:
                 write_observations(cursor, item.id, state)
                 if tables is not None and self._table_digests.get(item.id) != table_digest:
                     write_tables(cursor, item.id, tables, item.last_scan_at)
+                    if item.scan_result.get('scan_manifest',{}).get('complete') is True:
+                        from .relationship_inputs import build_inputs, write_inputs
+                        write_inputs(cursor,build_inputs({item.id:{t['id']:t for t in tables}}),[item.id])
             if table_digest is not None:
                 self._table_digests[item.id] = table_digest
         self._items[item.id] = item
@@ -314,7 +317,10 @@ class DataSourceRepository:
         return self.save(item)
 
     def record_scan(self, datasource_id: str, result: dict[str, Any]) -> DataSourceRecord:
-        item = self.get(datasource_id)
+        from .scan_completion import completed_scan
+        from copy import deepcopy
+        result = completed_scan(result)
+        item = deepcopy(self.get(datasource_id))
         self.invalidate_changed_metadata(item,result.get("connection",{}))
         sql_feedback = item.scan_result.get("sql_feedback", [])
         reusable = {k: item.scan_result[k] for k in ("capability_cache", "sql_observations") if k in item.scan_result}
@@ -328,7 +334,7 @@ class DataSourceRepository:
         from .mdl_export import merge_snapshot
         if item.type in {"mysql","postgresql"} and item.scan_result.get("capabilities",{}).get("query")=="verified":
             result.setdefault("capabilities",{})["query"]="verified"
-        result = merge_snapshot(item.scan_result, result)
+        result = merge_snapshot(item.scan_result, result, infer_relationships=False)
         result.update(reusable)
         if sql_feedback:
             result["sql_feedback"] = sql_feedback

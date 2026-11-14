@@ -103,7 +103,9 @@ async def classify_tables(tables, model, saved=None, checkpoint=None, extra_prot
     return result
 
 
-EXCLUSION_CODES = {"meaning_mismatch", "replica", "lineage_only", "redundant_identity", "transitive_only", "wrong_target"}
+from typing import get_args
+from .relationship_contracts import ExclusionCode
+EXCLUSION_CODES = set(get_args(ExclusionCode)) - {''}
 
 
 def triage(candidate, review, independent):
@@ -180,18 +182,13 @@ def entity_references(tables, profiles):
 def deduplicate_query_edges(candidates):
     """Same complete join in reverse is one traversable edge, not two joins."""
     seen = {}
+    from .relationship_normalization import join_signature
     ordered = sorted(candidates, key=lambda c: (c["evidence_grade"] not in {"foreign_key", "manual"},
                                                 c.get("cardinality") != "N:1", c["id"]))
     for c in ordered:
         if c["status"] != "accepted":
             continue
-        pairs = tuple(sorted(tuple(sorted(((c["source_datasource_id"], c["source_table_id"], p["source"]),
-                                           (c["target_datasource_id"], c["target_table_id"], p["target"]))))
-                             for p in c["key_pairs"]))
-        guards = tuple(sorted((c[g["side"] + "_datasource_id"], c[g["side"] + "_table_id"],
-                                g["field"], json.dumps(g["value"], ensure_ascii=False))
-                               for g in c.get("condition_template", {}).get("guards", [])))
-        key = (pairs, guards)
+        key = join_signature(c)
         if key in seen and c["evidence_grade"] not in {"foreign_key", "manual"}:
             c["status"] = "rejected"
             c["evidence"].append({"kind": "automatic_exclusion", "code": "duplicate_direction",

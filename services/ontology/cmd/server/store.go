@@ -52,14 +52,14 @@ func migrateStore(ctx context.Context, dsn string, seedDemo bool) error {
 }
 
 func (s *Store) verifySchema(ctx context.Context) error {
-	var drafts, snapshots, candidates sql.NullString
+	var drafts, snapshots, candidates, crossRelations sql.NullString
 	if err := s.db.QueryRowContext(ctx, `SELECT to_regclass('ontology_core.drafts')::text,
-		to_regclass('ontology_core.snapshots')::text,to_regclass('ontology_core.candidates')::text`).Scan(
-		&drafts, &snapshots, &candidates,
+		to_regclass('ontology_core.snapshots')::text,to_regclass('ontology_core.candidates')::text,to_regclass('ontology_core.domain_cross_source_relations')::text`).Scan(
+		&drafts, &snapshots, &candidates, &crossRelations,
 	); err != nil {
 		return err
 	}
-	if !drafts.Valid || !snapshots.Valid || !candidates.Valid {
+	if !drafts.Valid || !snapshots.Valid || !candidates.Valid || !crossRelations.Valid {
 		return errors.New("ontology schema is not initialized; run /ontology migrate first")
 	}
 	return nil
@@ -76,6 +76,12 @@ func (s *Store) initialize(ctx context.Context, seedDemo bool) error {
 			content_hash TEXT NOT NULL UNIQUE, artifact_version TEXT NOT NULL, payload JSONB NOT NULL,
 			wren_artifact JSONB NOT NULL, published_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
 		`CREATE INDEX IF NOT EXISTS ontology_snapshots_domain_idx ON ontology_core.snapshots(domain,published_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS ontology_core.domain_cross_source_relations (
+            domain TEXT NOT NULL REFERENCES ontology_core.drafts(domain) ON DELETE CASCADE,
+            id TEXT NOT NULL, source_datasource_id TEXT NOT NULL, target_datasource_id TEXT NOT NULL,
+            payload JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY(domain,id), CHECK(source_datasource_id<>target_datasource_id))`,
+
 		`CREATE TABLE IF NOT EXISTS ontology_core.candidates (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(), domain TEXT NOT NULL, term TEXT NOT NULL,
 			source TEXT NOT NULL, proposal TEXT NOT NULL, evidence JSONB NOT NULL DEFAULT '{}',
@@ -91,7 +97,7 @@ func (s *Store) initialize(ctx context.Context, seedDemo bool) error {
 		}
 	}
 	if !seedDemo {
-		return nil
+		return s.migrateReferenceDefinitions(ctx)
 	}
 	demo := demoOntology()
 	var draftCount int
@@ -128,10 +134,16 @@ func (s *Store) initialize(ctx context.Context, seedDemo bool) error {
 }
 
 func (s *Store) saveDraft(ctx context.Context, ontology Ontology) error {
+	packages, err := readPackages(ctx, s.db, ontology.SourcePackageRefs)
+	if err != nil {
+		return err
+	}
+	definition := referenceDefinition(ontology, packages)
+	ontology = composeReferences(definition, packages)
 	if issues := validateOntology(ontology); len(issues) > 0 {
 		return &validationError{issues: issues}
 	}
-	payload, err := json.Marshal(ontology)
+	payload, err := json.Marshal(definition)
 	if err != nil {
 		return err
 	}
@@ -147,7 +159,10 @@ func (s *Store) getDraft(ctx context.Context, domain string) (Ontology, error) {
 		return Ontology{}, err
 	}
 	var ontology Ontology
-	return ontology, json.Unmarshal(payload, &ontology)
+	if err := json.Unmarshal(payload, &ontology); err != nil {
+		return Ontology{}, err
+	}
+	return s.resolveReferences(ctx, s.db, ontology)
 }
 
 func (s *Store) listDrafts(ctx context.Context) ([]DraftSummary, error) {
@@ -168,6 +183,10 @@ func (s *Store) listDrafts(ctx context.Context) ([]DraftSummary, error) {
 		if err := json.Unmarshal(payload, &ontology); err != nil {
 			return nil, err
 		}
+		ontology, err := s.resolveReferences(ctx, s.db, ontology)
+		if err != nil {
+			return nil, err
+		}
 		status := "configured"
 		if len(ontology.Objects) == 0 {
 			status = "unconfigured"
@@ -178,7 +197,20 @@ func (s *Store) listDrafts(ctx context.Context) ([]DraftSummary, error) {
 }
 
 func (s *Store) publish(ctx context.Context, domain string) (Snapshot, error) {
-	ontology, err := s.getDraft(ctx, domain)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	defer tx.Rollback()
+	var raw []byte
+	if err = tx.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1 FOR UPDATE`, domain).Scan(&raw); err != nil {
+		return Snapshot{}, err
+	}
+	var ontology Ontology
+	if err = json.Unmarshal(raw, &ontology); err != nil {
+		return Snapshot{}, err
+	}
+	ontology, err = s.resolveReferences(ctx, tx, ontology)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -193,7 +225,7 @@ func (s *Store) publish(ctx context.Context, domain string) (Snapshot, error) {
 	var storedPayload, storedArtifact []byte
 	// The legacy NOT NULL column remains for existing databases. New publications
 	// contain no MDL; a repeated content hash preserves the original snapshot.
-	err = s.db.QueryRowContext(ctx, `INSERT INTO ontology_core.snapshots(domain,version,content_hash,artifact_version,payload,wren_artifact)
+	err = tx.QueryRowContext(ctx, `INSERT INTO ontology_core.snapshots(domain,version,content_hash,artifact_version,payload,wren_artifact)
     VALUES($1,$2,$3,$4,$5::jsonb,'{}'::jsonb)
     ON CONFLICT(content_hash) DO UPDATE SET content_hash=excluded.content_hash
     RETURNING id::text,domain,version,content_hash,artifact_version,published_at,payload,wren_artifact`,
@@ -206,6 +238,12 @@ func (s *Store) publish(ctx context.Context, domain string) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	if err := json.Unmarshal(storedArtifact, &snapshot.WrenArtifact); err != nil {
+		return Snapshot{}, err
+	}
+	if err = syncCrossRelations(ctx, tx, snapshot.Ontology); err != nil {
+		return Snapshot{}, err
+	}
+	if err = tx.Commit(); err != nil {
 		return Snapshot{}, err
 	}
 	return snapshot, nil

@@ -65,10 +65,14 @@ class OntologyCoreClient:
         return await self._request("POST", "/api/v1/ontology/domains", json={"domain": domain, "name": name})
 
     async def get_configuration(self, domain: str) -> dict[str, Any]:
-        return self._normalize_collections(await self._request("GET", f"/api/v1/ontology/configurations/{domain}"))
+        from .relation_output import clean_relations
+        return clean_relations(self._normalize_collections(await self._request("GET", f"/api/v1/ontology/configurations/{domain}")))
 
     async def save_configuration(self, domain: str, value: dict[str, Any]) -> dict[str, Any]:
         return await self._request("PUT", f"/api/v1/ontology/configurations/{domain}", json=value)
+
+    async def update_source_package(self, value: dict[str, Any]) -> dict[str, Any]:
+        return await self._request('PUT','/api/v1/ontology/source-packages',json=value)
 
     async def bind_knowledge_bases(self, domain: str, ids: list[str]) -> dict[str, Any]:
         return await self._request("PATCH", f"/api/v1/ontology/drafts/{domain}/knowledge-bases",

@@ -112,3 +112,46 @@ func TestEffectiveSaveTransaction(t *testing.T) {
 		t.Fatalf("expected three atomic saves, got %d: %v", count, err)
 	}
 }
+
+func TestRelationRemovalPublishesAndPhysicallyRemovesConfigurationRecord(t *testing.T) {
+	dsn := os.Getenv("ONTOLOGY_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("requires disposable database")
+	}
+	ctx := context.Background()
+	store, err := newStore(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.db.Close()
+	value := sourceOntology()
+	value.Domain = "relation_crud_contract"
+	if _, err = store.createDomain(ctx, value.Domain, "Relations"); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := store.saveEffective(ctx, value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved.Relations[0].Label = "Updated relation"
+	edited, err := store.saveEffective(ctx, saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edited.Version == saved.Version {
+		t.Fatal("edit did not publish")
+	}
+	edited.Relations = []RelationClass{}
+	deleted, err := store.saveEffective(ctx, edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.getDraft(ctx, value.Domain)
+	if err != nil || len(current.Relations) != 0 {
+		t.Fatal("relation survived physical configuration removal")
+	}
+	snapshot, err := store.latestSnapshot(ctx, value.Domain)
+	if err != nil || len(snapshot.Ontology.Relations) != 0 || snapshot.Version != deleted.Version {
+		t.Fatal("snapshot differs from configuration")
+	}
+}

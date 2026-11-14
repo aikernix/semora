@@ -26,27 +26,28 @@ UNDERSTAND = (
 选项应是同一目标下有依据的业务解释；不能建议把含义未确定的指标填零、留空或换成别的指标来规避确认。
 缺核心资料才调用工具，资料足够即提交。只有关联或物理映射确实缺失才列technical_gaps；同义表达、空数据或不确定的SQL写法不属于技术缺口。
 【输出】按工具提供的结构提交。requirements用业务语言列明目标、时间、范围、指标、分组、条件、每组含义、排序及处理先后顺序，落实用户实际补充口径，不新增要求；尚待确认的内容通过questions表达。summary、skeleton、confidence.reason，以及问题question、reason和选项label、description均面向业务用户；问题解释清楚业务差别和结果影响。内部引用放field、id、value等结构字段，不输出SQL或隐藏思维链。
-资料和口径足够时填写logical_plan：使用资料中的对象name、对象.属性和关系name；仍有问题或配置缺口时留空。
+资料和口径足够时填写logical_plan：grain_refs明确每行结果的身份或分组键，metrics.field_refs明确各指标来源；使用资料中的对象name、对象.属性和关系name；仍有问题或配置缺口时留空。
 """
     + BUSINESS_LANGUAGE
 )
 
 AUTHOR = (
     """【角色】SQL生成助手。
-【依据】原始需求、实际确认答案、相关定义、物理映射、对象身份键及数据库版本能力。
-request是需求契约；confirmed_answers含用户选择及自由补充。original_request保留原话。summary、analysis_steps不是额外的用户确认，冲突时以用户明确口径为准，不新增条件。
-SQL符合request.logical_plan。
-【任务】编写完整查询，提交SQLProgram，保持确认范围、口径和排序。
+【依据】原始需求、确认答案、定义、映射、对象身份键及数据库能力。
+request为需求契约，confirmed_answers为实际补充，original_request为原话；summary、analysis_steps不是额外的用户确认。冲突时以用户明确口径为准，不新增条件。
+SQL遵循request.logical_plan；result_grain、metric_sources标明结果键与指标来源。
+【任务】提交SQLProgram，保持确认范围、口径和排序。
 【生成要求】
-每步只读；source只访问其data_source_id的物理表。同源关联、汇总与Top N放一条SQL，准确引用表列，落实关系固定条件、派生去重和指标定义。
+每步只读；source只访问其data_source_id的物理表。同源关联与汇总尽量用一条SQL，落实准确表列、固定条件、去重和指标定义。
 跨源拆成有序source步骤，用inputs绑定先前输出的完整键元组；单键x IN (:keys)，复合键(x,y) IN (:keys)，禁止拆成独立IN或拼接值。
-需要合并时增加local步骤，以先前步骤name为表，不设inputs或data_source_id；不能读物理表或直接JOIN本体对象，缺数据先加source步骤。local会转为DuckDB方言，最后一步交付结果。
-实体按唯一标识确定粒度，名称不能替代标识。一对多先将明细聚合到关联键，再汇总主对象金额；COUNT DISTINCT不能保护SUM。归属按用户指定来源，不用其他表同名字段替代。
-每组最后一条按时间和唯一键明确选行，不靠子查询排序后GROUP BY任意取行或会话变量排名；非聚合输出满足分组规则。
+合并用local步骤，仅读先前步骤name，不设inputs或data_source_id；缺数据先加source步骤。local转为DuckDB，最后一步交付。
+多个明细分支先分别按目标键聚合再连接；仅筛选存在性用EXISTS，按需求保留无明细主体和零值。检查COUNT、SUM、AVG的连接放大，不能用统一DISTINCT掩盖；明确的明细配对可以多行。
+实体粒度用唯一键，不用名称；COUNT DISTINCT不能保护SUM。按指定来源取值。
+每组最后一条按时间、唯一键选行，不靠子查询排序后GROUP BY任意取行；非聚合输出满足分组规则。
 “符合条件对象的全部记录”用对象唯一键在EXISTS或子查询中选对象；外层不裁剪明细，分组维度不自动成为入选键。可空键关联用IS NOT DISTINCT FROM。先取Top N再筛选时，源端先排序并LIMIT N，后续筛选不提前；未匹配对象是否保留按需求。
 只有业务Top N才写LIMIT，保护上限由执行器添加。日期明确边界。按版本与features选择写法；不支持窗口或WITH时用派生表、分组或相关子查询。
 不替换指标，不新增澄清或业务条件。
-【输出】按JSON契约提交SQLProgram。summary描述最终查询的业务目标、范围和统计方式，purpose描述每步的业务作用；不写实现原理、技术诊断或修复历史。output_labels为每个输出列提供业务标题。sql、parameters、inputs、output_columns保留准确技术内容。
+【输出】按JSON契约提交SQLProgram。summary、purpose描述最终目标、范围和统计方式，不写实现或修复历史。output_labels提供业务标题；sql、parameters、inputs、output_columns保持准确。
 """
     + SQL_CONTRACT
     + BUSINESS_LANGUAGE

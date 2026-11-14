@@ -301,6 +301,7 @@ func main() {
 	mux.HandleFunc("/api/v1/ontology/drafts/{domain}", app.internal(app.draft))
 	mux.HandleFunc("/api/v1/ontology/drafts/{domain}/knowledge-bases", app.internal(app.knowledgeBinding))
 	mux.HandleFunc("/api/v1/ontology/configurations/{domain}", app.internal(app.effectiveConfiguration))
+	mux.HandleFunc("/api/v1/ontology/source-packages", app.internal(app.sourcePackage))
 	mux.HandleFunc("/api/v1/ontology/domains", app.internal(app.createDomain))
 	mux.HandleFunc("/api/v1/ontology/publish", app.internal(app.publish))
 	mux.HandleFunc("/api/v1/ontology/snapshots/latest", app.internal(app.latest))

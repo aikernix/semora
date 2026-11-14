@@ -812,7 +812,7 @@ def datasources() -> list[dict]:
 async def create_datasource(body: DataSourceCreate) -> dict:
     if body.connection is None and body.secret_ref:
         item=datasource_service.repository.create(body.name, body.type, body.secret_ref)
-        job=modeling_service.start(item.id)
+        job=modeling_service.start(item.id,metadata_only=True)
         return {**item.public(),"onboarding_job_id":job["id"]}
     _verify_connection_receipt(body)
     identifier = str(uuid4())
@@ -821,7 +821,7 @@ async def create_datasource(body: DataSourceCreate) -> dict:
     try:
         await datasource_service.executor.configuration(item, connection_payload(body))
         item=datasource_service.repository.save(item)
-        job=modeling_service.start(item.id)
+        job=modeling_service.start(item.id,metadata_only=True)
         return {**item.public(),"onboarding_job_id":job["id"]}
     except RuntimeError as exc:
         raise HTTPException(502, str(exc)) from exc
@@ -895,6 +895,8 @@ async def scan_datasource(datasource_id: str, tables: list[str] | None = Query(d
         return await datasource_service.scan(datasource_id, tables=tables) if tables is not None else await datasource_service.scan(datasource_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(502, str(exc)) from exc
 

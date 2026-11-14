@@ -29,7 +29,7 @@ func validateOntology(ontology Ontology) []ValidationIssue {
 			}
 		}
 	}
-	if len(ontology.Objects) == 0 {
+	if len(ontology.Objects) == 0 && len(ontology.SourcePackageRefs) == 0 {
 		issues = append(issues, ValidationIssue{"objects", "至少需要一个对象类"})
 	}
 	objects := map[string]ObjectClass{}
@@ -55,7 +55,7 @@ func validateOntology(ontology Ontology) []ValidationIssue {
 		}
 	}
 	relations := map[string]bool{}
-	validCardinality := map[string]bool{"1:1": true, "1:N": true, "N:1": true, "N:N": true}
+	validCardinality := map[string]bool{"1:1": true, "1:N": true, "N:1": true, "N:N": true, "unknown": true}
 	for index, relation := range ontology.Relations {
 		path := fmt.Sprintf("relations[%d]", index)
 		if relation.Name == "" || relation.Condition == "" {
@@ -72,7 +72,7 @@ func validateOntology(ontology Ontology) []ValidationIssue {
 			issues = append(issues, ValidationIssue{path + ".to", "终点对象不存在"})
 		}
 		if !validCardinality[relation.Cardinality] {
-			issues = append(issues, ValidationIssue{path + ".cardinality", "基数必须是 1:1、1:N、N:1 或 N:N"})
+			issues = append(issues, ValidationIssue{path + ".cardinality", "基数必须是 1:1、1:N、N:1、N:N 或 unknown"})
 		}
 	}
 	metrics := map[string]bool{}

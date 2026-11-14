@@ -20,3 +20,5 @@ artifacts/
 .vscode/
 tmp/
 
+
+.cache/relationship-checkpoints/

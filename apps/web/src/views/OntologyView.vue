@@ -19,6 +19,8 @@ const relationVisible = ref(false)
 const relationIndex = ref(-1)
 const relationDraft = ref<any>({})
 const relationError = ref('')
+const fieldPair = ref({source:'',target:''})
+function appendFieldPair(){if(!fieldPair.value.source||!fieldPair.value.target)return;const clause=`${relationDraft.value.from}.${fieldPair.value.source} = ${relationDraft.value.to}.${fieldPair.value.target}`;relationDraft.value.condition=[relationDraft.value.condition,clause].filter(Boolean).join(' AND ');fieldPair.value={source:'',target:''}}
 const deletingRelation = ref<any>(null)
 const createVisible = ref(false)
 const creating = ref(false)
@@ -122,6 +124,7 @@ function sourceLabel(name: string) {
   return dataSources.value.find(source => source.id === sourceOf(name))?.name || sourceOf(name) || '未配置数据源'
 }
 function openRelation(index = -1) {
+  fieldPair.value={source:'',target:''}
   relationIndex.value = index
   relationDraft.value = index < 0
     ? { name: '', label: '', from: '', to: '', cardinality: 'N:1', joinType: 'many_to_one', condition: '', optional: false }
@@ -215,17 +218,18 @@ onUnmounted(() => { if (crossTimer) clearTimeout(crossTimer) })
         <div v-if="crossJob?.candidates?.length" class="cross-candidates">
           <article v-for="candidate in crossJob.candidates.filter((item: any) => item.status === 'accepted')" :key="candidate.id">
             <div><strong>{{ candidate.source_table_id }} → {{ candidate.target_table_id }}</strong>
-            <small>{{ candidate.source_columns.join(', ') }} ↔ {{ candidate.target_columns.join(', ') }} · {{ candidate.evidence_grade }} · 置信度 {{ candidate.confidence }} · {{ candidate.status }}</small></div>
+            <small>{{ candidate.source_columns.join(', ') }} ↔ {{ candidate.target_columns.join(', ') }} · {{ candidate.evidence_grade }} · {{ candidate.status }}</small></div>
           </article>
         </div>
       </section>
       <section class="panel model-panel">
-        <div class="panel-title">表之间的关联关系</div>
+        <div class="panel-title">表之间的关联关系<t-button theme="primary" :disabled="saving" @click="openRelation()">添加关联关系</t-button></div>
         <div v-if="ontology.relations.length" class="relation-list">
           <article v-for="(relation, index) in ontology.relations" :key="relation.name" class="relation-card">
             <div class="relation-header">
               <div><strong>{{ relation.label || relation.name }}</strong><small>{{ relation.name }}</small></div>
-              <div class="relation-actions"><t-button variant="text" :disabled="saving" @click="openRelation(Number(index))">编辑</t-button><t-button variant="text" theme="danger" :disabled="saving" @click="deletingRelation = relation">删除</t-button></div>
+              <div v-if="relation.metadata?.sourcePackageId" class="relation-actions">引用数据源关系，请在数据源中维护</div>
+              <div v-else class="relation-actions"><t-button variant="text" :disabled="saving" @click="openRelation(Number(index))">编辑</t-button><t-button variant="text" theme="danger" :disabled="saving" @click="deletingRelation = relation">删除</t-button></div>
             </div>
             <div class="relation-path">
               <div class="table-node"><strong>{{ tableLabel(relation.from) }}</strong><small>{{ sourceLabel(relation.from) }}</small></div>
@@ -251,14 +255,15 @@ onUnmounted(() => { if (crossTimer) clearTimeout(crossTimer) })
       <div class="relation-form">
         <t-alert v-if="relationError" theme="error" :message="relationError" />
         <div class="form-grid">
-          <label>关系名称<t-input v-model="relationDraft.label" placeholder="例如：客户持有贷款" :disabled="saving" /></label>
-          <label>关系标识<t-input v-model="relationDraft.name" placeholder="例如：customer_has_loan" :disabled="saving" /></label>
+          <label>关系名称<t-input v-model="relationDraft.label" placeholder="填写关系名称" :disabled="saving" /></label>
+          <label>关系标识<t-input v-model="relationDraft.name" placeholder="填写唯一关系标识" :disabled="saving" /></label>
           <label>来源表<t-select v-model="relationDraft.from" :disabled="saving" filterable placeholder="选择来源表"><t-option v-for="object in ontology?.objects || []" :key="object.name" :value="object.name" :label="`${tableLabel(object.name)} · ${sourceLabel(object.name)} (${object.name})`" /></t-select></label>
           <label>目标表<t-select v-model="relationDraft.to" :disabled="saving" filterable placeholder="选择目标表"><t-option v-for="object in ontology?.objects || []" :key="object.name" :value="object.name" :label="`${tableLabel(object.name)} · ${sourceLabel(object.name)} (${object.name})`" /></t-select></label>
           <label>关联基数<t-select v-model="relationDraft.cardinality" :disabled="saving"><t-option value="1:1" label="一对一 (1:1)" /><t-option value="1:N" label="一对多 (1:N)" /><t-option value="N:1" label="多对一 (N:1)" /><t-option value="N:N" label="多对多 (N:N)" /></t-select></label>
           <label>可选关联<t-switch v-model="relationDraft.optional" :disabled="saving" /><small>允许来源表记录没有匹配的目标记录。</small></label>
         </div>
-        <label>关联条件<t-textarea v-model="relationDraft.condition" :disabled="saving" :autosize="{ minRows: 3, maxRows: 8 }" placeholder="例如：customer.id = loan.customer_id" /><small>使用对象标识引用字段；复合关联可用 AND 连接。{{ relationDraft.from || '来源对象' }} → {{ relationDraft.to || '目标对象' }}</small></label>
+        <div class="form-grid"><label>来源字段<t-select v-model="fieldPair.source" filterable :disabled="saving" :options="(objectOf(relationDraft.from)?.properties||[]).map((p:any)=>({label:p.label||p.name,value:p.name}))" /></label><label>目标字段<t-select v-model="fieldPair.target" filterable :disabled="saving" :options="(objectOf(relationDraft.to)?.properties||[]).map((p:any)=>({label:p.label||p.name,value:p.name}))" /></label></div><t-button variant="outline" :disabled="saving||!fieldPair.source||!fieldPair.target" @click="appendFieldPair">加入关联条件</t-button>
+        <label>关联条件<t-textarea v-model="relationDraft.condition" :disabled="saving" :autosize="{ minRows: 3, maxRows: 8 }" placeholder="填写完整关联条件" /><small>使用对象标识引用字段；复合关联可用 AND 连接。{{ relationDraft.from || '来源对象' }} → {{ relationDraft.to || '目标对象' }}</small></label>
         <div class="dialog-actions"><t-button variant="outline" :disabled="saving" @click="relationVisible = false">取消</t-button><t-button theme="primary" :loading="saving" @click="saveRelation">保存并生效</t-button></div>
       </div>
     </t-dialog>

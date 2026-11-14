@@ -11,7 +11,7 @@ def verdict(outcome, code=""):
 
 
 def test_clear_mismatch_is_excluded_but_missing_evidence_is_pending():
-    for outcome, expected in (("exclude", "rejected"), ("needs_evidence", "pending")):
+    for outcome, expected in (("exclude", "rejected"), ("needs_evidence", "unresolved")):
         c = {"evidence_grade": "medium", "evidence": [
             {"kind": "model_semantic_review", **verdict(outcome, "meaning_mismatch")},
             {"kind": "independent_review", **verdict(outcome, "meaning_mismatch")}], "status": "pending"}
@@ -24,7 +24,7 @@ def test_one_model_rejection_does_not_automatically_exclude():
         {"kind": "model_semantic_review", **verdict("exclude", "wrong_target")},
         {"kind": "independent_review", **verdict("needs_evidence")}], "status": "pending"}
     finalize_relationships([c])
-    assert c["status"] == "pending"
+    assert c["status"] == "unresolved"
 
 
 def test_reference_routing_selects_entity_anchor_not_sibling_extension():
@@ -82,3 +82,16 @@ def test_reverse_duplicates_are_excluded_but_distinct_roles_are_kept():
     deduplicate_query_edges([forward, reverse, other_role])
     assert forward["status"] == other_role["status"] == "accepted"
     assert reverse["status"] == "rejected"
+
+
+def test_model_label_does_not_duplicate_a_declared_foreign_key():
+    from app.query_relationships import deduplicate_query_edges
+    base = {'status': 'accepted', 'source_datasource_id': 'ds', 'target_datasource_id': 'ds',
+            'source_table_id': 'records', 'target_table_id': 'entities',
+            'condition_template': {}, 'key_pairs': [{'source': 'entity_id', 'target': 'id'}]}
+    declared = {**base, 'id': 'fk', 'evidence_grade': 'foreign_key', 'evidence': []}
+    proposed = {**base, 'id': 'model', 'evidence_grade': 'strong', 'evidence': [], 'query_role': 'entity_reference'}
+    deduplicate_query_edges([proposed, declared])
+    assert declared['status'] == 'accepted'
+    assert proposed['status'] == 'rejected'
+    assert proposed['evidence'][-1]['canonical_candidate_id'] == 'fk'

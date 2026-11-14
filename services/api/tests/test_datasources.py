@@ -18,7 +18,8 @@ def test_repository_seeds_demo_and_persists_scan_state_in_memory():
     item = repository.get("retail-credit-pg")
 
     assert item.secret_ref == "DATASOURCE_RETAIL_CREDIT_PG_URL"
-    repository.record_scan("retail-credit-pg", {"tables": [{"name": "loans"}]})
+    repository.record_scan("retail-credit-pg", {"tables": [{"name": "loans",'columns':[{'name':'id','type':'bigint'}]}], 'status':'completed',
+        'scan_manifest':{'complete':True,'scope':'full','scanned_tables':1}})
 
     updated = repository.get("retail-credit-pg")
     assert updated.status == "healthy"

@@ -42,7 +42,7 @@ def test_detects_indexed_entity_id_without_foreign_key():
         and item["target_table_id"] == "public.customer"
     )
     assert candidate["key_pairs"] == [{"source": "customer_id", "target": "id"}]
-    assert candidate["status"] == "pending"
+    assert candidate["status"] == "unresolved"
     assert any(item["kind"] == "source_code" for item in candidate["evidence"])
 
 
@@ -83,6 +83,14 @@ def test_unique_composite_prefix_is_not_unique():
     assert not _indexed(value, ["tenant_id"], unique=True)
 
 
+def test_complete_unique_key_is_order_independent_and_survives_extra_join_fields():
+    from app.datasource_modeling import _indexed
+    value = table('t', 't', [], primary=['scope', 'code'])
+    assert _indexed(value, ['code', 'scope'], unique=True)
+    assert _indexed(value, ['code', 'scope', 'kind'], unique=True)
+    assert not _indexed(value, ['scope', 'kind'], unique=True)
+
+
 @pytest.mark.parametrize("parent_name,key,child_name,reference", [
     ("customer", "id", "orders", "customer_id"),
     ("alpha_registry", "opaque_key", "beta_events", "owner_token"),
@@ -94,7 +102,7 @@ def test_discovery_uses_evidence_after_complete_renaming(parent_name, key, child
     candidates = discover_candidates("arbitrary-source", [parent, child])
     assert len(candidates) == 1
     assert candidates[0]["key_pairs"] == [{"source": reference, "target": key}]
-    assert candidates[0]["status"] == "pending"
+    assert candidates[0]["status"] == "unresolved"
 
 
 def test_competing_targets_need_semantic_evidence_even_with_matching_values():
@@ -109,7 +117,7 @@ def test_competing_targets_need_semantic_evidence_even_with_matching_values():
         candidate["evidence"].append({"kind": "value_profile", "statistics": {
             "source_nonnull_distinct_keys": 200, "directional_coverage": 1}})
     finalize_relationships(proposals)
-    assert all(c["status"] == "pending" for c in proposals)
+    assert all(c["status"] == "unresolved" for c in proposals)
 
 
 def test_multiple_independent_targets_confirm_after_all_evidence_is_collected():
@@ -131,7 +139,7 @@ def test_multiple_independent_targets_confirm_after_all_evidence_is_collected():
     # A later, concrete semantic diagnosis can still withhold confirmation.
     next(e for e in proposals[0]["evidence"] if e["kind"] == "model_semantic_review")["target_role"] = "replica"
     finalize_relationships(proposals)
-    assert proposals[0]["status"] == "pending"
+    assert proposals[0]["status"] == "unresolved"
     assert proposals[1]["status"] == "accepted"
 
 
@@ -151,11 +159,11 @@ def test_final_confirmation_keeps_missing_samples_and_unresolved_alternatives_pe
         {"kind": "model_semantic_review", "supported": True, "confidence": .99,
          "target_role": "reference", "alternative_unresolved": False}]}
     finalize_relationships([candidate])
-    assert candidate["status"] == "pending"
+    assert candidate["status"] == "unresolved"
     assert "value_verification_missing" in candidate["evidence"][-1]["reasons"]
 
 
-def test_retire_obsolete_inferred_edges_only_after_full_discovery():
+def test_research_does_not_mutate_active_records_before_publication():
     repository = ModelingRepository(dsn="")
     repository.memory_candidates = {
         name: {"source_datasource_id": "a", "scope": "single_source", "status": status}
@@ -166,7 +174,8 @@ def test_retire_obsolete_inferred_edges_only_after_full_discovery():
     repository.retire_generated("a", {"keep"})
     assert repository.memory_candidates['keep']['status'] == 'pending'
     assert repository.memory_candidates['manual']['status'] == 'accepted'
-    assert all(repository.memory_candidates[k]['status'] == 'stale' for k in ('noise','accepted','rejected'))
+    assert repository.memory_candidates['accepted']['status'] == 'accepted'
+    assert repository.memory_candidates['rejected']['status'] == 'rejected'
 
 
 def test_comments_can_recall_differently_named_indexed_fields_without_auto_accepting():
@@ -187,7 +196,7 @@ def test_comments_can_recall_differently_named_indexed_fields_without_auto_accep
     candidates = discover_candidates("source-a", [customer, activity])
     candidate = next(item for item in candidates if item["source_table_id"] == "public.activity")
     assert candidate["key_pairs"] == [{"source": "owner_no", "target": "member_key"}]
-    assert candidate["status"] == "pending"
+    assert candidate["status"] == "unresolved"
 
 
 def test_declared_composite_foreign_key_is_accepted_and_compiled_as_tuple_pairs():
@@ -279,7 +288,7 @@ def test_cross_source_results_include_both_relationship_directions():
     }
 
 
-def test_schema_change_marks_old_relationship_candidates_stale():
+def test_schema_change_preserves_active_relationship_until_publication():
     repository = ModelingRepository(dsn="")
     candidate = {
         "id": "candidate",
@@ -301,10 +310,10 @@ def test_schema_change_marks_old_relationship_candidates_stale():
     }
     repository.replace_candidates([candidate], "old", "old")
     repository.mark_candidates_stale("a", "new")
-    assert repository.list_candidates("a")[0]["status"] == "stale"
+    assert repository.list_candidates("a")[0]["status"] == "accepted"
 
 
-def test_rejected_relation_remains_rejected_after_rescan():
+def test_new_research_does_not_preserve_historical_negative_decisions():
     repository = ModelingRepository(dsn="")
     candidate = {
         "id": "candidate",
@@ -327,7 +336,7 @@ def test_rejected_relation_remains_rejected_after_rescan():
     repository.replace_candidates([candidate], "old", "old")
     repository.mark_candidates_stale("a", "new")
     repository.replace_candidates([{**candidate, "status": "pending"}], "new", "new")
-    assert repository.list_candidates("a")[0]["status"] == "rejected"
+    assert repository.list_candidates("a")[0]["status"] == "pending"
 
 
 def test_executor_profiles_directional_membership_without_returning_values(monkeypatch):

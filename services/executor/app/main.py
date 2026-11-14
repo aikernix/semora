@@ -22,6 +22,8 @@ from .errors import database_error
 from .connection_settings import ConnectionSettings, connection_store
 
 
+from .timeouts import scan_timeout_ms, query_timeout_ms
+
 app = FastAPI(title="Semora Read-only Executor", version="0.1.0")
 @app.exception_handler(RequestValidationError)
 async def private_validation_error(request, exc):
@@ -165,7 +167,7 @@ def scan_postgresql(dsn: str, selected_tables: list[str] | None = None, selected
         with scan_control.track(psycopg.connect(dsn, autocommit=False, connect_timeout=5)) as connection:
             with connection.cursor() as cursor:
                 cursor.execute("SET TRANSACTION READ ONLY")
-                cursor.execute("SET LOCAL statement_timeout='30s'")
+                cursor.execute("SELECT set_config('statement_timeout', %s, true)", (str(scan_timeout_ms()),))
                 cursor.execute(
                     """SELECT table_schema,table_name,column_name,data_type,is_nullable,ordinal_position
                     FROM information_schema.columns
@@ -295,7 +297,7 @@ def scan_datasource(body: DataSourceScanInput, x_semora_internal_token: str | No
     require_internal_token(x_semora_internal_token)
     with scan_control.operation(body.execution_id):
         if adapter_registry.is_jdbc(body.type):
-            result = jdbc_adapter.run(jdbc_adapter.settings(body), "scan", tables=body.tables or [], execution_id=body.execution_id, timeout_ms=180000)
+            result = jdbc_adapter.run(jdbc_adapter.settings(body), "scan", tables=body.tables or [], execution_id=body.execution_id, timeout_ms=scan_timeout_ms())
         elif body.type == "mysql":
             cfg = connection_store.get(body.datasource_id,body.secret_ref,body.type) or {}
             prefix = cfg.get("database", "") + "."
@@ -312,7 +314,14 @@ def scan_datasource(body: DataSourceScanInput, x_semora_internal_token: str | No
         cfg = connection_store.get(body.datasource_id,body.secret_ref,body.type) or {}
         if cfg.get("schema_name"):
             result["tables"]=[t for t in result.get("tables",[]) if t.get("schema")==cfg["schema_name"]]
-        return {"datasource_id": body.datasource_id, **normalize_snapshot(result)}
+        result = normalize_snapshot(result)
+        complete = (not result.get('permission_gaps') and not result.get('errors') and result.get('partial') is not True
+                    and result.get('status','completed')=='completed'
+                    and all(t.get('columns') for t in result.get('tables',[])))
+        result['status'] = 'completed' if complete else 'incomplete'
+        result['scan_manifest'] = {'complete': complete, 'scope': 'selected' if body.tables else 'full',
+                                   'scanned_tables': len(result.get('tables', []))}
+        return {"datasource_id": body.datasource_id, **result}
 
 
 @app.post("/internal/v1/query")
@@ -324,7 +333,7 @@ def execute_query(body: QueryInput, x_semora_internal_token: str | None = Header
         sql, params = jdbc_adapter.bind_parameters(body.sql, body.parameters)
         result = jdbc_adapter.run(cfg, "query", sql=sql, parameters=params,
             execution_id=body.execution_id,
-            timeout_ms=min(body.timeout_ms or 30000, int(os.getenv("QUERY_TIMEOUT_MS", "30000"))),
+            timeout_ms=min(body.timeout_ms or query_timeout_ms(), query_timeout_ms()),
             max_rows=min(body.max_rows or 1000, int(os.getenv("MAX_RESULT_ROWS", "1000"))),
             max_bytes=min(body.max_bytes or 10485760, int(os.getenv("MAX_RESULT_BYTES", "10485760"))))
         result["rows"] = [[mask_sensitive(result["columns"][i], v, set(body.sensitive_columns)) for i,v in enumerate(row)] for row in result["rows"]]
@@ -336,7 +345,7 @@ def execute_query(body: QueryInput, x_semora_internal_token: str | None = Header
     # may only make a query stricter, never relax the Executor boundary.
     hard_max_rows = int(os.getenv("MAX_RESULT_ROWS", "1000"))
     hard_max_bytes = int(os.getenv("MAX_RESULT_BYTES", str(10 * 1024 * 1024)))
-    hard_timeout_ms = int(os.getenv("QUERY_TIMEOUT_MS", "30000"))
+    hard_timeout_ms = query_timeout_ms()
     max_rows = min(body.max_rows or hard_max_rows, hard_max_rows)
     max_bytes = min(body.max_bytes or hard_max_bytes, hard_max_bytes)
     timeout_ms = min(body.timeout_ms or hard_timeout_ms, hard_timeout_ms)
@@ -531,12 +540,15 @@ class ProfileInput(BaseModel):
     target_unique_index_confirmed: bool = False
     allow_bounded_unindexed: bool = False
     guards: list[ProfileGuard] = Field(default_factory=list, max_length=8)
+    target_context_enums: dict[str, list[int]] = Field(default_factory=dict)
 
 
 @app.post("/internal/v1/datasources/profile-relationship")
 def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None = Header(default=None)):
     require_internal_token(x_semora_internal_token)
     if len(body.source_columns)!=len(body.target_columns):raise HTTPException(422,"复合键字段数不一致")
+    if len(body.target_context_enums)>8 or any(not 2 <= len(v) <= 16 for v in body.target_context_enums.values()):
+        raise HTTPException(422, 'Enumeration context exceeds the auxiliary statistics budget')
     if not body.allow_bounded_unindexed and (not body.source_index_confirmed or not body.target_unique_index_confirmed):
         raise HTTPException(422,"自动关系验证只允许使用已确认的来源索引和目标唯一索引")
 
@@ -559,8 +571,9 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
                 parameters[name] = guard.value
                 tree = tree.where(exp.EQ(this=exp.column(guard.field, quoted=True), expression=exp.Placeholder(this=name)))
         if body.source_index_confirmed:
+            tree=tree.distinct()
             tree=tree.order_by(*(exp.Ordered(this=exp.column(c,quoted=True),desc=descending) for c in columns))
-        tree=tree.limit(body.sample_rows)
+        tree=tree.limit(min(body.sample_rows + 1, 1000))
         from semora_contracts.sql_compat import apply_pagination
         pagination="baseline"
         if adapter_registry.is_jdbc(datasource.type):
@@ -570,7 +583,7 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
         sql = tree.sql(dialect=dialect)
         for name in sorted(parameters, key=len, reverse=True):sql=sql.replace(f":{name}",f"%({name})s")
         result=execute_query(QueryInput(sql=sql,parameters=parameters,datasource=datasource,
-            timeout_ms=3000,max_rows=body.sample_rows,max_bytes=1024*1024),x_semora_internal_token)
+            timeout_ms=3000,max_rows=min(body.sample_rows + 1, 1000),max_bytes=1024*1024),x_semora_internal_token)
         return [tuple(json.dumps(v,sort_keys=True,default=str) for v in row)
                 for row in result["rows"] if all(v is not None for v in row)]
 
@@ -579,7 +592,7 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
     source_exhausted = False
     for descending in ((False,True) if body.source_index_confirmed else (False,)):
         window = run_sample(body.datasource,body.source_table,body.source_columns,descending)
-        source_exhausted = source_exhausted or len(window) < body.sample_rows
+        source_exhausted = source_exhausted or len(window) <= body.sample_rows
         observed.extend(window)
     # Interleave both ends so the ascending window cannot consume the budget.
     middle=len(observed)//2
@@ -587,6 +600,8 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
     keys=list(dict.fromkeys(interleaved+observed))[:body.sample_rows]
     target=body.target_datasource or body.datasource
     matched=set()
+    context_counts = {}
+    context_errors = []
     dialect=adapter_registry.dialect(target)
     batch_size=100 if len(body.target_columns)>1 else 200
     for start in range(0,len(keys),batch_size):
@@ -598,7 +613,7 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
                 name=f"k_{row_index}_{column_index}";parameters[name]=json.loads(value)
                 conjunction.append(exp.EQ(this=exp.column(column,quoted=True),expression=exp.Placeholder(this=name)))
             disjunction.append(exp.and_(*conjunction))
-        tree=exp.select(*(exp.column(c,quoted=True) for c in body.target_columns)).from_(table_expr(body.target_table))
+        tree=exp.select(*(exp.column(c,quoted=True) for c in body.target_columns)).distinct().from_(table_expr(body.target_table))
         tree=tree.where(exp.or_(*disjunction)).limit(len(batch))
         for index, guard in enumerate(body.guards):
             if guard.side == "target":
@@ -610,9 +625,31 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
         result=execute_query(QueryInput(sql=sql,parameters=parameters,datasource=target,
             timeout_ms=3000,max_rows=max(1,len(batch)),max_bytes=1024*1024),x_semora_internal_token)
         matched.update(tuple(json.dumps(v,sort_keys=True,default=str) for v in row) for row in result["rows"])
+        if result['rows']:
+            for field, values in body.target_context_enums.items():
+                # Project only codes already declared in schema comments, never arbitrary attribute values.
+                category = exp.Case(ifs=[exp.If(this=exp.EQ(this=exp.column(field, quoted=True),
+                    expression=exp.Literal.number(v)), true=exp.Literal.string(str(v))) for v in values],
+                    default=exp.Literal.string('unlisted'))
+                aggregate = exp.select(category.copy().as_('category'), exp.Count(this=exp.Star()).as_('row_count'))
+                aggregate = aggregate.from_(table_expr(body.target_table)).where(tree.args['where'].this.copy())
+                aggregate = aggregate.group_by(category).limit(len(values)+1)
+                sql = aggregate.sql(dialect=dialect)
+                for name in sorted(parameters, key=len, reverse=True):sql=sql.replace(f':{name}',f'%({name})s')
+                try:
+                    details = execute_query(QueryInput(sql=sql, parameters=parameters, datasource=target,
+                        timeout_ms=3000, max_rows=len(values)+1, max_bytes=65536), x_semora_internal_token)
+                    counts = context_counts.setdefault(field, {})
+                    for code, count in details['rows']:
+                        label = str(code)
+                        counts[label] = counts.get(label, 0) + int(count)
+                except Exception as exc:
+                    context_errors.append({'field': field, 'error_type': type(exc).__name__})
     secret=os.getenv("RELATIONSHIP_PROFILE_HMAC_KEY",os.getenv("INTERNAL_TOKEN","semora-dev-internal")).encode()
     signatures=sorted(hmac.new(secret,"\x1f".join(row).encode(),hashlib.sha256).hexdigest()[:24] for row in keys)[:64]
-    return {"method":"indexed_directional_membership_v1","sample_budget":body.sample_rows,
+    return {"method":"indexed_directional_membership_v3_context","sample_budget":body.sample_rows,
+            "sampling_unit":"distinct_keys" if body.source_index_confirmed else "bounded_rows",
+            "target_context": context_counts, "target_context_errors": context_errors,
             "source_exhausted":source_exhausted,
             "guards_applied":[g.model_dump() for g in body.guards],
             "source_nonnull_distinct_keys":len(keys),"matched_keys":len(set(keys)&matched),

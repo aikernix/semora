@@ -233,6 +233,7 @@ class LogicalQueryPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
     subject_refs: list[str] = Field(default_factory=list, max_length=8)
     output_refs: list[str] = Field(default_factory=list, max_length=32)
+    grain_refs: list[str] = Field(default_factory=list, description="每行结果的身份或分组字段引用；使用对象.属性，复合粒度保留全部字段。")
     dimension_refs: list[str] = Field(default_factory=list, max_length=16)
     metrics: list[LogicalMetric] = Field(default_factory=list, max_length=16)
     filters: list[LogicalFilter] = Field(default_factory=list, max_length=24)
@@ -360,6 +361,8 @@ class SQLProgramStep(BaseModel):
         description="仅source步骤使用：将前置输出键绑定进本步IN参数。local步骤必须为空，直接用先前步骤name写SQL关联。",
     )
     output_columns: list[str] = Field(min_length=1, max_length=1000)
+    result_grain: list[str] = Field(default_factory=list, description="结果粒度对应的输出列，复合粒度保留全部列；标注粒度不能替代SQL聚合。")
+    metric_sources: dict[str, list[str]] = Field(default_factory=dict, description="聚合输出列到来源表别名.字段的映射；每个指标独立说明来源。")
     output_labels: dict[str, str] = Field(default_factory=dict, description="业务界面的列标题：为每个output_columns提供简洁自然语言名称，key保持原列名，value不含字段编码或SQL表达式。")
 
     @field_validator("parameters", "inputs", "output_labels", mode="before")
@@ -438,7 +441,7 @@ class SQLArtifact(BaseModel):
 class SystemSettings(BaseModel):
     """Bounded query runtime settings; no retired approval/reviewer switches."""
 
-    query_timeout_seconds: int = Field(default=30, ge=1, le=30)
+    query_timeout_seconds: int = Field(default=15, ge=1, le=30)
     max_result_rows: int = Field(default=1000, ge=1, le=1000)
     max_result_mb: int = Field(default=10, ge=1, le=10)
     preview_rows: int = Field(default=100, ge=1, le=1000)

@@ -210,9 +210,10 @@ public final class JdbcWorker {
         return map("snapshot_version",2,"tables",tables,"foreign_keys",foreignKeys,"permission_gaps",gaps,"sensitive_columns",List.of());
     }
     static List<Map<String,Object>> templateRows(Connection c,JsonNode q,String key) throws SQLException {
-        if(!c.getAutoCommit())c.rollback();readonly(c,text(q,"strategy"),10000);
+        int timeout=q.path("timeout_ms").asInt(60000);
+        if(!c.getAutoCommit())c.rollback();readonly(c,text(q,"strategy"),timeout);
         try(Statement s=c.createStatement()) {
-            s.setQueryTimeout(10);s.setMaxRows(100001);
+            s.setQueryTimeout(Math.max(1,(timeout+999)/1000));s.setMaxRows(100001);
             return rows(s.executeQuery(q.path("metadata_queries").path(key).asText()));
         }finally{c.rollback();}
     }
@@ -299,7 +300,7 @@ public final class JdbcWorker {
         return v.toString();
     }
     static Map<String,Object> query(Connection c,JsonNode q) throws SQLException,IOException {
-        long started=System.nanoTime();int max=q.path("max_rows").asInt(1000),timeout=q.path("timeout_ms").asInt(30000);
+        long started=System.nanoTime();int max=q.path("max_rows").asInt(1000),timeout=q.path("timeout_ms").asInt(15000);
         readonly(c,text(q,"strategy"),timeout);
         try(PreparedStatement s=c.prepareStatement(text(q,"sql"))) {
             s.setQueryTimeout(Math.max(1,(timeout+999)/1000));s.setMaxRows(max+1);int index=1;

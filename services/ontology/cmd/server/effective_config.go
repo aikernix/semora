@@ -75,34 +75,52 @@ func (s *Store) saveEffective(ctx context.Context, input Ontology) (Ontology, er
 		return Ontology{}, err
 	}
 	defer tx.Rollback()
+	value, err := s.saveEffectiveTx(ctx, tx, input)
+	if err != nil {
+		return Ontology{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return Ontology{}, err
+	}
+	return value, nil
+}
+func (s *Store) saveEffectiveTx(ctx context.Context, tx *sql.Tx, input Ontology) (Ontology, error) {
 	var encoded []byte
-	if err = tx.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1 FOR UPDATE`, input.Domain).Scan(&encoded); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1 FOR UPDATE`, input.Domain).Scan(&encoded); err != nil {
 		return Ontology{}, err
 	}
 	var previous Ontology
-	if err = json.Unmarshal(encoded, &previous); err != nil {
+	if err := json.Unmarshal(encoded, &previous); err != nil {
 		return Ontology{}, err
 	}
 	value, err := effectiveOntology(input, previous)
 	if err != nil {
 		return Ontology{}, err
 	}
+	packages, err := readPackages(ctx, tx, value.SourcePackageRefs)
+	if err != nil {
+		return Ontology{}, err
+	}
+	if err = validateInheritedMappings(value, packages); err != nil {
+		return Ontology{}, err
+	}
+	definition := referenceDefinition(value, packages)
+	value = composeReferences(definition, packages)
 	snapshot, err := preparePublication(value)
 	if err != nil {
 		return Ontology{}, err
 	}
-	encoded, err = json.Marshal(snapshot.Ontology)
+	encoded, err = json.Marshal(definition)
 	if err != nil {
 		return Ontology{}, err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE ontology_core.drafts SET name=$1,version=$2,payload=$3::jsonb,updated_at=now() WHERE domain=$4`,
-		value.Name, value.Version, string(encoded), value.Domain); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE ontology_core.drafts SET name=$1,version=$2,payload=$3::jsonb,updated_at=now() WHERE domain=$4`, value.Name, value.Version, string(encoded), value.Domain); err != nil {
+		return Ontology{}, err
+	}
+	if err = syncCrossRelations(ctx, tx, definition); err != nil {
 		return Ontology{}, err
 	}
 	if err = insertEffectiveSnapshot(ctx, tx, &snapshot); err != nil {
-		return Ontology{}, err
-	}
-	if err = tx.Commit(); err != nil {
 		return Ontology{}, err
 	}
 	return snapshot.Ontology, nil
@@ -124,9 +142,13 @@ func (s *Store) bindEffectiveKnowledgeBases(ctx context.Context, domain string, 
 	}
 	value.KnowledgeBaseIDs = ids
 	value.Version = bumpPatchVersion(value.Version)
-	// Empty newly-created domains have no executable ontology yet.
-	if len(value.Objects) > 0 {
-		snapshot, err := preparePublication(value)
+	// Resolve references for the execution context; the draft itself remains reference-only.
+	effective, err := s.resolveReferences(ctx, tx, value)
+	if err != nil {
+		return err
+	}
+	if len(effective.Objects) > 0 || len(effective.SourcePackageRefs) > 0 {
+		snapshot, err := preparePublication(effective)
 		if err != nil {
 			return err
 		}

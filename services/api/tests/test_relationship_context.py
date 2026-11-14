@@ -41,13 +41,13 @@ def test_widened_view_text_is_not_treated_as_long_form_content():
     assert [c["name"] for c in relationship_columns(view)] == ["classification"]
 
 
-def test_whole_table_batches_use_ten_to_fifteen_tables_without_filling_byte_budget():
+def test_whole_table_batches_fit_twenty_tables_with_byte_budget():
     cards = [table_card(table("t" + str(i), [{"name": "id", "type": "bigint"}]), [{"name": "id", "type": "bigint"}]) for i in range(161)]
     batches = list(table_batches(cards, "system"))
-    assert len(batches) == 16
-    assert all(fits and 10 <= len(group) <= 15 for group, fits in batches)
+    assert len(batches) == 9
+    assert all(fits and 1 <= len(group) <= 20 for group, fits in batches)
     assert all(request_size("system", {"tables": group}) <= REQUEST_LIMIT for group, _ in batches)
-    assert [len(group) for group, _ in table_batches(cards[:16], "system")] == [10, 6]
+    assert [len(group) for group, _ in table_batches(cards[:16], "system")] == [16]
 
 
 def test_large_tables_split_only_when_single_table_exceeds_request_limit():
@@ -65,7 +65,7 @@ def test_relationship_packets_share_table_definitions_and_enforce_full_request_b
                         "target": {"table_id": "public.entities", "fields": [{"name": "id", "description": "实体编号"}]}, "evidence": []})
     for group, fits in relation_batches(packets, "system"):
         payload = relation_payload(group, [p["candidate_id"] for p in group])
-        assert fits and len(payload["tables"]) <= 15
+        assert fits and len(payload["tables"]) <= 40
         assert request_size("system", payload) <= REQUEST_LIMIT
         assert len(payload["tables"]["public.entities"]["fields"]) == 1
 
@@ -109,3 +109,28 @@ def test_table_batch_model_can_propose_differently_named_keys_within_allowed_sch
                                   {"source_table_id": "public.entry", "target_table_id": "public.entity", "key_pairs": [{"source": "invented", "target": "entity_key"}]}]}
     result = asyncio.run(classify_tables(values, Model()))
     assert len(result["public.entry"]["relationship_proposals"]) == 1
+
+
+def test_global_proposal_context_is_shared_without_losing_candidate_references():
+    from app.relationship_context import relation_payload
+    shared={'id':'shared','source_table_id':'a','target_table_id':'b','key_pairs':[{'source':'x','target':'y'}]}
+    payload=relation_payload([{'candidate_id':str(i),'other_proposals':[shared]} for i in range(20)])
+    assert payload['other_proposals']=={'shared':shared}
+    assert all(c['other_proposal_ids']==['shared'] and 'other_proposals' not in c for c in payload['candidates'])
+
+
+def test_compact_context_keeps_full_mappings_guards_and_shares_domain_statistics():
+    from app.relationship_context import relation_payload
+    guards = [{'side': 'source', 'field': 'kind', 'operator': 'eq', 'value': 'record'}]
+    relation = {'id': 'r', 'source_table_id': 'a', 'target_table_id': 'b',
+                'source_columns': ['x'], 'target_columns': ['y'],
+                'key_pairs': [{'source': 'x', 'target': 'y'}],
+                'condition_template': {'pairs': [{'left': 'x', 'right': 'y'}], 'guards': guards}}
+    facts = [{'source_table': 'events', 'distinct_keys_checked': 4, 'matched_keys': 3}]
+    payload = relation_payload([{'candidate_id': str(i), 'other_proposals': [relation],
+                                'target_domain_observations': facts} for i in range(20)])
+    assert payload['other_proposals']['r']['guards'] == guards
+    assert payload['other_proposals']['r']['key_pairs'] == relation['key_pairs']
+    assert 'source_columns' not in payload['other_proposals']['r']
+    assert len(payload['target_domains']) == 1
+    assert len({c['target_domain_ref'] for c in payload['candidates']}) == 1

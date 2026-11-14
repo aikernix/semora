@@ -95,7 +95,9 @@ def validation_fingerprint(cfg, driver):
     clean={k:v for k,v in cfg.items() if k != "_validation"}
     return hashlib.sha256(json.dumps([clean,{k:v for k,v in driver.items() if k != "classpath"}],sort_keys=True).encode()).hexdigest()
 
-def run(cfg, operation, *, execution_id=None, timeout_ms=30000, validating=False, **payload):
+def run(cfg, operation, *, execution_id=None, timeout_ms=None, validating=False, **payload):
+    from .timeouts import scan_timeout_ms, query_timeout_ms
+    timeout_ms = timeout_ms if timeout_ms is not None else (scan_timeout_ms() if operation == "scan" else query_timeout_ms())
     driver, dialect, strategy = configuration(cfg)
     if operation == "query" and (not dialect or not strategy):
         raise HTTPException(409, "该来源仅开放结构扫描，请管理员配置并验证方言及只读策略")

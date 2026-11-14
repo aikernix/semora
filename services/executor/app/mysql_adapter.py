@@ -9,9 +9,11 @@ import pymysql
 from fastapi import HTTPException
 from .errors import database_error
 from . import scan_control
+from .timeouts import scan_timeout_ms, query_timeout_ms
 
 
-def connect(dsn: str, timeout_ms: int = 30_000):
+def connect(dsn: str, timeout_ms: int | None = None):
+    timeout_ms = timeout_ms if timeout_ms is not None else query_timeout_ms()
     url = urlsplit(dsn)
     if url.scheme != 'mysql' or not url.hostname or not url.path.strip('/'):
         raise HTTPException(422, 'MySQL 连接配置无效')
@@ -68,8 +70,8 @@ def scan(dsn: str, sensitivity_level, table_names: list[str] | None = None) -> d
     tables = {}
     sensitive = []
     try:
-        with scan_control.track(connect(dsn)) as connection:
-            begin_readonly(connection, 5000)
+        with scan_control.track(connect(dsn, scan_timeout_ms())) as connection:
+            begin_readonly(connection, scan_timeout_ms())
             with connection.cursor() as cursor:
                 cursor.execute('''SELECT c.TABLE_SCHEMA,c.TABLE_NAME,c.COLUMN_NAME,c.COLUMN_TYPE,
                     c.IS_NULLABLE,c.COLUMN_KEY,c.COLUMN_COMMENT,t.TABLE_COMMENT,t.TABLE_TYPE

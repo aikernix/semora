@@ -150,7 +150,7 @@ def validate_grouping(tree, objects):
             )
 
 
-def compile_step(step, ontology, results=None, *, template=False, row_limit=1000):
+def compile_step(step, ontology, results=None, *, template=False, row_limit=1000, result_keys=None):
     results = results or {}
     if step.engine == "local":
         allowed = list(results)
@@ -166,6 +166,8 @@ def compile_step(step, ontology, results=None, *, template=False, row_limit=1000
         source_label = datasource_service.repository.get(step.data_source_id).name
     tree = readonly_tree(step.sql, allowed)
     validate_grouping(tree, ontology.get("objects", []))
+    from .sql_grain import validate_join_grain
+    validate_join_grain(tree, [o for o in ontology.get("objects", []) if step.engine == "source" and (o.get("dataSourceId") or ontology.get("dataSourceId")) == step.data_source_id], result_keys)
     if step.engine == "source":
         from .database_profile import source_profile, validate_features
 

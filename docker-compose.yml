@@ -40,7 +40,8 @@ services:
       BUSINESS_DATABASE_URL: postgresql://semora_reader:semora_reader@postgres:5432/semora_business
       DATASOURCE_RETAIL_CREDIT_PG_URL: postgresql://semora_reader:semora_reader@postgres:5432/semora_business
       DATASOURCE_BANK_MYSQL_URL: ${DATASOURCE_BANK_MYSQL_URL:-}
-      QUERY_TIMEOUT_MS: "30000"
+      SCAN_TIMEOUT_MS: "${SCAN_TIMEOUT_MS:-60000}"
+      QUERY_TIMEOUT_MS: "${QUERY_TIMEOUT_MS:-15000}"
       MAX_RESULT_ROWS: "1000"
       MAX_RESULT_BYTES: "10485760"
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:-semora-dev-internal}
@@ -122,7 +123,17 @@ services:
     build:
       context: .
       dockerfile: services/api/Dockerfile
+    volumes:
+      - relationship-checkpoints:/var/lib/semora/relationship-checkpoints
     environment:
+      RELATIONSHIP_RESPONSE_FORMAT: "${RELATIONSHIP_RESPONSE_FORMAT:-json_object}"
+      RELATIONSHIP_THINKING_MODE: "${RELATIONSHIP_THINKING_MODE:-inherit}"
+      RELATIONSHIP_NO_DELIVERY_SECONDS: "${RELATIONSHIP_NO_DELIVERY_SECONDS:-300}"
+      RELATIONSHIP_MODEL_CONCURRENCY: "${RELATIONSHIP_MODEL_CONCURRENCY:-3}"
+      RELATIONSHIP_AGENT_GROUP_THRESHOLD: "${RELATIONSHIP_AGENT_GROUP_THRESHOLD:-40}"
+      RELATIONSHIP_COMPARISON_TASK_THRESHOLD: "${RELATIONSHIP_COMPARISON_TASK_THRESHOLD:-30}"
+      RELATIONSHIP_AGENT_MAX_STEPS: "${RELATIONSHIP_AGENT_MAX_STEPS:-80}"
+      RELATIONSHIP_CHECKPOINT_DIR: /var/lib/semora/relationship-checkpoints
       EXECUTOR_URL: http://executor:8002
       METADATA_DATABASE_URL: postgresql://semora_api:semora_api@postgres:5432/semora_business
       LANGGRAPH_DATABASE_URL: postgresql://semora_api:semora_api@postgres:5432/semora_business?options=-csearch_path%3Dsemora_meta
@@ -146,7 +157,7 @@ services:
       LLM_REQUEST_RETRIES: ${LLM_REQUEST_RETRIES:-1}
       LLM_STREAM_ENABLED: ${LLM_STREAM_ENABLED:-true}
       LLM_STREAM_INCLUDE_USAGE: ${LLM_STREAM_INCLUDE_USAGE:-true}
-      LLM_ENABLE_THINKING: ${LLM_ENABLE_THINKING:-}
+      LLM_ENABLE_THINKING: ${LLM_ENABLE_THINKING:-false}
       LLM_NO_DELIVERY_SECONDS: ${LLM_NO_DELIVERY_SECONDS:-60}
       AGENT_MAX_NO_PROGRESS: ${AGENT_MAX_NO_PROGRESS:-3}
       AGENT_TIMEOUT_SECONDS: ${AGENT_TIMEOUT_SECONDS:-900}
@@ -199,6 +210,7 @@ services:
       - "5173:8080"
 
 volumes:
+  relationship-checkpoints:
   executor-config:
   semora-postgres:
 
