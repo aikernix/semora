@@ -1,6 +1,8 @@
 # ADR-0001：Semora 技术选型
 
-- 状态：已选定
+> 历史决策记录，保留原始设计背景。当前部署、Agent 分工与在线 SQL 链路以 [README](../../README.md) 和[当前架构](agentic-architecture.md)为准；本文的内置 Knowledge Core、独立 Semantic Planner、Reviewer、审批及审计方案不代表当前运行能力。
+
+- 状态：历史选型，当前架构已替代
 - 日期：2026-11-02
 - 目标：面向银行的自然语言查数系统，展示分析依据、SQL、查询结果和自然语言说明，并提供独立复核、可配置审批和完整审计。
 

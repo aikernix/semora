@@ -6,17 +6,17 @@
 
 产品入口包括 PostgreSQL、MySQL、Oracle、SQL Server、OceanBase、GoldenDB、海量数据库 / Vastbase、自定义 JDBC。没有版本白名单，页面不要求手选版本。连接时保留数据库自动报告的产品、版本、驱动版本；`product_override` 是人工说明，不覆盖自动值，也不改变方言。
 
-产品入口不等于已经通过实例验收。Oracle、SQL Server、OceanBase 随 Executor 镜像分发固定版本驱动；GoldenDB、Vastbase 和其他 JDBC 产品由管理员安装实际厂商驱动和依赖。国产产品不自动继承 MySQL/PostgreSQL 协议或方言。OceanBase 两种租户模式始终使用 OceanBase 协议。
+产品入口不等于已经通过实例验收。PostgreSQL 使用 PostgreSQL 原生协议，MySQL 与 GoldenDB 使用 MySQL 原生协议；Oracle、SQL Server、OceanBase、Vastbase 随 Executor 镜像分发固定版本 JDBC 驱动，其他厂商驱动及依赖可由管理员配置。OceanBase 需区分兼容模式，实际方言与查询能力仍由实例探测确认。
 
-内置驱动：Oracle `ojdbc11:23.6.0.24.10`、Microsoft `mssql-jdbc:12.8.1.jre11`、OceanBase `oceanbase-client:2.4.13`。固定驱动版本不等于所有服务器版本已验证；其他厂商驱动可作为独立包上传。
+内置驱动：Oracle `ojdbc11:23.6.0.24.10`、Microsoft `mssql-jdbc:12.8.1.jre11`、OceanBase `oceanbase-client:2.4.13`、Vastbase `vastbase-jdbc:2.13.2v`。固定驱动版本不等于所有服务器版本已验证；其他厂商驱动可作为独立包上传。
 
 连接、结构、注释、约束、MDL、查询分别记录状态。查询验证使用合成的 `SELECT 1`，并单独探测分页、CTE、窗口函数和基本结果类型；不能据此断言复杂业务 SQL 全部可用。Oracle 老版本不支持 FETCH、驱动不支持只读边界等情况会保留连接和扫描能力，报告实际失败，不绕过验证。
 
 ## 数据源操作
 
 1. 在原数据源页面新增产品，填写账号密码及扫描范围。Oracle 可选 Service Name、SID 或无凭据的高级 JDBC URL；SQL Server 默认启用证书校验和加密，TLS 参数通过连接属性 JSON 配置。
-2. 测试连接，检查自动识别值、Schema/Catalog；保存后异步扫描。扫描范围接受逗号分隔的表标识。JDBC 表标识包括驱动返回的 Catalog、Schema、表名；PostgreSQL 为 `schema.table`，MySQL 为 `database.table`。
-3. 检查权限缺口、声明约束及关系候选。候选只来自真实字段与已声明的目标唯一键，必须人工确认。显式点击“采样验证”才读取数据，每侧最多 200 行、每查询 3 秒、1MB，只返回统计证据，不输出样本值。样本唯一及样本缺失都不是全表结论。
+2. 测试连接，检查自动识别值、Schema/Catalog；保存后异步采集版本和结构，不自动启动关联分析；连接参数创建后不可修改，需要变更时新增数据源。扫描范围接受逗号分隔的表标识。JDBC 表标识包括驱动返回的 Catalog、Schema、表名；PostgreSQL 为 `schema.table`，MySQL 为 `database.table`。
+3. 扫描完成后检查权限缺口与声明约束，再显式点击更新关联关系。建模包含结构证据、模型召回与语义分析，按需读取统计证据；明确关系进入生效包，需人工处理的提议进入待审核。旧扫描候选的显式“采样验证”接口仍有独立预算，每侧最多200行、每查询3秒、1MB，不能将其等同于完整建模取证。样本唯一及样本缺失都不是全表结论。
 4. 点击“验证查询”后，JDBC 来源才可以进入问数。自定义驱动必须先由管理员配置兼容方言和只读策略；配置未知时只扫描、导出。
 5. 导出 ZIP：`mdl.json`（能够忠实构建时）和独立 `report.json`。存在未知类型、权限缺口、缺失关系端点等问题时只交付报告，扫描和现有查询不受导出失败影响。
 
