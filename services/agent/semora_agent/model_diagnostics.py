@@ -130,6 +130,11 @@ class RequestDiagnostics:
                 'http2.send_request_body.complete':'request_sent_ms'}
         if name in fields:self.data[fields[name]]=self.elapsed()
 
+    def transport_trace(self, name, info):
+        # httpcore requires a CPython coroutine object. wait_for is a stdlib
+        # coroutine bridge for native-extension awaitables; None adds no timeout.
+        return asyncio.wait_for(self.trace(name, info), timeout=None)
+
     def headers(self,response):
         self.data.update(headers_ms=self.elapsed(),http_status=response.status_code,stage='waiting_body')
         for name in ('x-request-id','request-id','x-dashscope-request-id'):

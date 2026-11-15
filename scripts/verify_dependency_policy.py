@@ -82,12 +82,14 @@ def main() -> int:
     notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8").lower()
     for required in (
         "weknora",
-        "openbkn",
         "tdesign",
         "sqlglot",
         "langgraph",
         "opentelemetry",
         "pgx",
+        "wren core python",
+        "jackson",
+        "cython",
     ):
         if required not in notices:
             errors.append(f"THIRD_PARTY_NOTICES.md is missing required provenance entry: {required}")

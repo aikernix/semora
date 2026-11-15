@@ -33,6 +33,8 @@ COPY --from=jdbc /build/target/jdbc-worker-1.0.0.jar /opt/semora-jdbc/
 COPY --from=jdbc /build/target/lib /opt/semora-jdbc/lib
 RUN if [ "$SERVICE" = "executor" ]; then apt-get update && apt-get install -y --no-install-recommends default-jre-headless && rm -rf /var/lib/apt/lists/*; fi
 COPY THIRD_PARTY_NOTICES.md /usr/share/doc/semora/THIRD_PARTY_NOTICES.md
+COPY LICENSE /usr/share/doc/semora/LICENSE
+COPY services/api/app/vendor/WREN-LICENSE-APACHE-2.0 /usr/share/doc/semora/APACHE-2.0.txt
 COPY deploy/compiled/verify_payload.py /usr/local/bin/semora-verify-payload
 RUN mkdir -p /data/config && chown 10001:10001 /data/config \
     && addgroup --system --gid 10001 semora \

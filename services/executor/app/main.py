@@ -591,7 +591,7 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
     # Two index-ordered windows reduce first-page bias without random sorts or OFFSET.
     observed=[]
     source_exhausted = False
-    for descending in ((False,True) if body.source_index_confirmed else (False,)):
+    for descending in ([False, True] if body.source_index_confirmed else [False]):
         window = run_sample(body.datasource,body.source_table,body.source_columns,descending)
         source_exhausted = source_exhausted or len(window) <= body.sample_rows
         observed.extend(window)

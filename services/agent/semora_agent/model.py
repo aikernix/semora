@@ -146,7 +146,7 @@ class StructuredModel:
                 async with asyncio.timeout(self.timeout_seconds):
                     async def send_and_read():
                         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                            async with client.stream('POST',self.endpoint,headers={'Authorization':f'Bearer {self.api_key}'},json=body,extensions={'trace':diagnostic.trace}) as response:
+                            async with client.stream('POST',self.endpoint,headers={'Authorization':f'Bearer {self.api_key}'},json=body,extensions={'trace':diagnostic.transport_trace}) as response:
                                 diagnostic.headers(response)
                                 response.raise_for_status()
                                 return await read_response(response,diagnostic)

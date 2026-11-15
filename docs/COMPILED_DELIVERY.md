@@ -56,3 +56,23 @@ deleting files in a later layer does not remove them from earlier layers.
 Existing source deployments are not retroactively protected by this change. This
 branch does not replace the live release or remove existing source checkouts.
 Compiled artifacts do not stop a recipient from copying a downloaded image.
+
+## Image-only public distribution
+
+`Semra_Deploy` is an independent deployment repository. Its Compose file references
+prebuilt image tags and has no application build context. Releases provide
+SHA-256-verified Linux AMD64 and ARM64 image archives; Windows and macOS use Docker
+Desktop's Linux container runtime. Public artifacts exclude source repositories,
+build stages, customer data, and local `.env` files.
+
+Compiled delivery uses a separate migration runner. It records migration names
+and SHA-256 checksums, serializes concurrent runners with a PostgreSQL advisory
+lock, and commits changes and the ledger in one transaction. Repeated starts skip
+already applied historical cleanup. Changed migration contents fail closed.
+Existing metadata without this delivery ledger is not automatically baselined;
+this bundle is intended for fresh installs and subsequent bundle upgrades.
+
+Native-runtime smoke checks exercise imports, HTTP routing, OpenAPI and the
+HTTPX/httpcore trace callback contract. The transport callback uses a stdlib
+coroutine bridge for Cython awaitables; the LangChain model class explicitly
+ignores native method types during Pydantic field discovery.

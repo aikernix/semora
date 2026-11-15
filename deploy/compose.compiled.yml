@@ -1,6 +1,11 @@
 # Opt-in compiled delivery build. Development Compose stays unchanged.
 # docker compose -f docker-compose.yml -f deploy/compose.compiled.yml build
 services:
+  migrate:
+    image: semora-migrate:compiled-v1
+    build:
+      context: .
+      dockerfile: deploy/compiled/Dockerfile.migrator
   api:
     image: semora-api:compiled-v1
     build:

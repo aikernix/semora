@@ -14,7 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage, messages_from_dict,
 from langchain_core.messages.utils import convert_to_openai_messages
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.utils.function_calling import convert_to_openai_tool
-from pydantic import BaseModel, Field, PrivateAttr, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
 from .model import ModelError, PlanValidationError
 from .context_budget import prepare_context,ContextBudgetError
@@ -31,6 +31,9 @@ class AgentSubmission(BaseModel):
 
 class ToolCallingModel(BaseChatModel):
     """Adapt the existing configured provider without another SDK or credentials store."""
+
+    # Cython methods have their own callable type; they remain methods, not fields.
+    model_config = ConfigDict(ignored_types=(type(lambda: None),))
 
     _client: Any = PrivateAttr()
     _event: Callable = PrivateAttr()
