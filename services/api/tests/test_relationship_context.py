@@ -111,6 +111,14 @@ def test_table_batch_model_can_propose_differently_named_keys_within_allowed_sch
     assert len(result["public.entry"]["relationship_proposals"]) == 1
 
 
+def test_review_payload_omits_internal_controls_and_empty_global_context():
+    from app.relationship_context import relation_payload
+    payload=relation_payload([{'candidate_id':'c','evidence':[]}],['c'],targeted_recheck=True)
+    assert 'required_decision_ids' not in payload
+    assert 'targeted_recheck' not in payload
+    assert 'other_proposals' not in payload and 'target_domains' not in payload
+
+
 def test_global_proposal_context_is_shared_without_losing_candidate_references():
     from app.relationship_context import relation_payload
     shared={'id':'shared','source_table_id':'a','target_table_id':'b','key_pairs':[{'source':'x','target':'y'}]}

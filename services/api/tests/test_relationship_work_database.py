@@ -12,7 +12,7 @@ from app.relationship_keywords import KeywordDiscovery
 from app.relationship_work import RelationshipWork
 
 
-def test_concurrent_keyword_commits_and_database_stage_markers():
+def test_concurrent_keyword_commits_and_database_stage_markers(monkeypatch):
     dsn=os.getenv('RELATIONSHIP_TEST_DATABASE_URL')
     if not dsn:pytest.skip('requires disposable PostgreSQL')
     connect=lambda:psycopg.connect(dsn,autocommit=True)
@@ -51,8 +51,9 @@ def test_concurrent_keyword_commits_and_database_stage_markers():
         async def complete_json(self,system,user):
             import json
             self.calls+=1;p=json.loads(user)
-            return {'groups':[{'input_group_ids':[g['group_id']],'table_ids':g['table_ids'],
+            return {'groups':[{'table_ids':g['table_ids'],
                                'reason':'编号用途一致，保留'} for g in p['groups']], 'excluded':[]}
+    monkeypatch.setattr('app.relationship_organization.ORGANIZATION_GROUP_LIMIT',1)
     model=Model();again.model=model
     organized=asyncio.run(again.organize())
     assert model.calls==1

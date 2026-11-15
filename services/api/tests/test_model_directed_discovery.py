@@ -147,7 +147,7 @@ def test_missing_full_join_predicate_never_publishes():
 
 
 @pytest.mark.parametrize('view, population, expected', [(False,20,1),(True,20,1),(True,0,0)])
-def test_full_pipeline_publishes_cross_named_reference_without_candidate_writes(monkeypatch, tmp_path, view, population, expected):
+def test_full_pipeline_publishes_cross_named_reference_and_persists_review_candidates(monkeypatch, tmp_path, view, population, expected):
     from types import SimpleNamespace
     from semora_agent.model import structured_model
     from app.datasource_modeling import ModelingService
@@ -165,7 +165,7 @@ def test_full_pipeline_publishes_cross_named_reference_without_candidate_writes(
             if p['phase']=='keywords':
                 return {'keywords':['学生']}
             if p['phase']=='organization':
-                return {'groups':[{'input_group_ids':[g['group_id']], 'table_ids':g['table_ids'],
+                return {'groups':[{'table_ids':g['table_ids'],
                                    'reason':'学生编号用途一致，保留分析'} for g in p['groups']], 'excluded':[]}
             ids={t['name']:t['table_id'] for t in p['tables']}
             if p['phase'] == 'read':
@@ -181,7 +181,7 @@ def test_full_pipeline_publishes_cross_named_reference_without_candidate_writes(
         if path=='datasources/relation-definitions':
             return {'definition':'SELECT ID FROM storage'}
         if path=='query':
-            assert kwargs['json']['timeout_ms']==3000
+            assert kwargs['json']['timeout_ms']==10000
             sql=kwargs['json']['sql']
             assert 'LIMIT 1' in sql
             return {'rows':[[0 if 'duplicates' in sql else population]]}
@@ -198,8 +198,37 @@ def test_full_pipeline_publishes_cross_named_reference_without_candidate_writes(
     assert package['relation_count']==expected
     if expected:
         assert package['payload']['relationshipRecords'][0]['key_pairs']==[{'source':'STU_ID','target':'ID'}]
-    assert repo.memory_candidates=={}
+    assert len(repo.memory_candidates)==1
+    persisted=next(iter(repo.memory_candidates.values()))
+    assert persisted['source_datasource_id']=='ds'
+    assert persisted['status']==('accepted' if expected else 'unresolved')
     assert 'query_table_roles' not in job['details']
+
+
+def test_research_pending_completes_other_results_without_publishing_pending_candidate(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from app.datasource_modeling import ModelingService
+    tables = [
+        {'id':'s.child','name':'child','columns':[{'name':'parent_id','type':'bigint'}], 'primary_keys':[],
+         'foreign_keys':[{'columns':['parent_id'],'target_table':'s.parent','target_columns':['id']}]},
+        {'id':'s.parent','name':'parent','columns':[{'name':'id','type':'bigint'}], 'primary_keys':[{'columns':['id']}]},
+    ]
+    record = SimpleNamespace(id='ds',status='healthy',type='postgresql',secret_ref='X',scan_result={'tables':tables})
+    repo = ModelingRepository(dsn='')
+    async def executor(*args,**kwargs): raise AssertionError('unexpected executor call')
+    service = ModelingService(SimpleNamespace(repository=SimpleNamespace(get=lambda _:record)),executor,repository=repo)
+    async def review(candidates, table_maps, job=None, persisted_only=False, discover=True):
+        candidates[0]['evidence_grade']='medium'
+        candidates[0]['status']='pending'
+        candidates[0]['evidence'].append({'kind':'research_gap','reason':'ValidationError'})
+        job['details']['research_pending']=1
+    monkeypatch.setattr(service,'_semantic_review',review)
+    monkeypatch.setenv('RELATIONSHIP_CHECKPOINT_DIR',str(tmp_path))
+    job = repo.create_job('ds',details={'persisted_only':True})
+    asyncio.run(service._run_onboarding(job))
+    assert job['status']=='completed_with_pending'
+    assert job['details']['research_pending']==1
+    assert repo.get_package('ds')['relation_count']==0
 
 
 def test_failed_publication_preserves_old_active_package(monkeypatch, tmp_path):

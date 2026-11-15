@@ -176,6 +176,21 @@ class RelationshipEdit(BaseModel):
     cardinality: Literal["1:1", "1:N", "N:1", "N:N", "unknown"]
 
 
+class RelationshipDecision(BaseModel):
+    action: Literal["approve", "reject", "disable", "enable"]
+
+
+def _relationship_status(candidate):
+    status = candidate.get("status")
+    if status == "accepted":
+        return "accepted"
+    if status == "disabled":
+        return "disabled"
+    if status in {"pending", "unresolved"}:
+        return "pending"
+    return "excluded"
+
+
 def _relationship_view(candidate):
     grade = candidate.get("evidence_grade")
     origin = "foreign_key" if grade == "foreign_key" else "manual" if grade == "manual" else "inferred"
@@ -187,10 +202,11 @@ def _relationship_view(candidate):
         "target_columns": candidate["target_columns"],
         "key_pairs": candidate["key_pairs"],
         "cardinality": candidate["cardinality"],
-        "status": candidate["status"],
+        "status": _relationship_status(candidate),
         "origin": origin,
         "evidence_grade": grade,
-        "decision_reason": next((e.get("reason") for e in reversed(candidate.get("evidence", [])) if e.get("kind") in {"automatic_exclusion", "independent_review", "model_semantic_review"}), ""),
+        "review_note": candidate.get("review_note", ""),
+        "decision_reason": next((e.get("reason") for e in reversed(candidate.get("evidence", [])) if e.get("kind") in {"automatic_exclusion", "independent_review", "model_semantic_review", "research_gap", "tool_unavailable", "profile_unavailable", "profile_audit_unavailable"}), ""),
         "predicates": candidate.get("condition_template", {}).get("guards", []),
         "automatically_excluded": candidate.get("status") == "rejected" and any(e.get("kind") == "automatic_exclusion" for e in candidate.get("evidence", [])),
     }
@@ -199,20 +215,22 @@ def _relationship_view(candidate):
 @router.get("/datasources/{identifier}/relationships")
 def relations(
     identifier: str,
-    status: str = Query(default="", pattern=r"^(|accepted|pending|rejected|stale)$"),
+    status: str = Query(default="", pattern=r"^(|all|accepted|pending|disabled)$"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
 ):
     source(identifier)
-    try:
-        values = modeling_service.repository.get_package(identifier)["payload"].get("relationshipRecords", [])
-    except KeyError:
-        values = []
-    values = [v for v in values if v.get("status") == "accepted"] if status in {"", "accepted"} else []
-    values.sort(key=lambda item: ({"accepted": 0, "pending": 1, "rejected": 2, "stale": 3}.get(item.get("status"), 4), -float(item.get("confidence") or 0), item["id"]))
+    records = modeling_service.repository.list_candidates(identifier, "single_source")
+    visible = [item for item in records if _relationship_status(item) != "excluded"]
+    counts = {key: sum(_relationship_status(item) == key for item in visible)
+              for key in ("accepted", "pending", "disabled")}
+    counts["all"] = len(visible)
+    values = visible if status in {"", "all"} else [item for item in visible if _relationship_status(item) == status]
+    values.sort(key=lambda item: ({"accepted": 0, "pending": 1, "disabled": 2}.get(_relationship_status(item), 3), -float(item.get("confidence") or 0), item["id"]))
     total = len(values)
     window = values[(page - 1) * page_size:page * page_size]
-    return {"items": [_relationship_view(item) for item in window], "page": page, "page_size": page_size, "total": total}
+    return {"items": [_relationship_view(item) for item in window], "page": page, "page_size": page_size,
+            "total": total, "counts": counts}
 
 
 def _validated_manual_candidate(identifier: str, body: RelationshipEdit):
@@ -254,7 +272,6 @@ async def _save_source_relations(identifier, records):
     payload = {"datasourceId": identifier, "schemaHash": schema_hash, "objects": objects,
                "relations": relations, "relationshipRecords": records}
     await modeling_service._commit_source_package(identifier,schema_hash,payload,item.scan_result['tables'])
-    repository.memory_candidates = {k:v for k,v in repository.memory_candidates.items() if v.get("source_datasource_id") != identifier}
 
 
 async def _write_manual_relation(identifier, body, candidate_id=None):
@@ -279,6 +296,8 @@ async def _write_manual_relation(identifier, body, candidate_id=None):
             "condition_template": {"operator": "and_equals", "guards": (previous or {}).get("condition_template", {}).get("guards", [])},
             "evidence": [{"kind": "manual", "reason": "用户配置"}]}
         await _save_source_relations(identifier, [r for r in records if r["id"] != candidate_id] + [record])
+        schema_hash = tables_digest(source(identifier).scan_result.get("tables") or [])
+        modeling_service.repository.replace_candidates([record], schema_hash, schema_hash)
         return _relationship_view(record)
 
 
@@ -292,32 +311,50 @@ async def edit_relationship(identifier: str, candidate_id: str, body: Relationsh
     return await _write_manual_relation(identifier, body, candidate_id)
 
 
-@router.delete("/datasources/{identifier}/relationships/{candidate_id}")
-async def delete_relationship(identifier: str, candidate_id: str):
+async def _decide_relationship(identifier: str, candidate_id: str, action: str):
     current = modeling_service.repository.latest_job(identifier)
     if current and current["status"] not in TERMINAL:
-        raise HTTPException(409, "关联分析正在运行，请先取消任务再编辑")
-    source(identifier)
+        raise HTTPException(409, "关联分析正在运行，请先取消任务再审核")
+    item = source(identifier)
     async with modeling_service.source_locks.setdefault(identifier, asyncio.Lock()):
-        try:
-            package = modeling_service.repository.get_package(identifier)
-        except KeyError:
-            raise HTTPException(404, "关联关系不存在") from None
-        if package['schema_hash']!=tables_digest(source(identifier).scan_result.get('tables',[])):
-            raise HTTPException(409,'结构已变化，请先更新关联关系')
-        records = package["payload"].get("relationshipRecords", [])
-        if not any(r["id"] == candidate_id for r in records):
+        records = modeling_service.repository.list_candidates(identifier, "single_source")
+        previous = next((record for record in records if record["id"] == candidate_id), None)
+        if not previous or _relationship_status(previous) == "excluded":
             raise HTTPException(404, "关联关系不存在")
-        await _save_source_relations(identifier, [r for r in records if r["id"] != candidate_id])
-        if modeling_service.repository.dsn:
-            with modeling_service.repository._connect() as connection:
-                connection.execute("DELETE FROM semora_meta.relationship_candidates WHERE id=%s AND source_datasource_id=%s", (candidate_id, identifier))
-        return {"id": candidate_id, "deleted": True}
+        expected = {"approve": "pending", "reject": "pending", "disable": "accepted", "enable": "disabled"}[action]
+        if _relationship_status(previous) != expected:
+            raise HTTPException(409, "当前关系状态不允许此操作")
+        schema_hash = tables_digest(item.scan_result.get("tables") or [])
+        if previous.get("source_schema_hash") not in {None, schema_hash} or previous.get("target_schema_hash") not in {None, schema_hash}:
+            raise HTTPException(409, "结构已变化，请先更新关联关系")
+        labels = {"approve": "人工同意", "reject": "人工拒绝", "disable": "人工停用", "enable": "人工启用"}
+        status = "accepted" if action in {"approve", "enable"} else "disabled"
+        record = {**previous, "status": status, "research_pending": False,
+                  "reviewed_by": "data-steward", "review_note": labels[action],
+                  "evidence": [*previous.get("evidence", []), {"kind": "manual_review", "action": action, "reason": labels[action]}]}
+        modeling_service.repository.replace_candidates([record], schema_hash, schema_hash)
+        active = [value for value in modeling_service.repository.list_candidates(identifier, "single_source")
+                  if value.get("status") == "accepted"]
+        await _save_source_relations(identifier, active)
+        return _relationship_view(record)
+
+
+@router.post("/datasources/{identifier}/relationships/{candidate_id}/decision")
+async def decide_relationship(identifier: str, candidate_id: str, body: RelationshipDecision):
+    return await _decide_relationship(identifier, candidate_id, body.action)
+
+
+@router.delete("/datasources/{identifier}/relationships/{candidate_id}")
+async def delete_relationship(identifier: str, candidate_id: str):
+    # Backward-compatible route: relations are disabled, never physically deleted.
+    value = await _decide_relationship(identifier, candidate_id, "disable")
+    return {"id": candidate_id, "deleted": False, "disabled": True, "status": value["status"]}
 
 
 @router.post("/datasources/{identifier}/relationships/{candidate_id}/restore")
 async def restore_relationship(identifier: str, candidate_id: str):
-    raise HTTPException(410, "排除关系不再存储，请新增或重新分析关系")
+    return await _decide_relationship(identifier, candidate_id, "enable")
+
 
 @router.get("/datasources/{identifier}/mdl-report")
 def mdl_report(identifier: str):

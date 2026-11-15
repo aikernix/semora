@@ -35,18 +35,18 @@ def test_same_join_with_different_role_words_is_one_query_edge():
 def test_discovery_and_both_review_stages_share_the_same_reference_rules():
     from app.relationship_discovery import SYSTEM, COMPLETION_SYSTEM
     from app.relationship_research import SYSTEM as REVIEW, REVIEW_SYSTEM
-    from app.relationship_keywords import COMPARE_SYSTEM, AGENT_SYSTEM
-    for prompt in (SYSTEM, COMPLETION_SYSTEM, REVIEW, REVIEW_SYSTEM, COMPARE_SYSTEM, AGENT_SYSTEM):
+    from app.relationship_keywords import AGENT_SYSTEM
+    for prompt in (SYSTEM, COMPLETION_SYSTEM, REVIEW, REVIEW_SYSTEM, AGENT_SYSTEM):
         assert prompt.count(REFERENCE_RULES) == 1
 
 
 def test_all_relationship_prompts_define_role_task_and_finish_with_output_contract():
     import json
     from app.relationship_discovery import READ_SYSTEM, EXPAND_SYSTEM, SYSTEM, COMPLETION_SYSTEM
-    from app.relationship_keywords import COMPARE_SYSTEM, AGENT_SYSTEM
+    from app.relationship_keywords import AGENT_SYSTEM
     from app.relationship_research import SYSTEM as REVIEW, REVIEW_SYSTEM
     from app.relationship_output_schema import MARKER
-    for prompt in (READ_SYSTEM,EXPAND_SYSTEM,SYSTEM,COMPLETION_SYSTEM,COMPARE_SYSTEM,AGENT_SYSTEM,REVIEW,REVIEW_SYSTEM):
+    for prompt in (READ_SYSTEM,EXPAND_SYSTEM,SYSTEM,COMPLETION_SYSTEM,AGENT_SYSTEM,REVIEW,REVIEW_SYSTEM):
         assert prompt.startswith('【角色】')
         assert '【任务】' in prompt or '【目标】' in prompt
         assert any(header in prompt for header in ('【输入】','【资料】'))
@@ -57,13 +57,25 @@ def test_all_relationship_prompts_define_role_task_and_finish_with_output_contra
     assert '【复核重点】' in REVIEW_SYSTEM
 
 
+def test_compact_comparison_has_minimal_output_and_short_reason():
+    from app.relationship_contracts import ProposalOutput
+    from app.relationship_keywords import COMPARE_SYSTEM
+    assert COMPARE_SYSTEM.startswith('【角色】') and '【任务】' in COMPARE_SYSTEM
+    assert '$defs' not in COMPARE_SYSTEM and 'keywords' not in COMPARE_SYSTEM and 'gaps' not in COMPARE_SYSTEM
+    assert '不超过60个字符' in COMPARE_SYSTEM
+    assert set(ProposalOutput.model_fields)=={'relations'}
+    reason=ProposalOutput.model_json_schema()['$defs']['ProposedRelation']['properties']['reason']
+    assert reason['maxLength']==60 and reason['minLength']==1
+
+
 def test_data_guidance_is_inserted_before_review_output_schema():
     from app.relationship_research import SYSTEM, with_data_guidance
-    from app.relationship_output_schema import MARKER
+    from app.relationship_output_schema import MARKER, DATA_RESEARCH_SCHEMA, RESEARCH_SCHEMA, output_format
     prompt=with_data_guidance(SYSTEM)
     assert '【数据核查要求】' not in SYSTEM
     assert prompt.index('【数据核查要求】')<prompt.index(MARKER)
-    assert prompt.split(MARKER,1)[1]==SYSTEM.split(MARKER,1)[1]
+    assert prompt.endswith(output_format(DATA_RESEARCH_SCHEMA))
+    assert SYSTEM.endswith(output_format(RESEARCH_SCHEMA))
 
 
 def test_published_records_keep_own_evidence_and_omit_research_neighbors():

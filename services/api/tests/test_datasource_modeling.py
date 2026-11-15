@@ -3,6 +3,7 @@ from app.datasource_modeling import (
     discover_candidates,
     package_objects,
     package_relations,
+    convert_model_candidates,
 )
 from fastapi import HTTPException
 import pytest
@@ -342,7 +343,10 @@ def test_new_research_does_not_preserve_historical_negative_decisions():
 def test_executor_profiles_directional_membership_without_returning_values(monkeypatch):
     from services.executor.app import main as executor
 
+    timeouts=[]
+
     def fake_execute(body, _token=None):
+        timeouts.append(body.timeout_ms)
         if body.parameters:
             return {"columns": ["id"], "rows": [[1], [2]]}
         return {"columns": ["customer_id"], "rows": [[1], [2]]}
@@ -365,7 +369,57 @@ def test_executor_profiles_directional_membership_without_returning_values(monke
     result = executor.profile_relationship(body)
     assert result["directional_coverage"] == 1
     assert result["raw_values_retained"] is False
+    assert timeouts and set(timeouts)=={10000}
     assert "rows" not in result
 
     with pytest.raises(HTTPException, match="索引"):
         executor.profile_relationship(body.model_copy(update={"source_index_confirmed": False}))
+
+
+def test_model_candidate_conversion_discards_only_invalid_proposals():
+    source=table('talkplatform_ai_agent.ai_cc_user_service','ai_cc_user_service',[
+        ('biz_id','varchar(64)','业务id'),('biz_type','varchar(64)','业务类型'),('id','bigint','主键')],primary=['id'])
+    target=table('talkplatform_ai_agent.ai_service_feedback_appkey_relation','ai_service_feedback_appkey_relation',[
+        ('agent_id','varchar(64)','智能体ID'),('agent_name','varchar(64)','智能体名称')],primary=['agent_id'])
+    def card(value):
+        return {**value,'datasource_id':'ds','physical_table':value['id']}
+    cards={'source':card(source),'target':card(target)}
+    table_maps={'ds':{source['id']:source,target['id']:target}}
+    good={'source_table_id':'source','target_table_id':'target',
+          'key_pairs':[{'source':'biz_id','target':'agent_id'}],'reason':'合法提议'}
+    unsupported={**good,'guards':[{'side':'source','field':'biz_type','operator':'eq','value':'AI_FEEDBACK'}]}
+    unknown={**good,'key_pairs':[{'source':'biz_id','target':'invented_field'}]}
+    missing={**good,'key_pairs':[]}
+    duplicate={**good,'key_pairs':[{'source':'biz_id','target':'agent_id'},
+                                  {'source':'biz_id','target':'agent_name'}]}
+    valid,discarded=convert_model_candidates([unsupported,unknown,missing,duplicate,good],cards,table_maps)
+    assert len(valid)==1 and valid[0]['key_pairs']==[{'source':'biz_id','target':'agent_id'}]
+    assert [item['code'] for item in discarded]==[
+        'unsupported_relation_guard','unknown_relation_field','missing_relation_key_pairs','duplicate_relation_field']
+
+
+def test_cross_source_publication_keeps_valid_relations_when_one_mapping_is_incomplete():
+    import asyncio
+    from types import SimpleNamespace
+    from app.datasource_modeling import ModelingService, _candidate
+    source=table('source','source',[('x','bigint','来源编号')],primary=['x'])
+    target=table('target','target',[('id','bigint','目标编号')],primary=['id'])
+    good=_candidate('a','b',source,['x'],target,['id'],'cross_source',[])
+    bad=_candidate('a','b',source,['x'],target,['id'],'cross_source',[])
+    good['id']='good';bad['id']='bad';good['status']=bad['status']='accepted'
+    bad['condition_template']['guards']=[{'side':'source','field':'missing','operator':'eq','value':'X'}]
+    configuration={'objects':[
+        {'name':'Source','dataSourceId':'a','metadata':{'sourceTableId':'source'},
+         'properties':[{'column':'x','name':'x'}]},
+        {'name':'Target','dataSourceId':'b','metadata':{'sourceTableId':'target'},
+         'properties':[{'column':'id','name':'id'}]}], 'relations':[]}
+    class Ontology:
+        saved=None
+        async def get_configuration(self,domain):return configuration
+        async def save_configuration(self,domain,value):self.saved=value
+    ontology=Ontology()
+    service=ModelingService(None,None,repository=SimpleNamespace(memory_candidates={}),ontology_service=ontology)
+    asyncio.run(service._apply_cross_relations('domain',[bad,good]))
+    assert bad['status']=='unresolved' and bad['research_pending'] is True
+    assert good['status']=='accepted'
+    assert len(ontology.saved['relations'])==1

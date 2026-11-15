@@ -17,9 +17,9 @@ import psycopg
 
 from .datasource_table_storage import tables_digest
 from .mdl_export import column_type
-from .relationship_evidence import recall_field_pairs, finalize_relationships
+from .relationship_evidence import recall_field_pairs, finalize_relationships, technically_pending
 
-GENERATOR_VERSION = "source-ontology-v10-keyword-agent"
+GENERATOR_VERSION = "source-ontology-v18-explicit-groups"
 PROFILE_VERSION = "indexed-directional-v3-context"
 TERMINAL = {"completed", "completed_with_pending", "failed", "cancelled"}
 GENERIC_NAMES = {"id", "code", "name", "type", "status", "date"}
@@ -191,6 +191,76 @@ def _candidate(
         "status": status,
         "domain": domain,
     }
+
+
+def model_candidate(value, cards, table_maps, domain=None):
+    """Convert one model proposal; callers isolate ValueError per proposal."""
+    from .query_relationships import validated_guards
+    from .relationship_normalization import join_signature
+    if not isinstance(value,dict):
+        raise ValueError('模型关系格式无效')
+    a,b=cards.get(value.get('source_table_id')),cards.get(value.get('target_table_id'))
+    if not a or not b:
+        raise ValueError('模型引用不存在的表')
+    if len(table_maps)>1 and a['datasource_id']==b['datasource_id']:
+        return None
+    pairs=value.get('key_pairs')
+    if not isinstance(pairs,list) or not pairs:
+        raise ValueError('模型未提供字段映射')
+    pairs=sorted(pairs,key=lambda p:(str(p.get('source','')),str(p.get('target','')))) if all(isinstance(p,dict) for p in pairs) else pairs
+    left={c['name'] for c in a['columns']}; right={c['name'] for c in b['columns']}
+    if not all(isinstance(k,dict) and k.get('source') in left and k.get('target') in right for k in pairs):
+        raise ValueError('模型引用不存在的字段')
+    if len({k['source'] for k in pairs})!=len(pairs) or len({k['target'] for k in pairs})!=len(pairs):
+        raise ValueError('复合映射字段重复')
+    source=table_maps[a['datasource_id']][a['physical_table']]
+    target=table_maps[b['datasource_id']][b['physical_table']]
+    proposed={'source_datasource_id':a['datasource_id'],'target_datasource_id':b['datasource_id'],
+              'source_table_id':source['id'],'target_table_id':target['id']}
+    guards=validated_guards(proposed,value.get('guards',[]),table_maps)
+    if guards is None:
+        raise ValueError('模型提出无依据的附加条件')
+    key_pairs=[{'source':k['source'],'target':k['target']} for k in pairs]
+    sid=a['datasource_id']; scope='cross_source' if sid!=b['datasource_id'] else 'single_source'
+    candidate=_candidate(sid,b['datasource_id'],source,[k['source'] for k in key_pairs],
+        target,[k['target'] for k in key_pairs],scope,
+        [{'kind':'model_discovery','reason':str(value.get('reason','')),'query_role':str(value.get('role',''))},
+         {'kind':'target_unique_index','confirmed':_indexed(target,[k['target'] for k in key_pairs],unique=True)}],.8,domain=domain)
+    if value.get('family_lead_from'):
+        candidate['evidence'].append({'kind':'structural_family_lead','source_table_id':value['family_lead_from']})
+    if value.get('profile_statistics') is not None:
+        candidate['evidence'].append({'kind':'value_profile','statistics':value['profile_statistics']})
+    if value.get('direction_normalized'):
+        candidate['evidence'].append({'kind':'proposal_direction_normalized','basis':'complete_unique_key'})
+    candidate['condition_template']['guards']=guards
+    candidate['query_role']=str(value.get('role',''))
+    candidate['key_pairs']=key_pairs
+    candidate['id']=join_signature(candidate)[:24]
+    return candidate
+
+
+def convert_model_candidates(proposed,cards,table_maps,domain=None):
+    valid=[]; discarded=[]
+    codes={
+        '模型引用不存在的表':'unknown_relation_table',
+        '模型未提供字段映射':'missing_relation_key_pairs',
+        '模型引用不存在的字段':'unknown_relation_field',
+        '复合映射字段重复':'duplicate_relation_field',
+        '模型提出无依据的附加条件':'unsupported_relation_guard',
+        '模型关系格式无效':'invalid_relation_proposal',
+    }
+    for value in proposed:
+        try:
+            candidate=model_candidate(value,cards,table_maps,domain)
+            if candidate is not None:
+                valid.append(candidate)
+        except ValueError as exc:
+            discarded.append({'stage':'candidate_conversion','code':codes.get(str(exc),'invalid_model_candidate'),
+                'error_message':str(exc),
+                'source_table_id':value.get('source_table_id') if isinstance(value,dict) else None,
+                'target_table_id':value.get('target_table_id') if isinstance(value,dict) else None,
+                'proposal':value})
+    return valid,discarded
 
 
 def discover_candidates(
@@ -665,11 +735,42 @@ class ModelingRepository:
     def retire_generated(self, source_id, retained_ids):
         return None  # Publication replaces the complete active package.
 
-    def replace_candidates(self, candidates, source_hash, target_hash):
-        # Temporary workspace only. Final single-source records live in the package.
+    def replace_candidates(self, candidates, source_hash, target_hash, prune_source_id=None):
+        # The package contains only active relations; this table retains the human review queue.
+        if prune_source_id:
+            retained = {item["id"] for item in candidates}
+            self.memory_candidates = {
+                key: value for key, value in self.memory_candidates.items()
+                if not (value.get("source_datasource_id") == prune_source_id
+                        and value.get("scope") == "single_source" and not value.get("reviewed_by")
+                        and value.get("status") != "disabled" and key not in retained)
+            }
+            if self.dsn:
+                with self._connect() as connection:
+                    connection.execute(
+                        """DELETE FROM semora_meta.relationship_candidates
+                        WHERE source_datasource_id=%s AND scope='single_source' AND COALESCE(reviewed_by,'')=''
+                        AND status<>'disabled' AND id<>ALL(%s::text[])""",
+                        (prune_source_id, list(retained)))
+        columns = ("id", "scope", "source_datasource_id", "target_datasource_id", "source_table_id",
+                   "target_table_id", "source_columns", "target_columns", "key_pairs", "condition_template",
+                   "evidence", "evidence_grade", "confidence", "cardinality", "status", "source_schema_hash",
+                   "target_schema_hash", "profile_version", "domain", "reviewed_by", "review_note")
+        json_fields = {"source_columns", "target_columns", "key_pairs", "condition_template", "evidence"}
         for item in candidates:
-            self.memory_candidates[item["id"]] = {**item, "source_schema_hash": source_hash,
-                "target_schema_hash": target_hash, "profile_version": PROFILE_VERSION}
+            value = {**item, "confidence": item.get("confidence") if item.get("confidence") is not None else 0.0,
+                     "source_schema_hash": source_hash, "target_schema_hash": target_hash,
+                     "profile_version": PROFILE_VERSION}
+            self.memory_candidates[item["id"]] = value
+            if not self.dsn:
+                continue
+            row = tuple(_json(value.get(column)) if column in json_fields else value.get(column) for column in columns)
+            assignments = ",".join(f"{column}=excluded.{column}" for column in columns[1:])
+            with self._connect() as connection:
+                connection.execute(
+                    f"""INSERT INTO semora_meta.relationship_candidates ({','.join(columns)})
+                    VALUES({','.join(['%s'] * len(columns))}) ON CONFLICT(id) DO UPDATE SET {assignments},updated_at=now()""",
+                    row)
 
     def mark_candidates_stale(self, datasource_id, schema_hash):
         return None  # Never mutate active results during research.
@@ -681,6 +782,16 @@ class ModelingRepository:
             values.update((c["id"], c) for c in package["payload"].get("relationshipRecords", []))
         except KeyError:
             pass
+        if self.dsn:
+            columns = ("id", "scope", "source_datasource_id", "target_datasource_id", "source_table_id",
+                       "target_table_id", "source_columns", "target_columns", "key_pairs", "condition_template",
+                       "evidence", "evidence_grade", "confidence", "cardinality", "status", "source_schema_hash",
+                       "target_schema_hash", "profile_version", "domain", "reviewed_by", "review_note")
+            with self._connect() as connection:
+                rows = connection.execute(
+                    f"SELECT {','.join(columns)} FROM semora_meta.relationship_candidates WHERE source_datasource_id=%s",
+                    (source_id,)).fetchall()
+            values.update((row[0], dict(zip(columns, row, strict=True))) for row in rows)
         values.update((k, v) for k, v in self.memory_candidates.items() if v["source_datasource_id"] == source_id)
         return [v for v in values.values() if v["source_datasource_id"] == source_id
                 and (not scope or v["scope"] == scope) and (domain is None or v.get("domain") == domain)]
@@ -1161,44 +1272,24 @@ class ModelingService:
         else:
             proposed = []
         if job:
-            job.setdefault("details", {}).update(discovery_covered_tables=len(cards), unresolved_leads=len(state.get("unresolved", [])))
+            details={"discovery_covered_tables":len(cards), "unresolved_leads":len(state.get("unresolved", [])),
+                     "discarded_relations":sum(len(scope.get('discarded_relations',[])) for scope in state.get('keyword_pipeline',{}).values() if isinstance(scope,dict)),
+                     "discarded_groups":sum(len(scope.get('discarded_groups',[])) for scope in state.get('keyword_pipeline',{}).values() if isinstance(scope,dict)),
+                     "discarded_candidates":len(state.get('discarded_candidates',[]))}
+            job.setdefault("details", {}).update(details)
         by_id = {c["id"]: c for c in candidates}
-        for value in proposed:
-            a, b = cards.get(value.get("source_table_id")), cards.get(value.get("target_table_id"))
-            if not a or not b:
-                raise ValueError("模型引用不存在的表")
-            if len(table_maps) > 1 and a["datasource_id"] == b["datasource_id"]:
-                continue
-            pairs = value.get("key_pairs")
-            if not isinstance(pairs, list) or not pairs:
-                raise ValueError("模型未提供字段映射")
-            pairs = sorted(pairs, key=lambda p: (str(p.get("source", "")), str(p.get("target", "")))) if all(isinstance(p, dict) for p in pairs) else pairs
-            left = {c["name"] for c in a["columns"]}
-            right = {c["name"] for c in b["columns"]}
-            if not all(isinstance(k, dict) and k.get("source") in left and k.get("target") in right for k in pairs):
-                raise ValueError("模型引用不存在的字段")
-            if len({k["source"] for k in pairs}) != len(pairs) or len({k["target"] for k in pairs}) != len(pairs):
-                raise ValueError("复合映射字段重复")
-            source = table_maps[a["datasource_id"]][a["physical_table"]]
-            target = table_maps[b["datasource_id"]][b["physical_table"]]
-            c = _candidate(a["datasource_id"], b["datasource_id"], source, [k["source"] for k in pairs],
-                           target, [k["target"] for k in pairs], "single_source" if a["datasource_id"] == b["datasource_id"] else "cross_source",
-                           [{"kind": "model_discovery", "reason": str(value.get("reason", "")), "query_role": str(value.get("role", ""))},
-                            {"kind": "target_unique_index", "confirmed": _indexed(target, [k["target"] for k in pairs], unique=True)}], .8,
-                           domain=(job or {}).get("domain"))
-            if value.get('family_lead_from'):
-                c['evidence'].append({'kind': 'structural_family_lead', 'source_table_id': value['family_lead_from']})
-            if value.get('profile_statistics') is not None:
-                c['evidence'].append({'kind':'value_profile','statistics':value['profile_statistics']})
-            if value.get('direction_normalized'):
-                c['evidence'].append({'kind': 'proposal_direction_normalized', 'basis': 'complete_unique_key'})
-            guards = validated_guards(c, value.get("guards", []), table_maps)
-            if guards is None:
-                raise ValueError("模型提出无依据的附加条件")
-            c["condition_template"]["guards"] = guards
-            c["query_role"] = str(value.get("role", ""))
-            c["id"] = join_signature(c)[:24]
-            by_id.setdefault(c["id"], c)
+        converted,discarded=convert_model_candidates(proposed,cards,table_maps,(job or {}).get('domain'))
+        for c in converted:
+            by_id.setdefault(c['id'],c)
+        for entry in discarded:
+            state.setdefault('discarded_candidates',[]).append(entry)
+            state['metrics']['discarded_candidates']=state['metrics'].get('discarded_candidates',0)+1
+            logging.getLogger('semora.model').info(json.dumps({'event':'relationship.candidate.discarded',
+                'job_id':(job or {}).get('id'),**entry},ensure_ascii=False))
+        if state.get('discarded_candidates'):
+            save()
+        if job:
+            job.setdefault('details',{})['discarded_candidates']=len(state.get('discarded_candidates',[]))
         # Complete joins, including guards, are the unit of research, not proposal wording or direction.
         canonical = {}
         for c in sorted(by_id.values(), key=lambda c: (c["evidence_grade"] not in {"foreign_key", "manual"}, c["id"])):
@@ -1273,7 +1364,7 @@ class ModelingService:
                 state["metrics"]["uniqueness_queries"] = state["metrics"].get("uniqueness_queries", 0) + 1
                 result = await self.executor_request("POST", "query", json={"sql": query.sql(dialect=dialect),
                     "datasource": {"datasource_id": item.id, "type": item.type, "secret_ref": item.secret_ref},
-                    "timeout_ms": 3000, "max_rows": 1})
+                    "timeout_ms": 10000, "max_rows": 1})
                 counts.append(int(result["rows"][0][0]) if result['rows'] else 0)
             observed_unique[cache_key] = counts[0] == 0 and counts[1] > 0
             return observed_unique[cache_key]
@@ -1300,24 +1391,36 @@ class ModelingService:
                     return False
                 dep = matches[0]
             return await proven_unique(source_id, dep, [mapped[k] for k in columns], seen)
-        for c in candidates:
+        for c in list(candidates):
             from .relationship_context import field_references
             source = table_maps[c["source_datasource_id"]][c["source_table_id"]]
             target = table_maps[c["target_datasource_id"]][c["target_table_id"]]
             source_columns = {v["name"]: v for v in source["columns"]}
             if any(k["source"] not in source_columns for k in c["key_pairs"]):
-                raise ValueError("旧关联引用已删除字段")
+                c['status']='rejected'
+                c['evidence'].append({'kind':'schema_reference_invalid','code':'unknown_relation_field',
+                                      'reason':'旧关联引用已删除字段'})
+                state.setdefault('discarded_candidates',[]).append({'stage':'evidence_preparation',
+                    'code':'unknown_relation_field','candidate_id':c['id'],'error_message':'旧关联引用已删除字段'})
+                candidates.remove(c)
+                continue
             if all((str(target.get("name", "")).lower(), k["target"].lower()) in set(field_references(
                 source_columns[k["source"]].get("description") or source_columns[k["source"]].get("comment") or "")) for k in c["key_pairs"]):
                 c["evidence"].append({"kind": "explicit_field_reference"})
             c["evidence"].append({"kind": "raw_schema_context",
                 "source_description": " ".join(str(source_columns[k["source"]].get("description") or source_columns[k["source"]].get("comment") or source.get("description") or "") for k in c["key_pairs"]),
                 "target_description": " ".join(str(v.get("description") or v.get("comment") or target.get("description") or "") for v in target["columns"] if v["name"] in c["target_columns"])})
-            if await proven_unique(c["target_datasource_id"], c["target_table_id"], c["target_columns"]):
-                c["evidence"].append({"kind": "target_unique_index", "confirmed": True})
-            elif str(target.get('kind', '')).upper() == 'VIEW' and await verify_target_key(c):
-                c["evidence"].append({"kind": "verified_target_uniqueness", "confirmed": True,
-                    "method": "bounded_full_key_check", "scope": "current_data"})
+            try:
+                if await proven_unique(c["target_datasource_id"], c["target_table_id"], c["target_columns"]):
+                    c["evidence"].append({"kind": "target_unique_index", "confirmed": True})
+                elif str(target.get('kind', '')).upper() == 'VIEW' and await verify_target_key(c):
+                    c["evidence"].append({"kind": "verified_target_uniqueness", "confirmed": True,
+                        "method": "bounded_full_key_check", "scope": "current_data"})
+            except Exception as exc:
+                if isinstance(exc,ValueError) and str(exc).startswith('Unknown source dialect'):
+                    raise
+                c['evidence'].append({'kind':'tool_unavailable','tool':'target_key',
+                                      'reason':type(exc).__name__,'error_message':str(exc)[:500]})
             snapshots = sorted([(c['source_datasource_id'], c['source_table_id'], source),
                                 (c['target_datasource_id'], c['target_table_id'], target)], key=lambda v: (v[0], v[1]))
             fingerprint = digest([join_signature(c), snapshots,
@@ -1330,6 +1433,8 @@ class ModelingService:
             c['evidence'].append({'kind': 'target_key_context', 'primary_key': any(
                 set(k.get('columns', [])) == set(c['target_columns']) for k in target.get('primary_keys', []))})
             c["research_key"] = fingerprint
+        if job:
+            job.setdefault('details',{})['discarded_candidates']=len(state.get('discarded_candidates',[]))
         async def persist(entries):
             for c in entries:
                 decisions = [next((e for e in reversed(c["evidence"]) if e.get("kind") == kind), {}) for kind in ("model_semantic_review", "independent_review")]
@@ -1352,12 +1457,22 @@ class ModelingService:
                     if valid and guards[0] and all(d.get("query_outcome") == "usable" for d in decisions):
                         profile = next((e.get("statistics", {}) for e in reversed(c["evidence"]) if e.get("kind") == "value_profile"), {})
                         if profile.get("guards_applied") != guards[0]:
-                            c["evidence"].append(await fetch(c, "profile"))
+                            try:
+                                c["evidence"].append(await fetch(c, "profile"))
+                            except Exception as exc:
+                                c['evidence'].append({'kind':'tool_unavailable','tool':'profile',
+                                    'reason':type(exc).__name__,'error_message':str(exc)[:500]})
                 target_unique = any(e.get("kind") in {"target_unique_index", "verified_target_uniqueness"} and e.get("confirmed") for e in c["evidence"])
                 if all(decisions) and all(d.get("query_outcome") == "usable" for d in decisions) and not target_unique:
-                    if await verify_target_key(c):
-                        c["evidence"].append({"kind": "verified_target_uniqueness", "confirmed": True,
-                            "method": "bounded_full_key_check", "scope": "current_data"})
+                    try:
+                        if await verify_target_key(c):
+                            c["evidence"].append({"kind": "verified_target_uniqueness", "confirmed": True,
+                                "method": "bounded_full_key_check", "scope": "current_data"})
+                    except Exception as exc:
+                        if isinstance(exc,ValueError) and str(exc).startswith('Unknown source dialect'):
+                            raise
+                        c['evidence'].append({'kind':'tool_unavailable','tool':'target_key',
+                            'reason':type(exc).__name__,'error_message':str(exc)[:500]})
                 source = table_maps[c["source_datasource_id"]][c["source_table_id"]]
                 su = _indexed(source, c["source_columns"], unique=True)
                 tu = any(e.get("kind") in {"target_unique_index", "verified_target_uniqueness"} and e.get("confirmed") for e in c["evidence"])
@@ -1381,7 +1496,7 @@ class ModelingService:
             save()
         async def progress(done, total):
             if job and not job.get("ephemeral"):
-                self._update(job, "profiling", "researching", 68 + int(18 * done / max(1, total)), details={**job.get("details", {}), "researched": done, "research_total": total, "model_calls": state["metrics"]["calls"] + state["metrics"].get("research_calls", 0)})
+                self._update(job, "profiling", "researching", 68 + int(30 * done / max(1, total)), details={**job.get("details", {}), "researched": done, "research_total": total, "model_calls": state["metrics"]["calls"] + state["metrics"].get("research_calls", 0)})
         class ResearchModel:
             async def complete_json(_, system, user):
                 if state["metrics"]["calls"] + state["metrics"].get("research_calls", 0) >= int(os.getenv("RELATIONSHIP_MAX_MODEL_CALLS", "2000")):
@@ -1396,7 +1511,7 @@ class ModelingService:
             state['metrics']['post_sampling_rechecks'] = len(evidence_rechecks)
             async def evidence_progress(done, total):
                 if job and not job.get('ephemeral'):
-                    self._update(job, 'profiling', 'auditing_evidence', 85, details={**job.get('details', {}),
+                    self._update(job, 'profiling', 'auditing_evidence', 98, details={**job.get('details', {}),
                         'evidence_researched': done, 'evidence_total': total})
             await research(evidence_rechecks, packet_for, fetch, ResearchModel(), persist, evidence_progress)
         # Empty or wholly unmatched sources cannot establish an identifier domain by values.
@@ -1425,18 +1540,27 @@ class ModelingService:
             state['metrics']['domain_audits'] = len(domain_review)
             async def domain_progress(done, total):
                 if job and not job.get('ephemeral'):
-                    self._update(job, 'profiling', 'auditing_domains', 86, details={**job.get('details', {}),
+                    self._update(job, 'profiling', 'auditing_domains', 98, details={**job.get('details', {}),
                         'domain_researched': done, 'domain_total': total})
             await research(domain_review, packet_for, fetch, ResearchModel(), persist, domain_progress)
             for c in domain_review:
                 c['evidence'].append({'kind': 'target_domain_audit_complete', 'version': 'target-domain-v1'})
             await persist(domain_review)
+        research_pending = []
         for c in candidates:
-            if any(e.get("kind") in {"research_gap", "tool_unavailable", "profile_unavailable"} for e in c["evidence"]):
-                raise ValueError("关联研究技术未完成，已保留检查点")
+            if technically_pending(c):
+                c['research_pending'] = True
+                issues = [e for e in c['evidence'] if e.get('kind') in {'research_gap', 'tool_unavailable', 'profile_unavailable'}]
+                research_pending.append({'candidate_id': c['id'], 'source_table': c['source_table_id'],
+                    'target_table': c['target_table_id'], 'issues': issues})
+                logging.getLogger('semora.model').info(_json({'event': 'relationship.research_pending', 'job_id': job_id,
+                    'candidate_id': c['id'], 'issues': issues}))
+                continue
+            c['research_pending'] = False
             if c["status"] != "accepted":
                 logging.getLogger("semora.model").info(_json({"event": "relationship.not_generated", "job_id": job_id, "candidate_id": c["id"],
                     "reasons": next((e.get("reasons", []) for e in reversed(c["evidence"]) if e.get("kind") == "confirmation"), [])}))
+        state['research_pending'] = research_pending
         from .query_relationships import deduplicate_query_edges
         deduplicate_query_edges(candidates)
         state["metrics"]["independent_reviews"] = sum(any(e.get("kind") == "independent_review" for e in c["evidence"]) for c in candidates)
@@ -1448,7 +1572,8 @@ class ModelingService:
         if job:
             job.setdefault('details', {}).update(model_calls=state['metrics']['calls'] + state['metrics'].get('research_calls', 0),
                 researched=sum(c['evidence_grade'] not in {'foreign_key', 'manual'} for c in candidates),
-                research_total=sum(c['evidence_grade'] not in {'foreign_key', 'manual'} for c in candidates))
+                research_total=sum(c['evidence_grade'] not in {'foreign_key', 'manual'} for c in candidates),
+                research_pending=len(research_pending))
 
     async def _run_onboarding(self, job, force=False):
         identifier = job["datasource_id"]
@@ -1514,6 +1639,9 @@ class ModelingService:
                 )
                 candidates = declared_candidates(identifier, tables, item.scan_result.get("foreign_keys") or [])
                 saved = self.repository.list_candidates(identifier, "single_source")
+                from .relationship_normalization import join_signature
+                disabled_ids = {prior["id"] for prior in saved if prior.get("status") == "disabled"}
+                disabled_signatures = {join_signature(prior) for prior in saved if prior.get("status") == "disabled"}
                 # Every previously active mapping receives a targeted review, even if not rediscovered.
                 for prior in saved:
                     if prior.get("status") != "accepted":
@@ -1535,12 +1663,15 @@ class ModelingService:
                 self._update(job, "profiling", "profiling", 68)
                 table_map = {table["id"]: table for table in tables}
                 await self._semantic_review(candidates, {identifier: table_map}, job, persisted_only)
+                # Human-disabled joins never re-enter the active or pending result sets, even with a new ID.
+                candidates[:] = [c for c in candidates if c["id"] not in disabled_ids and join_signature(c) not in disabled_signatures]
                 finalize_relationships(candidates)
                 from .query_relationships import deduplicate_query_edges
                 deduplicate_query_edges(candidates)
+                self.repository.replace_candidates(candidates, schema_hash, schema_hash, prune_source_id=identifier)
                 current_candidates = [{**c, "source_schema_hash": schema_hash, "target_schema_hash": schema_hash,
                     "profile_version": PROFILE_VERSION} for c in candidates if c["status"] == "accepted"]
-                self._update(job, "building", "building", 88)
+                self._update(job, "building", "building", 99)
                 objects, mapping = package_objects(identifier, tables)
                 relations = package_relations(current_candidates, mapping)
                 payload = {
@@ -1556,14 +1687,13 @@ class ModelingService:
                 package_status = "ready"
                 staged = {"payload": payload, "schema_hash": schema_hash, "generator_version": GENERATOR_VERSION,
                           "object_count": len(objects), "relation_count": len(relations)}
-                self._update(job, "building", "publishing", 90)
+                self._update(job, "building", "publishing", 99)
                 package = await self._commit_source_package(identifier,schema_hash,payload,tables)
-                self.repository.memory_candidates = {k: v for k, v in self.repository.memory_candidates.items()
-                    if v["source_datasource_id"] != identifier}
+                pending_count = sum(c.get('research_pending') is True for c in candidates)
                 self._update(
                     job,
-                    "completed",
-                    "complete",
+                    "completed_with_pending" if pending_count else "completed",
+                    "complete_with_pending" if pending_count else "complete",
                     100,
                     details={
                         **job.get("details", {}),
@@ -1572,6 +1702,7 @@ class ModelingService:
                         "relations": package["relation_count"],
                         "not_generated": sum(c["status"] != "accepted" for c in candidates),
                         "analyzed_relations": len(candidates),
+                        "research_pending": pending_count,
                     },
                     completed_at=_now(),
                 )
@@ -1708,7 +1839,11 @@ class ModelingService:
                 from .relation_output import published_relationship
                 generated[0]["metadata"]["relationshipRecord"] = published_relationship(candidate)
             if not generated:
-                raise ValueError("跨源关系无法映射完整条件")
+                candidate['status']='unresolved'
+                candidate['research_pending']=True
+                candidate.setdefault('evidence',[]).append({'kind':'research_gap',
+                    'reason':'cross_source_mapping_incomplete','error_message':'跨源关系无法映射完整条件'})
+                continue
             relations[generated[0]["name"]] = generated[0]
         configuration["relations"] = list(relations.values())
         await self.ontology.save_configuration(domain, configuration)
@@ -1733,15 +1868,17 @@ class ModelingService:
             deduplicate_query_edges(candidates)
             if self.ontology:
                 await self._apply_cross_relations(job["domain"], candidates, (left.id, right.id))
+            pending_count = sum(c.get('research_pending') is True for c in candidates)
             self._update(
                 job,
-                "completed",
-                "complete",
+                "completed_with_pending" if pending_count else "completed",
+                "complete_with_pending" if pending_count else "complete",
                 100,
                 details={
                     "candidates": len(candidates),
                     "accepted": sum(item["status"] == "accepted" for item in candidates),
                     "not_generated": sum(c["status"] != "accepted" for c in candidates),
+                    "research_pending": pending_count,
                 },
                 completed_at=_now(),
             )

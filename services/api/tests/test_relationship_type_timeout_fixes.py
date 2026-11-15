@@ -50,7 +50,7 @@ def test_model_proposals_are_not_filtered_by_type_family(monkeypatch,tmp_path,id
         if p.get('phase')=='keywords':
             return {'keywords':['实体']}
         if p.get('phase')=='organization':
-            return {'groups':[{'input_group_ids':[g['group_id']], 'table_ids':g['table_ids'],
+            return {'groups':[{'table_ids':g['table_ids'],
                                'reason':'实体编号线索一致，保留待分析'} for g in p['groups']], 'excluded':[]}
         if p.get('phase')=='complete_references':
             return {'relations':[],'leads':[{**l,'keywords':[]} for l in p['focus_leads']],'complete':True}

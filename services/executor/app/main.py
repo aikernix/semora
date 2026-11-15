@@ -583,7 +583,7 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
         sql = tree.sql(dialect=dialect)
         for name in sorted(parameters, key=len, reverse=True):sql=sql.replace(f":{name}",f"%({name})s")
         result=execute_query(QueryInput(sql=sql,parameters=parameters,datasource=datasource,
-            timeout_ms=3000,max_rows=min(body.sample_rows + 1, 1000),max_bytes=1024*1024),x_semora_internal_token)
+            timeout_ms=10000,max_rows=min(body.sample_rows + 1, 1000),max_bytes=1024*1024),x_semora_internal_token)
         return [tuple(json.dumps(v,sort_keys=True,default=str) for v in row)
                 for row in result["rows"] if all(v is not None for v in row)]
 
@@ -623,7 +623,7 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
         sql=tree.sql(dialect=dialect)
         for name in sorted(parameters, key=len, reverse=True):sql=sql.replace(f":{name}",f"%({name})s")
         result=execute_query(QueryInput(sql=sql,parameters=parameters,datasource=target,
-            timeout_ms=3000,max_rows=max(1,len(batch)),max_bytes=1024*1024),x_semora_internal_token)
+            timeout_ms=10000,max_rows=max(1,len(batch)),max_bytes=1024*1024),x_semora_internal_token)
         matched.update(tuple(json.dumps(v,sort_keys=True,default=str) for v in row) for row in result["rows"])
         if result['rows']:
             for field, values in body.target_context_enums.items():
@@ -638,7 +638,7 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
                 for name in sorted(parameters, key=len, reverse=True):sql=sql.replace(f':{name}',f'%({name})s')
                 try:
                     details = execute_query(QueryInput(sql=sql, parameters=parameters, datasource=target,
-                        timeout_ms=3000, max_rows=len(values)+1, max_bytes=65536), x_semora_internal_token)
+                        timeout_ms=10000, max_rows=len(values)+1, max_bytes=65536), x_semora_internal_token)
                     counts = context_counts.setdefault(field, {})
                     for code, count in details['rows']:
                         label = str(code)
@@ -679,6 +679,6 @@ def relation_definitions(body: RelationDefinitionInput, x_semora_internal_token:
     else:
         return {"status": "unavailable", "reason": "driver_definition_reader_unavailable"}
     result = execute_query(QueryInput(datasource=body, sql=sql, parameters=parameters,
-                           timeout_ms=3000, max_rows=1, max_bytes=48000), x_semora_internal_token)
+                           timeout_ms=10000, max_rows=1, max_bytes=48000), x_semora_internal_token)
     return {"status": "available" if result["rows"] else "unavailable",
             "definition": result["rows"][0][0] if result["rows"] else None}

@@ -112,6 +112,22 @@ def test_input_includes_nonunique_indexes_without_storage_names():
     assert [f['name'] for f in card['columns']]==['entity_ref']
 
 
+def test_comparison_card_merges_unique_indexes_and_filters_foreign_keys():
+    from app.relationship_keywords import comparison_card
+    card={'table_id':'a','name':'s.events','columns':[], 'primary_keys':[{'name':'pk','columns':['id']}],
+        'unique_constraints':[{'name':'uq','columns':['code']}],
+        'indexes':[{'columns':['code'],'unique':True}, {'columns':['other'],'unique':True},
+                   {'columns':['ref'],'unique':False}, {'columns':['scoped'],'unique':True,'predicate':'active'}],
+        'foreign_keys':[{'columns':['auto'],'target_table':'s.b','target_columns':['id'],'automatic_relation_available':True},
+                        {'columns':['pending'],'target_table':'s.b','target_columns':['id'],'automatic_relation_available':False},
+                        {'columns':['other'],'target_table':'s.c','target_columns':['id'],'automatic_relation_available':False}]}
+    result=comparison_card(card,['s.b'])
+    assert 'indexes' not in result
+    assert result['primary_keys']==[{'columns':['id']}]
+    assert result['unique_constraints']==[{'columns':['code']},{'columns':['other']}]
+    assert result['foreign_keys']==[{'columns':['pending'],'target_table':'s.b','target_columns':['id']}]
+
+
 def test_only_resolvable_complete_foreign_key_mapping_is_marked_automatic():
     target={'id':'s.registry','name':'registry','columns':[{'name':'part_a','type':'bigint'},
         {'name':'part_b','type':'bigint'}]}
@@ -180,7 +196,7 @@ def test_small_groups_keep_comparison_and_large_groups_use_agent(monkeypatch):
         async def complete_json(self,system,user):
             p=json.loads(user); self.phases.append(p['phase'])
             if p['phase']=='keywords': return {'keywords':['entity_ref']}
-            if p['phase']=='organization': return {'groups':[{'input_group_ids':[g['group_id']], 'table_ids':g['table_ids'], 'reason':'编号体系一致，保留待分析'} for g in p['groups']], 'excluded':[]}
+            if p['phase']=='organization': return {'groups':[{'table_ids':g['table_ids'], 'reason':'编号体系一致，保留待分析'} for g in p['groups']], 'excluded':[]}
             if p['phase']=='compare': return {'relations':[]}
             if p['phase']=='large_group_agent':
                 return {'tool':'finish','arguments':{'checked_table_ids':[c['table_id'] for c in p['catalog']['items']], 'gaps':[]}}
@@ -189,7 +205,41 @@ def test_small_groups_keep_comparison_and_large_groups_use_agent(monkeypatch):
     for count,phase in [(3,'compare'),(4,'large_group_agent')]:
         m=Model(); asyncio.run(KeywordDiscovery(cards(count),m,{},lambda:None).run())
         assert phase in m.phases
+        assert 'organization' not in m.phases
         assert ('compare' in m.phases) != ('large_group_agent' in m.phases)
+
+
+def test_small_groups_skip_organization_and_large_groups_organize_one_request():
+    class Model:
+        def __init__(self):self.phases=[]
+        async def complete_json(self,system,user):
+            p=json.loads(user);self.phases.append(p['phase'])
+            if p['phase']=='keywords':return {'keywords':['entity_ref']}
+            if p['phase']=='organization':
+                assert len(p['groups'])==1
+                return {'groups':[{'table_ids':g['table_ids'],
+                                   'reason':'整组保留分析'} for g in p['groups']]}
+            if p['phase']=='compare':return {'relations':[]}
+            raise AssertionError(p['phase'])
+    small=Model();asyncio.run(KeywordDiscovery(cards(2),small,{},lambda:None).run())
+    assert small.phases==['keywords','compare']
+    large=Model();asyncio.run(KeywordDiscovery(cards(21),large,{},lambda:None).run())
+    assert large.phases[0]=='keywords'
+    assert 'organization' in large.phases and 'compare' in large.phases
+    assert large.phases.index('organization')<large.phases.index('compare')
+
+
+def test_compact_compare_does_not_expand_keywords_or_gaps():
+    class Model:
+        async def complete_json(self,system,user):
+            p=json.loads(user)
+            if p['phase']=='keywords':return {'keywords':['entity_ref']}
+            if p['phase']=='compare':return {'relations':[],'keywords':['record'],'gaps':['obsolete']}
+            raise AssertionError(p['phase'])
+    engine=KeywordDiscovery(cards(2),Model(),{},lambda:None)
+    asyncio.run(engine.run())
+    assert engine.work.keywords()==['entity_ref']
+    assert 'gaps' not in engine.scope
 
 
 def test_agent_cannot_finish_unseen_pages_and_stops_repeating():
@@ -275,7 +325,7 @@ def test_small_agent_roundtrip_preserves_full_mapping_guards_and_statistics(monk
         async def complete_json(self,system,user):
             p=json.loads(user); self.calls.append(p['phase'])
             if p['phase']=='keywords': return {'keywords':['entity_ref']}
-            if p['phase']=='organization': return {'groups':[{'input_group_ids':[g['group_id']], 'table_ids':g['table_ids'], 'reason':'编号体系一致，保留待分析'} for g in p['groups']], 'excluded':[]}
+            if p['phase']=='organization': return {'groups':[{'table_ids':g['table_ids'], 'reason':'编号体系一致，保留待分析'} for g in p['groups']], 'excluded':[]}
             actions=[{'tool':'read_tables','arguments':{'table_ids':ids}},
                      {'tool':'profile','arguments':{'relation':relation}},
                      {'tool':'submit','arguments':{'relations':[relation]}},
@@ -291,7 +341,7 @@ def test_small_agent_roundtrip_preserves_full_mapping_guards_and_statistics(monk
     assert len(result)==1
     assert result[0]['key_pairs']==relation['key_pairs'] and result[0]['guards']==relation['guards']
     assert result[0]['profile_statistics']['matched_keys']==2
-    assert model.calls==['keywords','organization']+['large_group_agent']*4
+    assert model.calls==['keywords']+['large_group_agent']*4
     assert engine.scope['discovery_complete']
 
 
@@ -349,3 +399,46 @@ def test_keyword_must_match_its_actual_batch_input_after_whitespace_normalizatio
     with pytest.raises(DiscoveryIncomplete,match='keyword_without_source_match'):
         asyncio.run(engine.extract_keywords())
     assert model.calls==3 and not engine.work.keywords()
+
+
+def test_invalid_relation_is_retried_then_discarded_without_losing_valid_relations():
+    from app.relationship_contracts import ProposalOutput
+    from app.relationship_keywords import COMPARE_SYSTEM
+    source=cards(4);ids=list(source)
+    valid={'source_table_id':ids[0],'target_table_id':ids[1],
+           'key_pairs':[{'source':'entity_ref','target':'id'}],'reason':'合法引用'}
+    invalid={'source_table_id':ids[2],'target_table_id':ids[3],
+             'key_pairs':[{'source':'entity_ref','target':'missing_field'}],'reason':'非法字段'}
+    class Model:
+        calls=0
+        async def complete_json(self,system,user):
+            self.calls+=1
+            return {'relations':[valid,invalid]}
+    model=Model();state={};engine=KeywordDiscovery(source,model,state,lambda:None)
+    result=asyncio.run(engine.request('compare',COMPARE_SYSTEM,{
+        'phase':'compare','tables':list(source.values()),
+        'comparison_pairs':[[ids[0],ids[1]],[ids[2],ids[3]]]},ProposalOutput))
+    assert result['relations']==[{**valid,'guards':[]}]
+    assert model.calls==3
+    assert engine.metrics['discarded_relations']==1
+    discarded=engine.scope['discarded_relations'][0]
+    assert discarded['code']=='unknown_relation_field'
+    assert discarded['details']['source_table_id']==ids[2]
+    assert discarded['details']['fields']==[{'side':'target','field':'missing_field'}]
+
+
+def test_malformed_relation_contract_does_not_invalidate_other_items_after_retries():
+    from app.relationship_contracts import ProposalOutput
+    from app.relationship_keywords import COMPARE_SYSTEM
+    source=cards(2);ids=list(source)
+    valid={'source_table_id':ids[0],'target_table_id':ids[1],
+           'key_pairs':[{'source':'entity_ref','target':'id'}],'reason':'合法引用'}
+    class Model:
+        async def complete_json(self,system,user):
+            return {'relations':[valid,{'source_table_id':ids[0]}]}
+    engine=KeywordDiscovery(source,Model(),{},lambda:None)
+    result=asyncio.run(engine.request('compare',COMPARE_SYSTEM,{
+        'phase':'compare','tables':list(source.values()),
+        'comparison_pairs':[[ids[0],ids[1]]]},ProposalOutput))
+    assert result['relations']==[{**valid,'guards':[]}]
+    assert engine.scope['discarded_relations'][0]['validation']

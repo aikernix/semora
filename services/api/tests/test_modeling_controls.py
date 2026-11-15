@@ -117,8 +117,9 @@ def test_organization_stage_is_explicit_readable_and_never_publishes(monkeypatch
         p=json.loads(user);calls.append(p['phase'])
         if p['phase']=='keywords':return {'keywords':['object_ref']}
         assert p['phase']=='organization'
-        return {'groups':[{'input_group_ids':[g['group_id']],'table_ids':g['table_ids'],
+        return {'groups':[{'table_ids':g['table_ids'],
                            'reason':'未发现编号体系冲突，保留待分析'} for g in p['groups']], 'excluded':[]}
+    monkeypatch.setattr('app.relationship_organization.ORGANIZATION_GROUP_LIMIT',1)
     monkeypatch.setattr(structured_model,'complete_json',model)
     monkeypatch.setenv('RELATIONSHIP_CHECKPOINT_DIR',str(tmp_path))
     async def run():

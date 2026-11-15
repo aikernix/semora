@@ -104,12 +104,27 @@ def recall_field_pairs(sources, targets):
                 yield source, column, target, field, index in explicit
 
 
+TECHNICAL_PENDING = {'research_gap', 'tool_unavailable', 'profile_unavailable'}
+
+
+def technically_pending(candidate):
+    return any(e.get('kind') in TECHNICAL_PENDING for e in candidate.get('evidence', []))
+
+
 def finalize_relationships(candidates, *, cross_source=False):
     """Confirmation runs after both database and semantic evidence are present."""
     for candidate in candidates:
         if candidate["evidence_grade"] in {"foreign_key", "manual"} or candidate.get("reviewed_by"):
             continue
         evidence = candidate["evidence"]
+        # A temporary tool/model failure is not evidence against a relationship.
+        # Keep a previously accepted relation, but never promote a new pending candidate.
+        if technically_pending(candidate):
+            candidate['research_pending'] = True
+            if candidate.get('status') != 'accepted':
+                candidate['status'] = 'unresolved'
+            continue
+        candidate['research_pending'] = False
         profile = next((e.get("statistics", {}) for e in reversed(evidence)
                         if e.get("kind") == "value_profile"), {})
         review = next((e for e in reversed(evidence)

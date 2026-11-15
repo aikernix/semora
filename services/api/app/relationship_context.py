@@ -213,8 +213,15 @@ def relation_payload(packets, required_ids=(), **extra):
         if "other_targets" in packet:
             candidate["other_targets"] = [{**item, "target": ref(item["target"])} for item in packet["other_targets"]]
         candidates.append(candidate)
-    return {"tables": tables, "candidates": candidates, "other_proposals": proposal_catalog,
-            "target_domains": target_domains, "required_decision_ids": list(required_ids), **extra}
+    # required_ids remains a compatibility argument for callers; candidate_id is the only wire ID.
+    extra.pop('targeted_recheck',None)
+    extra.pop('required_decision_ids',None)
+    result={"tables":tables,"candidates":candidates,**extra}
+    if proposal_catalog:
+        result['other_proposals']=proposal_catalog
+    if target_domains:
+        result['target_domains']=target_domains
+    return result
 
 
 def relation_batches(packets, system):

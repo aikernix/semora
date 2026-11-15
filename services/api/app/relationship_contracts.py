@@ -1,6 +1,6 @@
 """Provider-independent relation output contracts; only factual checks live elsewhere."""
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 ExclusionCode = Literal['', 'meaning_mismatch', 'replica', 'lineage_only', 'redundant_identity', 'transitive_only', 'wrong_target', 'shared_entity']
 
@@ -83,52 +83,58 @@ class KeywordOutput(Output):
 
 
 class OrganizedGroup(Output):
-    input_group_ids:list[str]=Field(min_length=1)
-    table_ids:list[str]=Field(min_length=2)
-    reason:str=Field(min_length=1)
-
-
-class ExcludedRecallHit(Output):
-    input_group_id:str
-    table_id:str
-    kind:Literal['substring_noise','unrelated_meaning']
+    table_ids:list[str]=Field(min_length=1)
     reason:str=Field(min_length=1)
 
 
 class OrganizationOutput(Output):
-    groups:list[OrganizedGroup]
-    excluded:list[ExcludedRecallHit]
+    groups:list[OrganizedGroup]=Field(description='后续需要实际分析的全部组；每组必须列出完整成员，未列出的表不进入后续分析')
 
 
 class ProposedRelation(Output):
     source_table_id:str
     target_table_id:str
     key_pairs:list[Pair]=Field(min_length=1)
-    reason:str=Field(min_length=1)
+    reason:str=Field(min_length=1,max_length=60)
     guards:list[Guard]=Field(default_factory=list)
 
 
 class ProposalOutput(Output):
     relations:list[ProposedRelation]
-    keywords:list[str]=Field(default_factory=list)
-    gaps:list[str]=Field(default_factory=list)
+
+
+class EvidenceGap(Output):
+    reason:str=Field(min_length=1,max_length=120)
+    request:Literal['definition','profile']|None=None
 
 
 class CompactDecision(Output):
     candidate_id:str
     outcome:Literal['usable','exclude','needs_evidence']
     kind:Literal['entity_reference','direct_record_reference','identity','lineage','shared_entity','unknown']
-    reason:str=Field(min_length=1)
+    reason:str=Field(min_length=1,max_length=60)
     code:ExclusionCode=''
-    gaps:list[str]=Field(default_factory=list)
-    coverage:Literal['supports_reference','incomplete_reference_data','identifier_conflict','unknown']='unknown'
+    gaps:list[EvidenceGap]=Field(default_factory=list)
     # Omitted means unchanged. [] explicitly removes existing additional conditions.
     predicates:list[Guard]|None=None
 
+    @field_validator('gaps',mode='before')
+    @classmethod
+    def restore_legacy_gaps(cls,value):
+        # Checkpoints may still contain the old list[str] wire format.
+        return [{'reason':item} if isinstance(item,str) else item for item in (value or [])]
+
+
+class DataCompactDecision(CompactDecision):
+    coverage:Literal['supports_reference','incomplete_reference_data','identifier_conflict','unknown']='unknown'
+
 
 class CompactResearchOutput(Output):
-    requests:list[EvidenceRequest]=Field(default_factory=list)
     decisions:list[CompactDecision]
+
+
+class DataResearchOutput(Output):
+    decisions:list[DataCompactDecision]
 
 
 class AgentAction(Output):

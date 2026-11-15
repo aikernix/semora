@@ -1,10 +1,11 @@
 """Schemas generated from the same contracts that validate model responses."""
 import json
-from .relationship_contracts import DiscoveryOutput, ReadOutput, CompactResearchOutput, prompt_schema
+from .relationship_contracts import DiscoveryOutput, ReadOutput, CompactResearchOutput, DataResearchOutput, prompt_schema
 
 DISCOVERY_SCHEMA=prompt_schema(DiscoveryOutput)
 READ_SCHEMA=prompt_schema(ReadOutput)
 RESEARCH_SCHEMA=prompt_schema(CompactResearchOutput)
+DATA_RESEARCH_SCHEMA=prompt_schema(DataResearchOutput)
 MARKER='\n\n【输出格式要求】\n'
 
 

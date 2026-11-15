@@ -37,7 +37,7 @@ def test_table_catalog_is_paginated_from_persisted_snapshot():
     assert repository.table_detail("source", page["items"][0]["id"])["columns"][0]["name"] == "id"
 
 
-def test_relation_edit_delete_and_retired_confirmation(monkeypatch):
+def test_relation_review_disable_enable_and_manual_edit(monkeypatch):
     tables = [
         _table("public.entity", "entity", [("id", "bigint")], ["id"]),
         _table("public.event", "event", [("id", "bigint"), ("entity_id", "bigint")], ["id"]),
@@ -85,8 +85,9 @@ def test_relation_edit_delete_and_retired_confirmation(monkeypatch):
     monkeypatch.setattr(database_routes, "modeling_service", modeling)
     client = TestClient(main.app)
 
-    assert client.get("/api/v1/datasources/source/relationships").json()["total"] == 0
-    assert client.get("/api/v1/datasources/source/relationships?status=pending").json()["total"] == 0
+    initial=client.get("/api/v1/datasources/source/relationships").json()
+    assert initial["total"] == 1 and initial["counts"] == {"accepted":0,"pending":1,"disabled":0,"all":1}
+    assert client.get("/api/v1/datasources/source/relationships?status=pending").json()["total"] == 1
     from copy import deepcopy
     class Ontology:
         def __init__(self):
@@ -109,6 +110,8 @@ def test_relation_edit_delete_and_retired_confirmation(monkeypatch):
     record.scan_result['tables'][1]['columns'][1]['raw_type']='VENDOR_IDENTIFIER'
     source_repository.save(record)
     modeling_repository.memory_packages['source']['schema_hash']=tables_digest(record.scan_result['tables'])
+    schema_hash=tables_digest(record.scan_result['tables'])
+    modeling_repository.replace_candidates([candidate],schema_hash,schema_hash)
     body={'source_table_id':'public.event','target_table_id':'public.entity','key_pairs':[{'source':'entity_id','target':'id'}],'cardinality':'N:1'}
     created=client.post('/api/v1/datasources/source/relationships',json=body)
     assert created.status_code==201,created.text
@@ -120,9 +123,45 @@ def test_relation_edit_delete_and_retired_confirmation(monkeypatch):
     edited=client.put('/api/v1/datasources/source/relationships/'+identifier,json={**body,'cardinality':'1:1'})
     assert edited.status_code==200,edited.text
     assert ontology.packages['source']['relations'][-1]['cardinality']=='1:1'
-    assert client.delete('/api/v1/datasources/source/relationships/'+identifier).json()['deleted'] is True
+    disabled=client.delete('/api/v1/datasources/source/relationships/'+identifier)
+    assert disabled.status_code==200 and disabled.json()['deleted'] is False and disabled.json()['status']=='disabled'
     assert ontology.configs['bound']['relations']==[{'name':'keep_cross','from':'x','to':'y'}]
     assert ontology.configs['unrelated']['relations']==[]
     assert modeling_repository.get_package('source')['payload']['relationshipRecords']==[]
-    assert client.get('/api/v1/datasources/source/relationships').json()['total']==0
-    assert client.post('/api/v1/datasources/source/relationships/'+identifier+'/restore').status_code==410
+    assert client.get('/api/v1/datasources/source/relationships').json()['counts']=={'accepted':0,'pending':1,'disabled':1,'all':2}
+    restored=client.post('/api/v1/datasources/source/relationships/'+identifier+'/restore')
+    assert restored.status_code==200 and restored.json()['status']=='accepted'
+    approved=client.post('/api/v1/datasources/source/relationships/candidate/decision',json={'action':'approve'})
+    assert approved.status_code==200 and approved.json()['status']=='accepted'
+    assert len(modeling_repository.get_package('source')['payload']['relationshipRecords'])==2
+    rejected=client.post('/api/v1/datasources/source/relationships/candidate/decision',json={'action':'reject'})
+    assert rejected.status_code==409
+    stopped=client.post('/api/v1/datasources/source/relationships/candidate/decision',json={'action':'disable'})
+    assert stopped.status_code==200 and stopped.json()['status']=='disabled'
+    assert len(modeling_repository.get_package('source')['payload']['relationshipRecords'])==1
+    assert client.get('/api/v1/datasources/source/relationships?status=disabled').json()['total']==1
+    enabled=client.post('/api/v1/datasources/source/relationships/candidate/decision',json={'action':'enable'})
+    assert enabled.status_code==200 and enabled.json()['status']=='accepted'
+    second={**candidate,'id':'candidate-2','status':'unresolved','research_pending':True}
+    modeling_repository.replace_candidates([second],schema_hash,schema_hash)
+    refused=client.post('/api/v1/datasources/source/relationships/candidate-2/decision',json={'action':'reject'})
+    assert refused.status_code==200 and refused.json()['status']=='disabled'
+    assert modeling_repository.memory_candidates['candidate-2']['reviewed_by']=='data-steward'
+
+
+def test_successful_candidate_replacement_prunes_only_stale_automatic_records():
+    repository=ModelingRepository(dsn='')
+    base={'scope':'single_source','source_datasource_id':'source','target_datasource_id':'source',
+          'source_table_id':'public.event','target_table_id':'public.entity','source_columns':['entity_id'],
+          'target_columns':['id'],'key_pairs':[{'source':'entity_id','target':'id'}],
+          'condition_template':{'operator':'and_equals'},'evidence':[],'evidence_grade':'medium',
+          'cardinality':'N:1','domain':None}
+    stale={**base,'id':'stale','status':'unresolved'}
+    manual={**base,'id':'manual','status':'accepted','reviewed_by':'data-steward'}
+    disabled={**base,'id':'disabled','status':'disabled','reviewed_by':'data-steward'}
+    current={**base,'id':'current','status':'accepted'}
+    repository.replace_candidates([stale,manual,disabled],'hash','hash')
+    repository.replace_candidates([current],'hash','hash',prune_source_id='source')
+    assert set(repository.memory_candidates)=={'manual','disabled','current'}
+    repository.replace_candidates([],'hash','hash',prune_source_id='source')
+    assert set(repository.memory_candidates)=={'manual','disabled'}
