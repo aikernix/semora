@@ -36,14 +36,14 @@ def test_first_stage_is_keyword_only_and_batches_commit_before_completion(tmp_pa
     engine=KeywordDiscovery(source,model,state,save)
     result=asyncio.run(engine.extract_keywords())
     assert result==['entity_ref','对象']
-    assert len(model.calls)==3 and max(len(p['tables']) for p in model.calls)<=20
+    assert len(model.calls)==5 and max(len(p['tables']) for p in model.calls)<=10
     assert all('source_table_id' not in json.dumps(p) for p in model.calls)
     assert 'retrieval_complete' not in engine.scope
     assert any(s.get('keyword_work') for s in saved)
     restored=KeywordDiscovery(source,model,cp.load('job',None),lambda:None)
     # Checkpoints use fingerprints; this standalone fixture intentionally uses no fingerprint.
     assert asyncio.run(restored.extract_keywords())==result
-    assert len(model.calls)==3
+    assert len(model.calls)==5
 
 
 @pytest.mark.parametrize('word',['id',' ID ','name','status','VARCHAR','字段'])
@@ -61,7 +61,7 @@ def test_program_preserves_model_selected_identifier_terms_and_only_normalizes_c
 def test_chinese_semantic_terms_remain_valid_without_programmatic_character_splitting():
     words=['业务对象','业务对象编号','业务对象','用户IM标识']
     assert keyword_set(words)==['业务对象','业务对象编号','用户IM标识']
-    assert '【中文语义提取】' in KEYWORD_SYSTEM
+    assert '按中英文各自的语义理解名称和注释' in KEYWORD_SYSTEM
 
 
 def test_model_selected_object_term_retrieves_target_without_programmatic_stemming():
@@ -89,6 +89,34 @@ def test_model_selected_chinese_object_term_is_saved_and_retrieves_name_independ
     assert engine.work.keywords()==['业务对象']
     assert engine.retrieve('业务对象')['total']==2
     assert model.calls==1
+
+
+def test_field_name_and_comment_terms_are_preserved_for_independent_recall():
+    rows={
+        's.registry':{'id':'s.registry','name':'catalog','columns':[{'name':'id','type':'bigint'}]},
+        's.events':{'id':'s.events','name':'events','columns':[
+            {'name':'catalog_ref','type':'bigint','comment':'所属目录编号'}]},
+        's.history':{'id':'s.history','name':'history','columns':[
+            {'name':'owner_ref','type':'bigint','comment':'所属目录编号'}]},
+    }
+    class Model:
+        async def complete_json(self,system,user):
+            tables=json.loads(user)['tables']
+            assert any(f['name']=='catalog_ref' and f['comment']=='所属目录编号'
+                       for table in tables for f in table['columns'])
+            assert '逐项检查字段名' in system
+            assert '不能只从注释选词' in system
+            assert '表名中的业务词或词段、字段名中的业务词或词段' in system
+            assert '具有完整业务含义的字段名' in system
+            assert '不能仅因语义相同而互相替代' in system
+            return {'keywords':['catalog','目录']}
+    engine=KeywordDiscovery(build_inputs({'source':rows}),Model(),{},lambda:None)
+    assert asyncio.run(engine.extract_keywords())==['catalog','目录']
+    hits={r['keyword']:{v['table_id'] for v in r['items']}
+          for r in asyncio.run(engine.retrieve_all())}
+    assert len(hits['catalog'])==len(hits['目录'])==2
+    assert hits['catalog']!=hits['目录']
+    assert engine.work.keywords()==['catalog','目录']
 
 
 def test_keyword_wire_contract_has_no_source_or_explanation():
@@ -242,17 +270,170 @@ def test_compact_compare_does_not_expand_keywords_or_gaps():
     assert 'gaps' not in engine.scope
 
 
-def test_agent_cannot_finish_unseen_pages_and_stops_repeating():
+def test_stalled_agent_switches_to_conclusion_and_records_unread_scope():
     class Repeat:
+        calls=[]
         async def complete_json(self,system,user):
+            p=json.loads(user);self.calls.append(p)
+            if p['phase']=='agent_conclusion':
+                assert '不提供搜索、读取或取证工具' in system
+                return {'relations':[],'checked_table_ids':[],'gaps':['尚有结构未读完']}
             return {'tool':'catalog','arguments':{'page':0}}
     engine=KeywordDiscovery(cards(41),Repeat(),{},lambda:None)
-    ids=tuple(sorted(engine.cards)); engine.retrieve('entity_ref')
-    with pytest.raises(DiscoveryIncomplete,match='agent_no_progress'):
-        asyncio.run(engine.agent(ids,['entity_ref']))
+    ids=tuple(sorted(engine.cards))
+    assert asyncio.run(engine.agent(ids,['entity_ref']))==[]
     context=next(iter(engine.scope['agents'].values()))
-    assert not context.get('complete')
-    assert len(context['seen'])==40
+    assert context['complete'] and context['step']==4
+    assert len(context['unresolved_table_ids'])==41
+    assert not engine.incomplete_units()
+
+
+def test_repeated_read_action_automatically_continues_instead_of_replaying_first_tables():
+    source=cards(2);ids=sorted(source)
+    for card in source.values():
+        card['columns'] += [{'name':f'attribute_{i}','type':'varchar(40)','comment':'记录编号说明'*12} for i in range(50)]
+    class Model:
+        calls=[]
+        async def complete_json(self,system,user):
+            payload=json.loads(user);self.calls.append(payload)
+            if payload['progress']['remaining']['table_count']:
+                return {'tool':'read_tables','arguments':{'table_ids':ids}}
+            return {'tool':'finish','arguments':{'checked_table_ids':ids,'gaps':[]}}
+    engine=KeywordDiscovery(source,Model(),{},lambda:None)
+    assert asyncio.run(engine.agent(tuple(ids),['entity_ref']))==[]
+    context=engine.scope['agents'][digest(tuple(ids))]
+    assert context['complete'] and context['step']<=10 and context.get('correction_rounds',0)==0
+    assert all(len(context['read'][t])==52 for t in ids)
+    seen=set()
+    for action in context['history']:
+        result=action['result']
+        assert len(json.dumps(result,ensure_ascii=False).encode())<=18000
+        for table in result.get('tables',[]):
+            for field in table['columns']:
+                key=(table['table_id'],field['name'])
+                assert key not in seen
+                seen.add(key)
+    assert len(seen)==104
+
+
+def test_table_read_skips_complete_tables_but_allows_explicit_reread():
+    source=cards(2);ids=sorted(source);engine=KeywordDiscovery(source,None,{},lambda:None)
+    context={'seen':[],'read':{ids[0]:[0,1]}}
+    async def run():
+        result=await engine.agent_tool('read_tables',{'table_ids':ids},context,ids,[])
+        assert [c['table_id'] for c in result['tables']]==[ids[1]]
+        assert result['skipped_read_table_ids']==[ids[0]] and result['next_reads']==[]
+        replay=await engine.agent_tool('read_tables',{'table_ids':[ids[0]],'reread':True},context,ids,[])
+        assert len(replay['tables'][0]['columns'])==2
+    asyncio.run(run())
+
+
+def test_twenty_wide_tables_return_bounded_continuations_and_fill_legacy_read_gaps():
+    source=cards(20);ids=sorted(source)
+    for card in source.values():
+        card['columns']=[{'name':f'field_{i}','type':'varchar(40)','comment':'字段用途说明'*15} for i in range(40)]
+    engine=KeywordDiscovery(source,None,{},lambda:None)
+    context={'seen':[],'read':{ids[0]:list(range(20,40))}}
+    async def run():
+        results=[]
+        for _ in range(40):
+            result=await engine.agent_tool('read_tables',{'table_ids':ids},context,ids,[])
+            assert len(json.dumps(result,ensure_ascii=False).encode())<=18000
+            results.extend(result['tables'])
+            if not result['next_reads']:break
+        assert engine.agent_remaining(ids,{**context,'checked':[]})['table_count']==0
+        assert all(set(context['read'][t])==set(range(40)) for t in ids)
+        first=[r for r in results if r['table_id']==ids[0]]
+        assert all(int(f['name'].split('_')[-1])<20 for row in first for f in row['columns'])
+        assert first[-1]['has_more'] is False and first[-1]['next_offset']==40
+    asyncio.run(run())
+
+
+def test_five_exploration_calls_then_at_most_three_conclusion_attempts(monkeypatch):
+    monkeypatch.setenv('RELATIONSHIP_AGENT_MAX_STEPS','80')
+    source=cards(12);ids=sorted(source)
+    class Model:
+        phases=[]
+        async def complete_json(self,system,user):
+            p=json.loads(user);self.phases.append(p['phase'])
+            if p['phase']=='agent_conclusion':return {'wrong':True}
+            return {'tool':'read_tables','arguments':{'table_ids':[ids[len(self.phases)-1]]}}
+    engine=KeywordDiscovery(source,Model(),{},lambda:None)
+    with pytest.raises(DiscoveryIncomplete,match='agent_conclusion_failed'):
+        asyncio.run(engine.agent(tuple(ids),['entity_ref']))
+    assert engine.model.phases==['large_group_agent']*5+['agent_conclusion']*3
+
+
+def test_conclusion_keeps_previously_submitted_relation_without_requiring_repetition():
+    source=cards(2);ids=sorted(source)
+    relation={'source_table_id':ids[0],'target_table_id':ids[1],
+        'key_pairs':[{'source':'entity_ref','target':'id'}],'guards':[],'reason':'引用登记对象'}
+    class Model:
+        async def complete_json(self,system,user):
+            p=json.loads(user)
+            assert p['phase']=='agent_conclusion' and p['submitted_count']==1
+            return {'relations':[],'checked_table_ids':ids,'gaps':[]}
+    engine=KeywordDiscovery(source,Model(),{},lambda:None)
+    context={'step':5,'relations':{engine.proposal_key(relation):relation},
+        'history':[],'read':{t:[0,1] for t in ids},'checked':[]}
+    assert asyncio.run(engine.conclude_agent(context,ids,['entity_ref']))==[relation]
+    assert context['step']==6 and context['complete']
+
+
+def test_partial_table_read_and_one_invalid_mapping_do_not_reject_good_conclusion():
+    source=cards(2);ids=sorted(source)
+    good={'source_table_id':ids[0],'target_table_id':ids[1],
+        'key_pairs':[{'source':'entity_ref','target':'id'}],'reason':'正常关联说明'*100}
+    bad={**good,'key_pairs':[{'source':'entity_ref','target':'missing'}]}
+    class Model:
+        calls=0
+        async def complete_json(self,system,user):
+            self.calls+=1
+            return {'relations':[good,bad],'checked_table_ids':ids,'gaps':[]}
+    engine=KeywordDiscovery(source,Model(),{},lambda:None)
+    context={'step':5,'relations':{},'history':[],
+        'read':{ids[0]:[0],ids[1]:[1]},'checked':[]}
+    submitted=asyncio.run(engine.agent_tool('submit',{'relations':[good]},context,ids,[]))
+    assert submitted['saved']==1 and not submitted['rejected']
+    result=asyncio.run(engine.conclude_agent(context,ids,['entity_ref']))
+    assert len(result)==1 and result[0]['reason']==good['reason']
+    assert engine.model.calls==1 and context['complete']
+    assert set(context['unresolved_table_ids'])==set(ids) and context['gaps']
+    assert not engine.incomplete_units()
+
+
+def test_many_small_groups_remain_independent_even_above_global_task_threshold():
+    source=cards(64);ids=sorted(source);groups={tuple(ids[i:i+2]):['entity_ref'] for i in range(0,64,2)}
+    class Model:
+        calls=[]
+        async def complete_json(self,system,user):
+            p=json.loads(user);self.calls.append(p)
+            assert p['phase']=='compare'
+            assert tuple(sorted(t['table_id'] for t in p['tables'])) in groups
+            return {'relations':[]}
+    engine=KeywordDiscovery(source,Model(),{},lambda:None)
+    engine.finish_stage('retrieval',{'counts':{}})
+    async def arranged():return groups
+    engine.arranged_groups=arranged
+    assert asyncio.run(engine.discover())==[]
+    assert len(engine.model.calls)==32 and set(engine.scope['group_routes'].values())=={'comparison'}
+
+
+def test_context_deduplicates_fields_and_trims_oversized_history():
+    from app.relationship_keywords import AGENT_SYSTEM
+    from app.relationship_context import request_size,REQUEST_LIMIT
+    source=cards(2);engine=KeywordDiscovery(source,None,{},lambda:None);card=next(iter(source.values()))
+    payload={'recent_results':[{'tool':'read_tables','result':{'tables':[card]}}]*3,
+             'catalog':{'items':[{'table_id':card['table_id']}],'has_more':False}}
+    fitted=engine.fit_agent_payload(AGENT_SYSTEM,payload)
+    columns=[f for r in fitted['recent_results'] for t in r['result'].get('tables',[]) for f in t['columns']]
+    assert len(columns)==len(card['columns']) and fitted['catalog']['items']==[]
+    payload['recent_results'].append({'tool':'definition','result':{'definition':'x'*100000}})
+    fitted=engine.fit_agent_payload(AGENT_SYSTEM,payload)
+    assert request_size(AGENT_SYSTEM,fitted)<=REQUEST_LIMIT and fitted['context_trimmed']
+    huge={**card,'comment':'x'*50000,'matched_fields':card['columns']*10000}
+    summary=engine.page([huge])
+    assert summary['items'][0]['summary_omitted']
 
 
 def test_early_finish_reports_missing_tables_without_marking_complete():
@@ -377,28 +558,185 @@ def test_retrieval_prunes_single_hits_atomically_and_survives_restart():
     assert all(len(ids)>=2 for ids in restored.groups())
 
 
-def test_zero_hit_is_anomaly_and_not_silently_pruned():
+def test_zero_hit_is_logged_and_removed_without_failing_retrieval():
     engine=KeywordDiscovery(cards(2),None,{},lambda:None)
     engine.work.claim('keywords','old')
     engine.work.finish('keywords','old',{'keywords':['missing_object']},['missing_object'])
     engine.finish_stage('keywords',{'keyword_count':1})
-    with pytest.raises(DiscoveryIncomplete,match='keyword_without_source_match'):
-        asyncio.run(engine.retrieve_all())
-    assert engine.stage_result('retrieval') is None
-    assert engine.work.keywords()==['missing_object']
+    result=asyncio.run(engine.retrieve_all())
+    assert result[0]['total']==0
+    assert engine.stage_result('retrieval')['counts']=={'missing_object':0}
+    assert engine.work.keywords()==[]
+    assert engine.incomplete_units()==[]
     assert engine.scope['zero_hit_keywords']==['missing_object']
 
 
-def test_keyword_must_match_its_actual_batch_input_after_whitespace_normalization():
+def test_failed_keyword_batch_does_not_cancel_siblings_and_resume_reuses_success():
+    class Model:
+        def __init__(self):self.calls=[];self.broken=True
+        async def complete_json(self,system,user):
+            tables=json.loads(user)['tables'];key=tables[0]['table_id'];self.calls.append(key)
+            if self.broken and key==bad:raise TimeoutError('model timeout')
+            return {'keywords':['entity_ref']}
+    model=Model();state={};engine=KeywordDiscovery(cards(21),model,state,lambda:None)
+    bad=list(engine.keyword_batches())[0][0]['table_id']
+    assert asyncio.run(engine.extract_keywords())==['entity_ref']
+    assert engine.scope['keywords_complete'] is False
+    assert len(engine.incomplete_units())==1
+    completed_calls={key:model.calls.count(key) for key in model.calls if key!=bad}
+    model.broken=False
+    resumed=KeywordDiscovery(engine.cards,model,state,lambda:None)
+    assert asyncio.run(resumed.extract_keywords())==['entity_ref']
+    assert not resumed.incomplete_units() and resumed.stage_result('keywords')['complete']
+    assert all(model.calls.count(key)==count for key,count in completed_calls.items())
+
+
+def test_parallel_waves_preserve_earlier_gaps_and_storage_failures_abort():
+    engine=KeywordDiscovery(cards(2),None,{},lambda:None)
+    async def operation(value):
+        if value=='bad':raise TimeoutError('timeout')
+        if value=='network':raise ConnectionError('connection reset')
+        return value
+    async def run():
+        assert await engine.parallel_work(['ok','bad'],'comparing',operation)==['ok',None]
+        assert await engine.parallel_work(['later'],'comparing',operation)==['later']
+        assert len(engine.incomplete_units())==1
+        assert await engine.parallel_work(['network','healthy'],'comparing',operation)==[None,'healthy']
+        assert len(engine.incomplete_units())==2
+        async def storage(value):raise OSError('disk full')
+        with pytest.raises(OSError,match='disk full'):
+            await engine.parallel_work(['write'],'writing',storage)
+    asyncio.run(run())
+
+
+def test_oversized_table_is_an_explicit_gap_and_other_inputs_continue():
+    engine=KeywordDiscovery(cards(2),Keywords(),{},lambda:None)
+    original=engine.fragments;bad=sorted(engine.cards)[0]
+    def fragments(card):
+        if card['table_id']==bad:raise DiscoveryIncomplete('field_oversized')
+        return original(card)
+    engine.fragments=fragments
+    assert asyncio.run(engine.extract_keywords())==['entity_ref','对象']
+    assert engine.incomplete_units()[0]['table_ids']==[bad]
+    assert engine.stage_result('keywords')['complete'] is False
+
+
+def test_stalled_agent_keeps_submitted_proposals_and_resumes_only_incomplete_group(monkeypatch):
+    monkeypatch.setenv('RELATIONSHIP_AGENT_GROUP_THRESHOLD','1')
+    state={};engine=KeywordDiscovery(cards(4),None,state,lambda:None)
+    ids=sorted(engine.cards);groups={tuple(ids[:2]):['entity_ref'],tuple(ids[2:]):['对象']}
+    engine.finish_stage('retrieval',{'counts':{}})
+    async def arranged():return groups
+    engine.arranged_groups=arranged
+    def relation(group):return {'source_table_id':group[0],'target_table_id':group[1],
+        'key_pairs':[{'source':'entity_ref','target':'id'}],'reason':'引用对象登记','guards':[]}
+    async def agent(group,words):
+        r=relation(group)
+        if group==tuple(ids[:2]):
+            engine.scope.setdefault('agents',{})[digest(group)]={'relations':{engine.proposal_key(r):r}}
+            raise DiscoveryIncomplete('agent_no_progress')
+        return [r]
+    engine.agent=agent
+    result=asyncio.run(engine.discover())
+    assert len(result)==2 and len(engine.incomplete_units())==1
+    assert engine.stage_result('discovery')['complete'] is False
+    assert engine.scope['analyzed_groups']==[digest(tuple(ids[2:]))]
+    resumed=KeywordDiscovery(engine.cards,None,state,lambda:None);called=[]
+    resumed.arranged_groups=arranged
+    async def retry(group,words):called.append(group);return [relation(group)]
+    resumed.agent=retry
+    assert len(asyncio.run(resumed.discover()))==2
+    assert called==[tuple(ids[:2])] and not resumed.incomplete_units()
+    assert resumed.stage_result('discovery')['complete'] is True
+
+
+def test_agent_tool_timeout_is_feedback_and_successful_retry_clears_gap():
+    source=cards(2);ids=sorted(source);calls=[]
+    class Model:
+        async def complete_json(self,system,user):
+            if len(calls)<2:return {'tool':'definition','arguments':{'table_id':ids[0]}}
+            return {'tool':'finish','arguments':{'checked_table_ids':ids,'gaps':[]}}
+    async def tool(kind,args):
+        calls.append(kind)
+        if len(calls)==1:raise TimeoutError('temporary definition failure')
+        return {'definition':'available'}
+    engine=KeywordDiscovery(source,Model(),{},lambda:None,tool=tool)
+    assert asyncio.run(engine.agent(tuple(ids),['entity_ref']))==[]
+    context=engine.scope['agents'][digest(tuple(ids))]
+    assert len(calls)==2 and not context['tool_failures'] and context['complete']
+
+
+def test_invalid_keyword_is_ignored_without_retrying_or_failing_the_batch():
     class Model:
         calls=0
         async def complete_json(self,system,user):
             self.calls+=1
             return {'keywords':['概括改写后的不存在对象']}
     model=Model();engine=KeywordDiscovery(cards(2),model,{},lambda:None)
-    with pytest.raises(DiscoveryIncomplete,match='keyword_without_source_match'):
-        asyncio.run(engine.extract_keywords())
-    assert model.calls==3 and not engine.work.keywords()
+    assert asyncio.run(engine.extract_keywords())==[]
+    assert model.calls==1 and not engine.work.keywords()
+    assert engine.scope['keywords_complete'] is True
+    rejected=next(iter(engine.scope['keyword_discards'].values()))
+    assert rejected[0]['keyword']=='概括改写后的不存在对象'
+    assert rejected[0]['reason']=='keyword_without_source_match'
+
+
+def test_mixed_keywords_keep_valid_terms_without_retry_and_log_each_rejection(monkeypatch):
+    import logging
+    events=[]
+    monkeypatch.setattr(logging.getLogger('semora.model'),'info',lambda message:events.append(json.loads(message)))
+    class Model:
+        calls=0
+        async def complete_json(self,system,user):
+            self.calls+=1
+            assert set(json.loads(user))=={'phase','tables'}
+            return {'keywords':[' ENTITY_REF ','entity_ref','对象 编号','对象 编号','ID','\t ',
+                                '没有来源的词',42,{'not':'a keyword'}]}
+    source=cards(2);model=Model();state={'job_id':'test-job'}
+    engine=KeywordDiscovery(source,model,state,lambda:None)
+    expected=['ENTITY_REF','对象 编号']
+    assert asyncio.run(engine.extract_keywords())==expected
+    assert model.calls==1 and engine.metrics['discarded_keywords']==5
+    discarded=next(e for e in events if e['event']=='relationship.keywords.discarded')
+    assert discarded['job_id']=='test-job' and discarded['batch_index']==1 and discarded['batch_total']==1
+    assert discarded['table_count']==2 and discarded['datasource_ids']==['source']
+    assert {t['name'] for t in discarded['tables']}=={'s.t0','s.t1'}
+    assert discarded['retry'] is False and discarded['normalization']=='casefold_remove_whitespace'
+    assert [item['reason'] for item in discarded['discarded']]==[
+        'non_business_search_keyword','non_business_search_keyword','keyword_without_source_match',
+        'invalid_keyword_type','invalid_keyword_type']
+    missing=next(item for item in discarded['discarded'] if item.get('keyword')=='没有来源的词')
+    assert missing['normalized_keyword']=='没有来源的词'
+    completed=next(e for e in events if e['event']=='relationship.request.completed')
+    assert completed['accepted_count']==2 and completed['duplicate_count']==2
+    assert not any(e['event']=='relationship.compact_response.invalid' for e in events)
+    restored=KeywordDiscovery(source,model,state,lambda:None)
+    assert asyncio.run(restored.extract_keywords())==expected
+    assert model.calls==1
+
+
+def test_bad_output_envelope_still_retries_and_preserves_diagnostic_context(monkeypatch):
+    import logging
+    events=[]
+    monkeypatch.setattr(logging.getLogger('semora.model'),'info',lambda message:events.append(json.loads(message)))
+    class Model:
+        calls=0
+        async def complete_json(self,system,user):self.calls+=1;return {'wrong_field':[]}
+    model=Model();state={'job_id':'failed-job'}
+    engine=KeywordDiscovery(cards(1),model,state,lambda:None)
+    assert asyncio.run(engine.extract_keywords())==[]
+    assert engine.stage_result('keywords')['complete'] is False
+    assert engine.incomplete_units()[0]['stage']=='extracting_keywords'
+    assert model.calls==3
+    failures=[e for e in events if e['event']=='relationship.compact_response.invalid']
+    assert [e['attempt'] for e in failures]==[1,2,3]
+    assert [e['will_retry'] for e in failures]==[True,True,False]
+    assert all(e['job_id']=='failed-job' and e['batch_index']==1 and e['tables'] for e in failures)
+    assert all(e['details']['validation'] and e['traceback'] for e in failures)
+    key=failures[-1]['request_key']
+    persisted=engine.work.get('keywords',key)['payload']['diagnostic']
+    assert persisted['job_id']=='failed-job' and persisted['attempt']==3
+    assert persisted['error_code']=='invalid_output_contract'
 
 
 def test_invalid_relation_is_retried_then_discarded_without_losing_valid_relations():
@@ -413,18 +751,46 @@ def test_invalid_relation_is_retried_then_discarded_without_losing_valid_relatio
         calls=0
         async def complete_json(self,system,user):
             self.calls+=1
+            if len(json.loads(user)['tables'])==2:
+                return {'relations':[invalid]}
             return {'relations':[valid,invalid]}
     model=Model();state={};engine=KeywordDiscovery(source,model,state,lambda:None)
     result=asyncio.run(engine.request('compare',COMPARE_SYSTEM,{
         'phase':'compare','tables':list(source.values()),
         'comparison_pairs':[[ids[0],ids[1]],[ids[2],ids[3]]]},ProposalOutput))
     assert result['relations']==[{**valid,'guards':[]}]
-    assert model.calls==3
-    assert engine.metrics['discarded_relations']==1
+    assert model.calls==6
+    assert engine.metrics['discarded_relations']>=1
     discarded=engine.scope['discarded_relations'][0]
     assert discarded['code']=='unknown_relation_field'
     assert discarded['details']['source_table_id']==ids[2]
     assert discarded['details']['fields']==[{'side':'target','field':'missing_field'}]
+
+
+def test_unknown_field_is_rechecked_with_only_its_two_tables():
+    from app.relationship_contracts import ProposalOutput
+    from app.relationship_keywords import COMPARE_SYSTEM
+    values=cards(4);ids=list(values)
+    corrected={'source_table_id':ids[0],'target_table_id':ids[1],
+               'key_pairs':[{'source':'entity_ref','target':'id'}],'reason':'对象引用唯一标识'}
+    class Model:
+        sizes=[]
+        async def complete_json(self,system,user):
+            p=json.loads(user);self.sizes.append(len(p['tables']))
+            if len(p['tables'])==2:return {'relations':[corrected]}
+            return {'relations':[{**corrected,'key_pairs':[{'source':'entity_ref','target':'absent'}]}]}
+    model=Model();engine=KeywordDiscovery(values,model,{},lambda:None)
+    result=asyncio.run(engine.request('compare',COMPARE_SYSTEM,{'phase':'compare','tables':list(values.values()),
+        'comparison_pairs':[[ids[0],ids[1]]]},ProposalOutput))
+    assert result['relations']==[{**corrected,'guards':[]}]
+    assert model.sizes==[4,4,4,2]
+
+
+def test_valid_fields_cannot_escape_requested_comparison_pair():
+    values=cards(3);ids=list(values);engine=KeywordDiscovery(values,None,{},lambda:None)
+    result,bad=engine.valid_proposals({'relations':[{'source_table_id':ids[0],'target_table_id':ids[2],
+        'key_pairs':[{'source':'entity_ref','target':'id'}],'reason':'未要求的表对'}]},list(values.values()),[[ids[0],ids[1]]])
+    assert result['relations']==[] and bad[0]['code']=='unrequested_relation_pair'
 
 
 def test_malformed_relation_contract_does_not_invalidate_other_items_after_retries():

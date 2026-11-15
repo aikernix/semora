@@ -14,7 +14,7 @@ RESULT_SUMMARY = """【角色】查询结果解读助手。
 【范围】sample_rows可能只是部分记录。未包含全部返回记录时，不根据样本计算整体总量、比例或全局排名；列或长文本被省略时不推断缺失内容。result_truncated为真时，不能把返回条数当作全部符合条件的数量。信息有限时简短说明本次返回了什么，不猜测结论。
 【输出】按给定JSON契约返回conclusion，简洁、具体，不输出分析过程。"""
 
-SQL_CONTRACT = """【SQL契约】提交完整PostgreSQL基准SQL，参数:name；程序转换为目标方言。目标库版本、features只约束能力：true有支持证据（来源见method）、false本源确认不支持、null未知且允许预检。函数证据仅对应记录的表达形式；sql_feedback不代表全部函数不支持。"""
+SQL_CONTRACT = """【SQL契约】PostgreSQL基准SQL、:name参数，程序转目标方言。source用物理table/column；逻辑计划引用已映射为物理表列，派生表/CTE/local用投影列。版本、features：true已验证（来源见method）、false不支持、null未知可预检。函数证据仅限记录表达式；sql_feedback不代表全部函数不支持。"""
 
 UNDERSTAND = (
     """【角色】需求分析助手。
@@ -24,7 +24,9 @@ UNDERSTAND = (
 区分对象入选条件与统计记录范围、Top N与后续筛选顺序、关联的归属来源。要求“满足条件的对象的全部记录”时，先选对象，再取其全部记录，不能同时裁剪统计明细。
 目标都不清楚时用needs_direction引导补清需求；目标明确但口径有歧义时用known集中确认。仅询问会改变结果且现有资料无法确定的业务含义，一次列齐相关分支，用depends_on连接。
 选项应是同一目标下有依据的业务解释；不能建议把含义未确定的指标填零、留空或换成别的指标来规避确认。
-缺核心资料才调用工具，资料足够即提交。只有关联或物理映射确实缺失才列technical_gaps；同义表达、空数据或不确定的SQL写法不属于技术缺口。
+资料中的对象和object_catalog是候选，不代表必查。先将当前输出、筛选、统计、时间和身份要求映射到有依据的属性；单对象可满足时直接使用，不因关键词相似引入额外对象。仅在所需信息确实分布于多个对象时联查，并保留必要路径对象；不得为减少对象而改变用户指定的来源或口径。
+先在required_object_uses列出最小必要对象及其承担的当前要求与不可省略依据。technical_gaps只列阻止这些要求实现的真实缺口；relation缺口必须涉及至少两个必需对象。候选对象间未配置关系、未来可能新增的联查、可省略对象的关系均不报缺口。若方案无需关联，technical_gaps不得同时声称缺少该关联。当前分支尚待业务确认时用depends_on限定缺口，不将可选分支缺口作为无条件障碍。
+缺核心资料才调用工具，资料足够即提交。同义表达、空数据、未确认的业务取值或不确定的SQL写法不属于技术缺口。澄清选项及编码必须有资料依据，不根据字段名编造枚举值。
 【输出】按工具提供的结构提交。requirements用业务语言列明目标、时间、范围、指标、分组、条件、每组含义、排序及处理先后顺序，落实用户实际补充口径，不新增要求；尚待确认的内容通过questions表达。summary、skeleton、confidence.reason，以及问题question、reason和选项label、description均面向业务用户；问题解释清楚业务差别和结果影响。内部引用放field、id、value等结构字段，不输出SQL或隐藏思维链。
 资料和口径足够时填写logical_plan：grain_refs明确每行结果的身份或分组键，metrics.field_refs明确各指标来源；使用资料中的对象name、对象.属性和关系name；仍有问题或配置缺口时留空。
 """
@@ -33,17 +35,16 @@ UNDERSTAND = (
 
 AUTHOR = (
     """【角色】SQL生成助手。
-【依据】原始需求、确认答案、定义、映射、对象身份键及数据库能力。
 request为需求契约，confirmed_answers为实际补充，original_request为原话；summary、analysis_steps不是额外的用户确认。冲突时以用户明确口径为准，不新增条件。
 SQL遵循request.logical_plan；result_grain、metric_sources标明结果键与指标来源。
-【任务】提交SQLProgram，保持确认范围、口径和排序。
+【任务】按确认范围、口径和排序提交SQLProgram。
 【生成要求】
-每步只读；source只访问其data_source_id的物理表。同源关联与汇总尽量用一条SQL，落实准确表列、固定条件、去重和指标定义。
+每步只读；source只访问其data_source_id的物理表；同源尽量一条SQL，落实映射、固定条件、去重和指标定义。
 跨源拆成有序source步骤，用inputs绑定先前输出的完整键元组；单键x IN (:keys)，复合键(x,y) IN (:keys)，禁止拆成独立IN或拼接值。
 合并用local步骤，仅读先前步骤name，不设inputs或data_source_id；缺数据先加source步骤。local转为DuckDB，最后一步交付。
 多个明细分支先分别按目标键聚合再连接；仅筛选存在性用EXISTS，按需求保留无明细主体和零值。检查COUNT、SUM、AVG的连接放大，不能用统一DISTINCT掩盖；明确的明细配对可以多行。
 实体粒度用唯一键，不用名称；COUNT DISTINCT不能保护SUM。按指定来源取值。
-每组最后一条按时间、唯一键选行，不靠子查询排序后GROUP BY任意取行；非聚合输出满足分组规则。
+每组最后一条按时间、唯一键选行，不用排序后GROUP BY任取；非聚合输出满足分组。
 “符合条件对象的全部记录”用对象唯一键在EXISTS或子查询中选对象；外层不裁剪明细，分组维度不自动成为入选键。可空键关联用IS NOT DISTINCT FROM。先取Top N再筛选时，源端先排序并LIMIT N，后续筛选不提前；未匹配对象是否保留按需求。
 只有业务Top N才写LIMIT，保护上限由执行器添加。日期明确边界。按版本与features选择写法；不支持窗口或WITH时用派生表、分组或相关子查询。
 不替换指标，不新增澄清或业务条件。

@@ -65,7 +65,22 @@ def test_compact_comparison_has_minimal_output_and_short_reason():
     assert '不超过60个字符' in COMPARE_SYSTEM
     assert set(ProposalOutput.model_fields)=={'relations'}
     reason=ProposalOutput.model_json_schema()['$defs']['ProposedRelation']['properties']['reason']
-    assert reason['maxLength']==60 and reason['minLength']==1
+    assert 'maxLength' not in reason and reason['minLength']==1
+
+
+def test_relationship_reason_length_is_guidance_only_and_never_truncated():
+    from app.relationship_contracts import ProposedRelation, AgentConclusion, CompactDecision, EvidenceGap
+    from app.relationship_research import normalize_research_response
+    reason='完整说明字段含义及关联判断。'*100
+    relation={'source_table_id':'a','target_table_id':'b',
+        'key_pairs':[{'source':'ref','target':'id'}],'reason':reason}
+    assert ProposedRelation.model_validate(relation).reason==reason
+    assert AgentConclusion.model_validate({'relations':[relation],'checked_table_ids':['a','b'],'gaps':[]}).relations[0].reason==reason
+    decision={'candidate_id':'candidate','outcome':'needs_evidence','kind':'unknown',
+        'gaps':[{'reason':reason,'request':'profile'}]}
+    normalized=normalize_research_response({'decisions':[decision]})
+    assert CompactDecision.model_validate(normalized['decisions'][0]).reason==reason
+    assert EvidenceGap.model_validate({'reason':reason}).reason==reason
 
 
 def test_data_guidance_is_inserted_before_review_output_schema():

@@ -1,6 +1,6 @@
 """Explicit transport/dialect registry. Unknown products never fall through to PostgreSQL."""
 from fastapi import HTTPException
-from semora_contracts.database import PRODUCTS
+from semora_contracts.database import PRODUCTS, native_protocol
 from . import jdbc_adapter
 
 def product(kind):
@@ -10,6 +10,10 @@ def product(kind):
 
 def is_jdbc(kind):
     return product(kind)["transport"] == "jdbc"
+
+def protocol(kind):
+    product(kind)
+    return native_protocol(kind)
 
 def dialect(body):
     item = product(body.type)

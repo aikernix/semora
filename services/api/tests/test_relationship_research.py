@@ -437,3 +437,24 @@ def test_technical_research_gap_is_pending_not_a_semantic_rejection():
     assert new['status']=='unresolved' and new['research_pending'] is True
     assert previous['status']=='accepted' and previous['research_pending'] is True
     assert not any(e.get('kind')=='automatic_exclusion' for c in (new,previous) for e in c['evidence'])
+
+
+def test_missing_duplicate_reason_reuses_explicit_evidence_gap_without_mutating_response():
+    from app.relationship_research import normalize_research_response
+    from app.relationship_contracts import CompactResearchOutput
+    original={'decisions':[{'candidate_id':'c','outcome':'needs_evidence','kind':'unknown',
+        'gaps':[{'reason':'需要验证编号所属体系','request':'profile'}]}]}
+    normalized=normalize_research_response(original)
+    parsed=CompactResearchOutput.model_validate(normalized)
+    assert parsed.decisions[0].reason=='需要验证编号所属体系'
+    assert 'reason' not in original['decisions'][0]
+    assert parsed.decisions[0].outcome=='needs_evidence'
+
+
+def test_coverage_review_uses_eighty_percent_boundary():
+    from app.relationship_review_policy import review_reasons
+    c=candidate('coverage_boundary')
+    for coverage,expected in ((.79,True),(.80,False),(.90,False),(.98,False)):
+        c['evidence']=[{'kind':'value_profile','statistics':{
+            'source_nonnull_distinct_keys':100,'directional_coverage':coverage}}]
+        assert ('data_contradiction' in review_reasons(c,verdict('coverage_boundary'))) is expected

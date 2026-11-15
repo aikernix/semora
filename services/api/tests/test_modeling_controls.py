@@ -21,6 +21,104 @@ def setup_service():
     return service,repo,sources
 
 
+def test_job_progress_never_regresses_through_phases_or_retries():
+    service,repo,_=setup_service()
+    job=repo.create_job('source')
+    observed=[]
+    for phase,value in [('extracting_keywords',48),('organizing_recall_groups',50),
+                        ('comparing',55),('comparing',52),('researching',98),
+                        ('auditing_evidence',98),('researching',70)]:
+        service._update(job,'profiling',phase,value)
+        observed.append(job['progress'])
+    assert observed==sorted(observed)
+    service._update(job,'building','publishing',100)
+    assert job['progress']==99
+    service._update(job,'completed','complete',100)
+    assert job['progress']==100
+
+
+def test_resuming_terminal_job_starts_new_progress_but_keeps_it_monotonic():
+    service,repo,_=setup_service()
+    job=repo.create_job('source',details={'checkpoint_ref':'saved','technical_incomplete':True,
+        'stage_done':87,'stage_total':87,'stage_failed':52})
+    service._update(job,'completed_with_pending','incomplete',100)
+    async def continuation(value,**kwargs):
+        assert value['progress']==0 and 'stage_done' not in value['details']
+        service._update(value,'profiling','comparing',54)
+        service._update(value,'profiling','comparing',52)
+        assert value['progress']==54
+        service._update(value,'building','publishing',100)
+        assert value['progress']==99
+        service._update(value,'completed','complete',100)
+    service._run_onboarding=continuation
+    async def run():
+        resumed=service.resume_failed('source',job['id'])
+        await service.tasks[job['id']]
+        assert resumed['progress']==100 and resumed['details']['resume_attempt']==1
+    asyncio.run(run())
+
+
+def test_partial_cross_job_resume_uses_cross_runner_only():
+    service,repo,_=setup_service();called=[]
+    job=repo.create_job('source',kind='cross_source',peer_datasource_id='peer',domain='demo',
+                        details={'checkpoint_ref':'saved-cross'})
+    job['status']='completed_with_pending';repo.save_job(job)
+    async def cross(value):called.append(value['id'])
+    service._run_cross_source=cross
+    async def run():
+        restored=service.resume_failed('source',job['id'])
+        await service.tasks[job['id']]
+        assert restored['details']['resume_research'] is True
+    asyncio.run(run())
+    assert called==[job['id']]
+
+
+def test_partial_single_source_job_keeps_effective_package_and_can_resume(monkeypatch):
+    service,repo,_=setup_service()
+    original=repo.save_package('source','old',{'objects':[],'relations':[{'name':'existing'}]},'ready',0)
+    async def review(candidates,maps,job,*args,**kwargs):
+        job['details'].update(technical_incomplete=True,incomplete_count=1,
+            incomplete_stages=['analyzing_large_groups'],checkpoint_ref=job['id'])
+    monkeypatch.setattr(service,'_semantic_review',review)
+    async def run():
+        job=service.start('source',relations_only=True,fresh=True)
+        await service.tasks[job['id']]
+        assert job['status']=='completed_with_pending' and job['phase']=='incomplete'
+        assert job['details']['relationships_updated'] is False
+        assert repo.get_package('source')==original
+        resumed=[]
+        async def continuation(value,**kwargs):resumed.append(value['id'])
+        monkeypatch.setattr(service,'_run_onboarding',continuation)
+        service.resume_failed('source',job['id'])
+        await service.tasks[job['id']]
+        assert resumed==[job['id']]
+    asyncio.run(run())
+
+
+def test_failed_keyword_stage_is_resumable_and_does_not_publish(monkeypatch,tmp_path):
+    from semora_agent.model import structured_model
+    service,repo,_=setup_service()
+    original=repo.save_package('source','old',{'objects':[],'relations':[{'name':'existing'}]},'ready',0)
+    monkeypatch.setenv('RELATIONSHIP_CHECKPOINT_DIR',str(tmp_path))
+    broken=True
+    async def model(system,user):
+        if broken:raise TimeoutError('temporary model timeout')
+        return {'keywords':['entity_ref']}
+    monkeypatch.setattr(structured_model,'complete_json',model)
+    async def run():
+        nonlocal broken
+        job=service.start_relationship_stage('source','keywords')
+        await service.tasks[job['id']]
+        assert job['status']=='completed_with_pending' and job['details']['incomplete_count']==1
+        assert repo.get_package('source')==original
+        broken=False
+        resumed=service.resume_failed('source',job['id'])
+        await service.tasks[job['id']]
+        assert resumed['status']=='completed' and not resumed['details']['technical_incomplete']
+        assert repo.get_package('source')==original
+    asyncio.run(run())
+
+
 def test_keyword_step_stops_before_retrieval_and_never_publishes(monkeypatch,tmp_path):
     from semora_agent.model import structured_model
     service,repo,_=setup_service()
@@ -167,6 +265,36 @@ def test_cancel_live_research_stops_task_and_keeps_effective_package(monkeypatch
         assert service.tasks=={}
         assert repo.get_package('source')==original
         assert (await service.cancel('source',job['id']))['status']=='cancelled'
+    asyncio.run(run())
+
+
+def test_cancel_cross_research_stops_model_task_without_publishing(monkeypatch):
+    from copy import deepcopy
+    from app.datasource_modeling import tables_digest
+    service,repo,sources=setup_service()
+    peer=deepcopy(sources.get('source'));peer.id='peer';sources.save(peer)
+    for sid in ('source','peer'):
+        tables=sources.get(sid).scan_result['tables']
+        repo.save_package(sid,tables_digest(tables),{'objects':[],'relations':[{'name':'existing'}]},'ready',0)
+    started=asyncio.Event();stopped=asyncio.Event();publications=[]
+    async def review(*args,**kwargs):
+        started.set()
+        try:await asyncio.Event().wait()
+        finally:stopped.set()
+    async def publish(*args,**kwargs):publications.append(args)
+    monkeypatch.setattr(service,'_semantic_review',review)
+    monkeypatch.setattr(service,'_apply_cross_relations',publish)
+    service.ontology=SimpleNamespace()
+    async def run():
+        job=service.start_cross_source('demo','source','peer')
+        await asyncio.wait_for(started.wait(),2)
+        task=service.tasks[job['id']]
+        with pytest.raises(ValueError,match='正在运行'):service.start_cross_source('demo','peer','source')
+        result=await service.cancel('source',job['id'],kind='cross_source')
+        assert result['status']=='cancelled' and result['completed_at']
+        assert task.done() and stopped.is_set() and not service.tasks
+        assert not publications
+        assert repo.get_package('source')['payload']['relations']==[{'name':'existing'}]
     asyncio.run(run())
 
 

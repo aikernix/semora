@@ -11,6 +11,11 @@ func preparePublication(ontology Ontology) (Snapshot, error) {
 	if issues := validateOntology(ontology); len(issues) > 0 {
 		return Snapshot{}, &validationError{issues: issues}
 	}
+	return configurationSnapshot(ontology)
+}
+
+// Empty configurations are published only by explicit unbinding, invalidating new queries.
+func configurationSnapshot(ontology Ontology) (Snapshot, error) {
 	canonical := canonicalOntology(ontology)
 	payload, err := json.Marshal(canonical)
 	if err != nil {

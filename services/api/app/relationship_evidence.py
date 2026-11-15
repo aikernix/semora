@@ -4,6 +4,8 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter, defaultdict
+from .relationship_rules import MIN_REFERENCE_COVERAGE
+
 from .relationship_context import field_references
 
 
@@ -151,7 +153,7 @@ def finalize_relationships(candidates, *, cross_source=False):
         coverage = profile.get("directional_coverage", 0)
         unique = any(e.get("kind") in {"target_unique_index", "verified_target_uniqueness"} and e.get("confirmed") is True for e in evidence)
         sufficient = samples >= (200 if cross_source else 100) or (profile.get("source_exhausted") is True and samples >= 1)
-        data_path = unique and sufficient and coverage >= (.99 if cross_source else .98)
+        data_path = unique and sufficient and coverage >= MIN_REFERENCE_COVERAGE
         # A concrete documented field reference is a separate proof path.
         # Empty data is unknown; observed contradictory data still blocks it.
         partial_claim = all(e.get("coverage_expectation") == "partial" for e in (review, independent))
@@ -168,7 +170,7 @@ def finalize_relationships(candidates, *, cross_source=False):
             and not d.get('missing_evidence') and str(d.get('reason', '')).strip()
             for d in (review, next((e for e in reversed(evidence) if e.get('kind') == 'independent_review'), {})))
         partial = partial or semantic_partial
-        contradiction = samples > 0 and coverage < .98 and not (semantic_partial or (partial and coverage > 0))
+        contradiction = samples > 0 and coverage < MIN_REFERENCE_COVERAGE and not (semantic_partial or (partial and coverage > 0))
         documented_path = documented and not contradiction
         semantic_structure = any(e.get("kind") == "raw_schema_context" and e.get("source_description", "").strip() and e.get("target_description", "").strip() for e in evidence) or any(e.get("kind") in {"entity_key_name", "matching_identifier_definition"} for e in evidence) or (
             any(e.get("kind") == "same_name" for e in evidence)
@@ -196,7 +198,7 @@ def finalize_relationships(candidates, *, cross_source=False):
             reasons.append("value_verification_missing")
         elif not sufficient and not non_data_path:
             reasons.append("insufficient_distinct_samples")
-        elif coverage < (.99 if cross_source else .98) and not non_data_path:
+        elif coverage < MIN_REFERENCE_COVERAGE and not non_data_path:
             reasons.append("insufficient_value_coverage")
         if not review.get("supported"):
             reasons.append("semantic_evidence_insufficient")
@@ -216,7 +218,7 @@ def finalize_relationships(candidates, *, cross_source=False):
             candidate["evidence_grade"] = "strong"
         candidate["evidence"] = [e for e in evidence if e.get("kind") != "confirmation"]
         candidate["evidence"].append({"kind": "confirmation", "reasons": reasons,
-                                      "data_quality": "partial_reference_coverage" if semantic_partial and coverage < .98 else "not_applicable" if not profile else "sampled",
+                                      "data_quality": "partial_reference_coverage" if semantic_partial and coverage < MIN_REFERENCE_COVERAGE else "not_applicable" if not profile else "sampled",
                                       "proof_path": "documented_reference" if documented_path else "structural_semantic" if structural_path else "structural_reference" if any(e.get("kind") == "structural_acceptance" for e in evidence) and not contradiction else "verified_values" if data_path else "insufficient",
                                       "decision": candidate["status"]})
 

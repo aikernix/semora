@@ -1,4 +1,6 @@
 """Additional opinions are reserved for unresolved or contradictory evidence."""
+from .relationship_rules import MIN_REFERENCE_COVERAGE
+
 def review_reasons(candidate, decision):
     if decision.get('query_outcome') == 'exclude':
         return []
@@ -29,7 +31,7 @@ def review_reasons(candidate, decision):
             reasons.append('target_role_context_requires_review')
         if p.get('target_context_errors'):
             reasons.append('target_role_context_unavailable')
-        if p.get('source_nonnull_distinct_keys', 0) and p.get('directional_coverage', 0) < .98:
+        if p.get('source_nonnull_distinct_keys', 0) and p.get('directional_coverage', 0) < MIN_REFERENCE_COVERAGE:
             reasons.append('data_contradiction')
     contracts = [e for e in candidate['evidence'] if e.get('kind') == 'join_contract']
     if contracts and not contracts[-1].get('valid'):

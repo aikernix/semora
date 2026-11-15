@@ -6,7 +6,7 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.optimizer.scope import traverse_scope
 from semora_contracts import SQLArtifact
-from semora_contracts.database import SQL_BASELINE_ID, baseline_pagination
+from semora_contracts.database import SQL_BASELINE_ID, PRODUCTS, baseline_pagination
 from semora_contracts.sql_compat import apply_pagination
 from .datasources import datasource_service
 from .sql_errors import SQLIssue
@@ -14,7 +14,11 @@ from .sql_errors import SQLIssue
 
 def dialect_for(source_id):
     source = datasource_service.repository.get(source_id)
-    dialect = {"postgresql": "postgres", "postgres": "postgres", "mysql": "mysql"}.get(source.type)
+    dialect = PRODUCTS.get(source.type,{}).get("dialect") or ("postgres" if source.type=="postgres" else "")
+    if source.type == "vastbase":
+        detected = source.scan_result.get("connection", {}).get("detected_compatibility_mode", "")
+        if detected in {"postgres", "oracle", "mysql", "tsql"}:
+            dialect = detected
     if not dialect:
         capabilities = source.scan_result.get("capabilities", {})
         if capabilities.get("query") == "verified" and capabilities.get("sql_baseline") != SQL_BASELINE_ID:
@@ -165,6 +169,11 @@ def compile_step(step, ontology, results=None, *, template=False, row_limit=1000
         dialect = dialect_for(step.data_source_id)
         source_label = datasource_service.repository.get(step.data_source_id).name
     tree = readonly_tree(step.sql, allowed)
+    if step.engine == "source":
+        from .sql_column_refs import validate_physical_column_refs
+
+        validate_physical_column_refs(tree, [o for o in ontology.get("objects", [])
+            if (o.get("dataSourceId") or ontology.get("dataSourceId")) == step.data_source_id])
     validate_grouping(tree, ontology.get("objects", []))
     from .sql_grain import validate_join_grain
     validate_join_grain(tree, [o for o in ontology.get("objects", []) if step.engine == "source" and (o.get("dataSourceId") or ontology.get("dataSourceId")) == step.data_source_id], result_keys)

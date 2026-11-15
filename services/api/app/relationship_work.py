@@ -94,16 +94,17 @@ class RelationshipWork:
                     WHERE job_id=%s AND input_hash=%s AND normalized_keyword=ANY(%s)''',
                     (self.job_id,self.input_hash,[normalize_keyword(k) for k in remove_keywords]))
 
-    def fail(self, kind, key, code):
+    def fail(self, kind, key, code, *, details=None):
+        payload={'error':code,**({'diagnostic':details} if details else {})}
         if not self.database:
-            self.local[kind + ':' + key] = {'status': 'failed', 'payload': {'error': code}}
+            self.local[kind + ':' + key] = {'status': 'failed', 'payload': payload}
             self.save()
             return
         with self.repository._connect() as connection:
             connection.execute('''UPDATE semora_meta.relationship_analysis_work
                 SET status='failed',payload=%s::jsonb,lease_until=NULL,updated_at=now()
                 WHERE job_id=%s AND input_hash=%s AND kind=%s AND work_key=%s AND owner=%s AND status='running' ''',
-                (json.dumps({'error':code}),self.job_id,self.input_hash,kind,key,self.owner))
+                (json.dumps(payload,ensure_ascii=False),self.job_id,self.input_hash,kind,key,self.owner))
 
     def keywords(self):
         if not self.database:
@@ -113,6 +114,20 @@ class RelationshipWork:
                 WHERE job_id=%s AND input_hash=%s ORDER BY normalized_keyword''',
                 (self.job_id,self.input_hash)).fetchall()
         return [r[0] for r in rows]
+
+    def retry_completed(self, kind, key):
+        """Reopen only explicitly incomplete cached work, never invalidate sibling requests."""
+        if not self.database:
+            record=self.get(kind,key)
+            if record and record['status']=='completed':
+                record['status']='failed'
+                self.save()
+            return
+        with self.repository._connect() as connection:
+            connection.execute('''UPDATE semora_meta.relationship_analysis_work
+                SET status='failed',lease_until=NULL,updated_at=now()
+                WHERE job_id=%s AND input_hash=%s AND kind=%s AND work_key=%s AND status='completed' ''',
+                (self.job_id,self.input_hash,kind,key))
 
     def cleanup(self):
         if not self.database:

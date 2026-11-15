@@ -109,3 +109,35 @@ def test_compile_repair_does_not_expose_stale_target_as_current(monkeypatch):
     # The replacement is compiled from the new baseline, never the old artifact.
     artifact = SQLExecution(w, run, {"dataSourceId": "source", "objects": [{"table": "items"}]}, {}).artifact(run.plan.sql_program.steps[0])
     assert artifact.semantic_sql == "SELECT id FROM items"
+
+
+def test_compile_rejects_internal_column_identifier_before_database_call(sources):
+    sources['objects'][0]['properties'].append({'name':'logical_key','column':'id'})
+    with pytest.raises(SQLIssue, match='对应column为id') as caught:
+        compile_step(step(sql='SELECT i.logical_key FROM items i'), sources)
+    assert caught.value.stage=='column_mapping'
+
+
+def test_step_repair_must_fix_physical_mapping_before_accepting_response(sources):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from semora_contracts import QueryRun
+    from app.sql_authoring import structured, StepRepair
+
+    bad='SELECT i.logical_key FROM items i'
+    good='SELECT i.id FROM items i'
+    model=SimpleNamespace(complete_json=AsyncMock(side_effect=[
+        {'sql':bad, 'change_summary':'保持原查询'},
+        {'sql':good, 'change_summary':'使用物理列映射'},
+    ]))
+    payload={'data_sources':[{'id':'a'}], 'current_step':'q',
+        'materials':{'objects':[{'object':{'name':'item','table':'items','dataSourceId':'a',
+            'properties':[{'name':'logical_key','column':'id'}]}}]},
+        'program':{'summary':'查询编号','steps':[{'name':'q','purpose':'查询编号',
+            'data_source_id':'a','sql':bad,'output_columns':['id']}]}}
+    result=asyncio.run(structured(SimpleNamespace(model=model),QueryRun(session_id='s',question='查询编号'),
+        REPAIR,payload,StepRepair))
+    assert result.sql==good and model.complete_json.await_count==2
+    correction=json.loads(model.complete_json.await_args.args[1])
+    assert '对应column为id' in correction['contract_error']
+    assert correction['invalid_response']['sql']==bad

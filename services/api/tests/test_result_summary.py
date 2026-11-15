@@ -77,6 +77,34 @@ def test_no_rows_skip_model_but_zero_count_row_is_analyzed():
     workflow.model.complete_json.assert_awaited_once()
 
 
+@pytest.mark.parametrize("count", [100, 101, 1000])
+def test_summary_row_limit_keeps_results_and_skips_only_above_100(count):
+    workflow, run, events = setup_case([[i] for i in range(count)])
+    rows = [list(row) for row in run.result.rows]
+    text = asyncio.run(summarize_result(workflow, run))
+    assert run.result.rows == rows and run.result.row_count == count
+    if count > 100:
+        assert text == ""
+        workflow.model.complete_json.assert_not_awaited()
+        assert [event for event, _ in events] == ["result.summary.skipped"]
+    else:
+        assert text
+        workflow.model.complete_json.assert_awaited_once()
+
+
+def test_skipped_summary_still_completes_query_without_changing_rows(monkeypatch):
+    from test_sql_native import native_harness
+    workflow, session, _, _, model, _ = native_harness(monkeypatch)
+    # Delivery consumes the final result, independent of SQL engine or UI pagination.
+    run = QueryRun(session_id=session.id, question="列出对象", result=ExecutionResult(
+        columns=["id"], rows=[[i] for i in range(101)], row_count=101, duration_ms=1))
+    workflow.store.runs[run.id] = run
+    asyncio.run(workflow._deliver_sql_node({"run_id": run.id}))
+    assert run.status == RunStatus.COMPLETED
+    assert len(run.result.rows) == 101 and run.answer == ""
+    model.complete_json.assert_not_awaited()
+
+
 def test_large_results_are_bounded_and_scope_limitations_are_explicit():
     workflow, run, _ = setup_case()
     run.question = "需" * 8000

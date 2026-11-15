@@ -3,11 +3,15 @@ import { computed, ref, watch } from 'vue'
 import type { QueryRun, QueryConfigurationGap } from '../../api'
 import { analysisOutcomes } from '../../analysisTimeline'
 
-const props = defineProps<{ visible: boolean; run: QueryRun; gaps: QueryConfigurationGap[] }>()
+const props = defineProps<{ visible: boolean; run: QueryRun; gaps: QueryConfigurationGap[]; formatText?: (value:string)=>string }>()
 const emit = defineEmits<{ 'update:visible': [value: boolean] }>()
 const tab = ref('process')
 watch(() => props.run.id, () => { tab.value = 'process' })
-const outcomes = computed(() => analysisOutcomes(props.run.events || []))
+const readable=(value:string)=>props.formatText?.(value)||value
+const outcomes = computed(() => analysisOutcomes(props.run.events || []).map(item=>({...item,
+  summary:readable(item.summary),details:item.details.map(readable),changes:item.changes?.map(change=>({...change,
+    before:typeof change.before==='string'?readable(change.before):change.before,
+    after:typeof change.after==='string'?readable(change.after):change.after}))})))
 const sqlSteps = computed<Array<{ name: string; purpose: string; sql: string; artifact: any; inputs: any[]; parameters?: Record<string, unknown> }>>(() => {
   const steps = props.run.plan?.sql_program?.steps
   if (steps?.length) return steps.map((step: any) => ({ ...step, artifact: props.run.source_artifacts?.[step.name] || (steps.length === 1 ? props.run.sql : null) }))
@@ -25,13 +29,13 @@ function stepStatus(name: string, artifact: any) {
 
 <template>
   <t-drawer :visible="visible" header="执行记录" :footer="false" size="min(680px, 94vw)" :close-on-overlay-click="true" @close="emit('update:visible', false)">
-    <div class="record-context"><span>本次任务 {{ run.id.slice(0, 8) }}</span><span v-if="run.ontology">本体 {{ run.ontology.version }}</span></div>
+    <div class="record-context"><span>本次查询</span></div>
     <nav class="record-tabs" aria-label="执行记录内容">
       <button v-for="item in [{ key: 'process', label: '执行过程' }, { key: 'sql', label: '查询语句' }, { key: 'sources', label: '资料与口径' }]" :key="item.key" :aria-pressed="tab === item.key" :class="{ selected: tab === item.key }" @click="tab = item.key">{{ item.label }}</button>
     </nav>
     <section v-if="tab === 'process'" class="record-pane">
-      <article v-for="(gap, index) in gaps" :key="index" class="record-error"><strong>{{ gap.summary }}</strong><p>{{ gap.resolution }}</p><small>对象：{{ gap.objects.join('、') }} · 字段：{{ gap.field_refs.join('、') }}</small></article>
-      <div v-if="run.error" class="record-error"><strong>本次未完成原因</strong><p>{{ run.error }}</p></div>
+      <article v-for="(gap, index) in gaps" :key="index" class="record-error"><strong>{{ readable(gap.summary) }}</strong><p>{{ readable(gap.resolution) }}</p><small>表：{{ gap.objects.map(readable).join('、') }} · 字段：{{ gap.field_refs.map(readable).join('、') }}</small></article>
+      <div v-if="run.error" class="record-error"><strong>本次未完成原因</strong><p>{{ readable(run.error) }}</p></div>
       <ol v-if="outcomes.length" class="record-timeline"><li v-for="item in outcomes" :key="item.key"><span class="record-node"></span><div><time class="record-caption">{{ new Date(item.created_at).toLocaleTimeString() }}</time><br/><strong>{{ item.title }}</strong><p>{{ item.summary }}</p><details v-if="item.details.length || item.changes?.length"><summary>查看依据与变化</summary><ul><li v-for="(detail, index) in item.details" :key="index">{{ detail }}</li></ul><div v-for="change in item.changes" :key="change.path"><strong>{{ change.path }}</strong><p>修改前：{{ change.before }}</p><p>修改后：{{ change.after }}</p></div></details></div></li></ol>
       <p v-else class="record-empty">尚未形成新的执行产出。</p>
       <details class="record-secondary"><summary>阶段与时间</summary><ol><li v-for="(event, index) in run.events.filter((event, i, all) => i === 0 || event.status !== all[i - 1].status)" :key="index"><time>{{ new Date(event.created_at).toLocaleString() }}</time> · {{ event.status }}</li></ol></details>

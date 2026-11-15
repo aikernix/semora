@@ -1,19 +1,20 @@
 """Lossless metadata supplements and a common snapshot envelope."""
 from collections import defaultdict
 import psycopg
-from . import mysql_adapter, scan_control
+from . import mysql_adapter, scan_control, adapter_registry
 from .timeouts import scan_timeout_ms
 
 def supplement_native(result, dsn, kind):
     tables = {(t["schema"],t["name"]): t for t in result.get("tables", [])}
     gaps = result.setdefault("permission_gaps", [])
-    factory = (lambda: mysql_adapter.connect(dsn,scan_timeout_ms())) if kind == "mysql" else (lambda: psycopg.connect(dsn,connect_timeout=5))
+    protocol = adapter_registry.protocol(kind)
+    factory = (lambda: mysql_adapter.connect(dsn,scan_timeout_ms())) if protocol=="mysql" else (lambda: psycopg.connect(dsn,connect_timeout=5))
     try:
         with scan_control.track(factory()) as connection:
             with connection.cursor() as cur:
-                if kind == "mysql": mysql_adapter.begin_readonly(connection,scan_timeout_ms())
+                if protocol=="mysql": mysql_adapter.begin_readonly(connection,scan_timeout_ms())
                 else: cur.execute("SET TRANSACTION READ ONLY");cur.execute("SELECT set_config('statement_timeout', %s, true)",(str(scan_timeout_ms()),))
-                if kind == "postgresql":
+                if protocol=="postgres":
                     cur.execute("""SELECT n.nspname,c.relname,c.relkind,obj_description(c.oid),a.attname,
                         format_type(a.atttypid,a.atttypmod),col_description(c.oid,a.attnum)
                         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -60,7 +61,7 @@ def supplement_native(result, dsn, kind):
                         fks.append({**entry,"source_table":f"{schema}.{name}","origin":"declared"})
                     elif ctype in {"p","u"}: t["primary_keys" if ctype=="p" else "unique_constraints"].append(entry)
                 result["foreign_keys"]=fks
-                if kind == "postgresql":
+                if protocol=="postgres":
                     cur.execute("""SELECT n.nspname,c.relname,ci.relname,i.indisunique,
                         array_agg(a.attname ORDER BY k.ord)
                         FROM pg_index i JOIN pg_class c ON c.oid=i.indrelid

@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import httpx
 import psycopg
-
+from semora_contracts.database import PRODUCTS, native_protocol
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -32,7 +32,7 @@ class DataSourceRecord:
     def public(self) -> dict[str, Any]:
         from semora_contracts.database import SQL_BASELINE_ID
         capabilities=dict(self.scan_result.get("capabilities",{}))
-        if self.type not in {"mysql","postgresql"} and capabilities.get("sql_baseline")!=SQL_BASELINE_ID:
+        if not native_protocol(self.type) and capabilities.get("sql_baseline")!=SQL_BASELINE_ID:
             capabilities["query"]="pending"
         return {
             "id": self.id,
@@ -299,7 +299,7 @@ class DataSourceRepository:
             result = {**result, "probes": probes, "capabilities": {**result.get("capabilities", {}), **probes}}
         item.status = "healthy" if result.get("read_only") else "unsafe"
         item.access = "read_only" if result.get("read_only") else "write_capable"
-        if item.type not in {"mysql","postgresql"} and not result.get("read_only"):
+        if not native_protocol(item.type) and not result.get("read_only"):
             item.status="scan_only"
             item.access="scan_only"
         item.scan_result = {**item.scan_result, "connection": {
@@ -310,7 +310,7 @@ class DataSourceRepository:
             capabilities.update({k:v for k,v in result["capabilities"].items() if v!="pending" or k not in capabilities})
         else:
             capabilities.setdefault("query","partial" if result.get("read_only") else "pending")
-            dialect={"mysql":"mysql","postgresql":"postgres"}.get(item.type)
+            dialect=PRODUCTS.get(item.type,{}).get("dialect")
             if dialect:capabilities["dialect"]=dialect
         if not result.get("read_only"):capabilities["query"]="pending"
         item.scan_result["capabilities"]=capabilities
@@ -332,7 +332,7 @@ class DataSourceRepository:
         item.objects = len(result.get("tables", []))
         item.last_scan_at = utc_now()
         from .mdl_export import merge_snapshot
-        if item.type in {"mysql","postgresql"} and item.scan_result.get("capabilities",{}).get("query")=="verified":
+        if native_protocol(item.type) and item.scan_result.get("capabilities",{}).get("query")=="verified":
             result.setdefault("capabilities",{})["query"]="verified"
         result = merge_snapshot(item.scan_result, result, infer_relationships=False)
         result.update(reusable)

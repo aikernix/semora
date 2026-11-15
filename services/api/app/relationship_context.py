@@ -34,14 +34,14 @@ def request_size(system, payload):
                         "response_format": {"type": "json_object"}, "temperature": .3}).encode()) + 1024
 
 
-async def complete(model, system, payload):
+async def complete(model, system, payload, *, trace_context=None):
     estimated = request_size(system, payload)
     if estimated > REQUEST_LIMIT:
         raise ValueError("relationship_request_exceeds_64000_bytes")
     marker = uuid4().hex[:12]
     logger = logging.getLogger("semora.model")
-    metrics = {"event": "relationship.model.started", "request_id": marker,
-               "estimated_request_bytes": estimated, "table_count": len(payload.get("tables", [])),
+    metrics = {**(trace_context or {}),"event": "relationship.model.started", "request_id": marker,
+               "estimated_request_bytes": estimated, "table_count": len(payload.get("tables") or payload.get('source_a',{}).get('tables',[])+payload.get('source_b',{}).get('tables',[])),
                "candidate_count": len(payload.get("candidates", []))}
     logger.info(encoded(metrics))
     started = time.monotonic()

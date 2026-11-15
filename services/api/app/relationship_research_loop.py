@@ -121,6 +121,8 @@ async def run(candidates, packet_for, fetch, model, persist, progress):
                         response = None
                         try:
                             response = await complete(model, request_prompt, payload)
+                            from .relationship_research import normalize_research_response
+                            response = normalize_research_response(response)
                             from .relationship_contracts import (ResearchOutput, CompactResearchOutput, DataResearchOutput,
                                                                  Decision, CompactDecision, DataCompactDecision)
                             compact = isinstance(response, dict) and any('outcome' in d for d in response.get('decisions',[]) if isinstance(d,dict))

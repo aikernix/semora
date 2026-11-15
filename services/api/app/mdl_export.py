@@ -181,7 +181,7 @@ def build_mdl(snapshot, product):
             while nav in existing:nav+="_nav"
             model_by_name[origin]["columns"].append({"name":nav,"type":target_model,"relationship":"r_"+rid})
     mdl={"catalog":"semora","schema":"semantic","models":models,"relationships":sorted(relationships,key=lambda r:r["name"]),"views":[]}
-    target={"postgresql":"POSTGRES","mysql":"MYSQL","oracle":"ORACLE","sqlserver":"MSSQL"}.get(product)
+    target={"postgresql":"POSTGRES","vastbase":"POSTGRES","mysql":"MYSQL","goldendb":"MYSQL","oracle":"ORACLE","sqlserver":"MSSQL"}.get(product)
     if target:mdl["dataSource"]=target
     else:report["connector_status"]="no_native_connector_asserted"
     report["source_product"]=product

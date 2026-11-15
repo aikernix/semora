@@ -71,6 +71,9 @@ class OntologyCoreClient:
     async def save_configuration(self, domain: str, value: dict[str, Any]) -> dict[str, Any]:
         return await self._request("PUT", f"/api/v1/ontology/configurations/{domain}", json=value)
 
+    async def unbind_source(self, domain: str, source_id: str) -> dict[str, Any]:
+        return self._normalize_collections(await self._request('DELETE',f'/api/v1/ontology/configurations/{domain}/sources/{source_id}'))
+
     async def update_source_package(self, value: dict[str, Any]) -> dict[str, Any]:
         return await self._request('PUT','/api/v1/ontology/source-packages',json=value)
 

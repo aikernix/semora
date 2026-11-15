@@ -147,6 +147,28 @@ def test_relation_review_disable_enable_and_manual_edit(monkeypatch):
     refused=client.post('/api/v1/datasources/source/relationships/candidate-2/decision',json={'action':'reject'})
     assert refused.status_code==200 and refused.json()['status']=='disabled'
     assert modeling_repository.memory_candidates['candidate-2']['reviewed_by']=='data-steward'
+    pending={**candidate,'id':'editable-pending','status':'unresolved','research_pending':True}
+    modeling_repository.replace_candidates([pending],schema_hash,schema_hash)
+    before=len(modeling_repository.get_package('source')['payload']['relations'])
+    edited_pending=client.put('/api/v1/datasources/source/relationships/editable-pending',json=body)
+    assert edited_pending.status_code==200,edited_pending.text
+    assert edited_pending.json()['status']=='accepted'
+    assert modeling_repository.memory_candidates['editable-pending']['evidence_grade']=='manual'
+    assert modeling_repository.memory_candidates['editable-pending']['research_pending'] is False
+    assert len(modeling_repository.get_package('source')['payload']['relations'])==before+1
+    unknown={**candidate,'id':'unknown-pending','status':'pending','cardinality':'unknown'}
+    modeling_repository.replace_candidates([unknown],schema_hash,schema_hash)
+    writes=len(ontology.published)
+    blocked=client.post('/api/v1/datasources/source/relationships/unknown-pending/decision',json={'action':'approve'})
+    assert blocked.status_code==409
+    assert modeling_repository.memory_candidates['unknown-pending']['status']=='pending'
+    assert len(ontology.published)==writes
+    assert client.put('/api/v1/datasources/source/relationships/unknown-pending',json={**body,'cardinality':'unknown'}).status_code==422
+    rejected_unknown=client.post('/api/v1/datasources/source/relationships/unknown-pending/decision',json={'action':'reject'})
+    assert rejected_unknown.status_code==200 and rejected_unknown.json()['status']=='disabled'
+    assert client.post('/api/v1/datasources/source/relationships/unknown-pending/decision',json={'action':'enable'}).status_code==409
+    fixed=client.put('/api/v1/datasources/source/relationships/unknown-pending',json={**body,'cardinality':'N:1'})
+    assert fixed.status_code==200 and fixed.json()['status']=='accepted'
 
 
 def test_successful_candidate_replacement_prunes_only_stale_automatic_records():

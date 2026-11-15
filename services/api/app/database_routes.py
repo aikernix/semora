@@ -11,7 +11,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from semora_contracts.database import PRODUCTS
+from semora_contracts.database import PRODUCTS, native_protocol
 from .datasources import datasource_service
 from .mdl_export import build_mdl, merge_snapshot, column_type
 from .datasource_table_storage import tables_digest
@@ -64,7 +64,7 @@ async def update_driver(driver_id: str,body: dict):
     result=await executor_request("PUT",f"database-drivers/{driver_id}",json=body)
     # Connections referencing this immutable bundle need fresh validation.
     for item in datasource_service.repository.list():
-        if item.type not in {"mysql","postgresql"}:
+        if not native_protocol(item.type):
             item.scan_result.pop("capability_cache", None)
             item.scan_result.get("connection", {}).pop("probes", None)
             item.scan_result.pop("capabilities",None);item.scan_result["scan_stale"]=True;item.status="unverified"
@@ -234,6 +234,8 @@ def relations(
 
 
 def _validated_manual_candidate(identifier: str, body: RelationshipEdit):
+    if body.cardinality=='unknown':
+        raise HTTPException(422,'请先选择明确的关联基数，再保存生效')
     item = source(identifier)
     tables = {table.get("id"): table for table in item.scan_result.get("tables") or []}
     left, right = tables.get(body.source_table_id), tables.get(body.target_table_id)
@@ -285,15 +287,27 @@ async def _write_manual_relation(identifier, body, candidate_id=None):
         except KeyError:
             records = []
         previous = next((r for r in records if r["id"] == candidate_id), None)
+        if candidate_id and previous is None:
+            previous=next((r for r in modeling_service.repository.list_candidates(identifier,'single_source')
+                           if r['id']==candidate_id and _relationship_status(r) in {'pending','disabled'}),None)
         if candidate_id and not previous:
             raise HTTPException(404, "关联关系不存在")
+        from .query_relationships import validated_guards
+        table_map={t['id']:t for t in source(identifier).scan_result['tables']}
+        guard_record={'source_datasource_id':identifier,'target_datasource_id':identifier,
+                      'source_table_id':body.source_table_id,'target_table_id':body.target_table_id}
+        guards=validated_guards(guard_record,(previous or {}).get('condition_template',{}).get('guards',[]),
+                                {identifier:table_map})
+        if guards is None:
+            raise HTTPException(422,'编辑后的关联表与原附加条件不兼容')
         record = {**(previous or {}), "id": candidate_id or uuid4().hex,
             "scope": "single_source", "source_datasource_id": identifier, "target_datasource_id": identifier,
             "source_table_id": body.source_table_id, "target_table_id": body.target_table_id,
             "source_columns": [p["source"] for p in pairs], "target_columns": [p["target"] for p in pairs],
             "key_pairs": pairs, "cardinality": body.cardinality, "status": "accepted",
             "evidence_grade": "manual", "reviewed_by": "data-steward",
-            "condition_template": {"operator": "and_equals", "guards": (previous or {}).get("condition_template", {}).get("guards", [])},
+            "research_pending": False, "review_required": False, "review_reasons": [],
+            "condition_template": {"operator": "and_equals", "guards": guards},
             "evidence": [{"kind": "manual", "reason": "用户配置"}]}
         await _save_source_relations(identifier, [r for r in records if r["id"] != candidate_id] + [record])
         schema_hash = tables_digest(source(identifier).scan_result.get("tables") or [])
@@ -324,6 +338,8 @@ async def _decide_relationship(identifier: str, candidate_id: str, action: str):
         expected = {"approve": "pending", "reject": "pending", "disable": "accepted", "enable": "disabled"}[action]
         if _relationship_status(previous) != expected:
             raise HTTPException(409, "当前关系状态不允许此操作")
+        if action in {'approve','enable'} and previous.get('cardinality') not in {'1:1','1:N','N:1','N:N'}:
+            raise HTTPException(409,'关联基数未确定，请先编辑并选择明确基数后保存生效')
         schema_hash = tables_digest(item.scan_result.get("tables") or [])
         if previous.get("source_schema_hash") not in {None, schema_hash} or previous.get("target_schema_hash") not in {None, schema_hash}:
             raise HTTPException(409, "结构已变化，请先更新关联关系")
@@ -570,9 +586,79 @@ async def bind_source_package(domain: str,identifier: str):
     return await ontology_service.save_configuration(domain,configuration)
 
 
+@router.delete('/ontology/configurations/{domain}/sources/{identifier}')
+async def unbind_source_package(domain:str,identifier:str):
+    if any(j.get('domain')==domain and identifier in {j.get('datasource_id'),j.get('peer_datasource_id')}
+           for j in modeling_service.repository.interrupted_jobs()):
+        raise HTTPException(409,'当前数据源正在进行跨源分析，请完成或取消后再解除绑定')
+    result=await ontology_service.unbind_source(domain,identifier)
+    modeling_service.repository.memory_candidates={key:value for key,value in modeling_service.repository.memory_candidates.items()
+        if not (value.get('scope')=='cross_source' and value.get('domain')==domain
+                and identifier in {value.get('source_datasource_id'),value.get('target_datasource_id')})}
+    return result
+
+
+@router.get('/ontology/configurations/{domain}/relationships')
+async def domain_relationships(domain:str):
+    from .domain_relationships import review_rows
+    configuration=await ontology_service.get_configuration(domain)
+    rows=review_rows(configuration,domain,modeling_service)
+    return clean_relations({'items':rows,'counts':{status:sum(r['status']==status for r in rows) for status in ('accepted','pending','disabled')}})
+
+
+def ensure_domain_idle(domain):
+    if any(j.get('domain')==domain for j in modeling_service.repository.interrupted_jobs()):
+        raise HTTPException(409,'本业务域正在分析关联关系，请完成后再编辑')
+
+
+@router.put('/ontology/configurations/{domain}/relationships/{identifier}')
+async def edit_domain_relationship(domain:str,identifier:str,body:dict):
+    from .domain_relationships import review_rows,save_domain_relation
+    ensure_domain_idle(domain)
+    configuration=await ontology_service.get_configuration(domain)
+    if not any(r['id']==identifier for r in review_rows(configuration,domain,modeling_service)):
+        raise HTTPException(404,'跨库关联关系不存在')
+    return await save_domain_relation(domain,identifier,body,configuration,modeling_service,ontology_service)
+
+
+@router.post('/ontology/configurations/{domain}/relationships/{identifier}/decision')
+async def decide_domain_relationship(domain:str,identifier:str,body:RelationshipDecision):
+    from .domain_relationships import review_rows,records_for_domain,save_domain_relation,manual_record,KNOWN_CARDINALITIES
+    ensure_domain_idle(domain)
+    configuration=await ontology_service.get_configuration(domain)
+    row=next((r for r in review_rows(configuration,domain,modeling_service) if r['id']==identifier),None)
+    if row is None:raise HTTPException(404,'跨库关联关系不存在')
+    expected={'approve':'pending','reject':'pending','disable':'accepted','enable':'disabled'}[body.action]
+    if row['status']!=expected:raise HTTPException(409,'当前关系状态不允许此操作')
+    if body.action in {'approve','enable'}:
+        if row['relation'].get('cardinality') not in KNOWN_CARDINALITIES:
+            raise HTTPException(409,'关联基数未确定，请先编辑并选择明确基数')
+        return await save_domain_relation(domain,identifier,row['relation'],configuration,modeling_service,ontology_service)
+    record=records_for_domain(configuration,domain,modeling_service).get(identifier)
+    if record is None:record=manual_record(row['relation'],configuration,domain,modeling_service,identifier)
+    configuration['relations']=[r for r in configuration.get('relations',[]) if r.get('metadata',{}).get('candidateId')!=identifier
+                                and r['name']!=row['relation']['name']]
+    result=await ontology_service.save_configuration(domain,configuration)
+    record={**record,'status':'disabled','reviewed_by':'data-steward','research_pending':False,
+            'review_note':'人工拒绝' if body.action=='reject' else '人工停用'}
+    hashes=[tables_digest(modeling_service.datasources.repository.get(record[side+'_datasource_id']).scan_result['tables']) for side in ('source','target')]
+    modeling_service.repository.replace_candidates([record],*hashes)
+    return result
+
+
 class CrossSourceInput(BaseModel):
     left_source_id: str=Field(min_length=1,max_length=64)
     right_source_id: str=Field(min_length=1,max_length=64)
+
+
+@router.get('/ontology/configurations/{domain}/cross-source-analysis')
+async def list_cross_source_analysis(domain:str):
+    configuration=await ontology_service.get_configuration(domain)
+    bound={ref['dataSourceId'] for ref in configuration.get('sourcePackageRefs',[])}
+    bound.update(obj.get('dataSourceId') or configuration.get('dataSourceId') for obj in configuration.get('objects',[]))
+    return clean_relations({'items':[{k:v for k,v in job.items() if k!='candidates'}
+        for job in modeling_service.repository.domain_cross_jobs(domain)
+        if job['datasource_id'] in bound and job.get('peer_datasource_id') in bound]})
 
 
 @router.post("/ontology/configurations/{domain}/cross-source-analysis",status_code=202)
@@ -599,3 +685,13 @@ async def cross_source_status(domain: str,job_id: str):
             and {r["metadata"]["relationshipRecord"]["source_datasource_id"], r["metadata"]["relationshipRecord"]["target_datasource_id"]}
             == {job["datasource_id"], job["peer_datasource_id"]}]
     return clean_relations({**job, "details": {k: v for k, v in job.get("details", {}).items() if k not in {"query_table_roles", "pending"}}})
+
+
+@router.post('/ontology/configurations/{domain}/cross-source-analysis/{job_id}/cancel')
+async def cancel_cross_source_analysis(domain:str,job_id:str):
+    try:
+        job=modeling_service.repository.get_job(job_id)
+        if job.get('domain')!=domain or job.get('kind')!='cross_source':raise KeyError(job_id)
+        return clean_relations(await modeling_service.cancel(job['datasource_id'],job_id,kind='cross_source'))
+    except KeyError:raise HTTPException(404,'跨源分析任务不存在') from None
+    except ValueError as exc:raise HTTPException(409,str(exc)) from exc

@@ -7,6 +7,7 @@ import { businessFailure, resultDescription, terminalStatus } from '../../queryP
 import { displayValue } from '../../analysisTimeline'
 import TaskStatus from './TaskStatus.vue'
 import ExecutionRecord from './ExecutionRecord.vue'
+import { useOntologyNames } from '../../composables/useOntologyNames'
 
 const props = defineProps<{
   run: QueryRun; title: string; domainName: string; loading: boolean; originalRequest?: string
@@ -16,6 +17,7 @@ const emit = defineEmits<{
   'update:answers': [value: Record<string, string>]; confirm: []; retry: []; cancel: []
 }>()
 const recordOpen = ref(false)
+const readable=useOntologyNames(computed(()=>props.run.domain))
 const resultPage = ref(1)
 const resultPageSize = ref(10)
 const resultTable = ref<HTMLDivElement | null>(null)
@@ -39,10 +41,11 @@ const gaps = computed(() => {
   const ids = new Set(questions.value.map(q => q.id))
   return (props.run.query_rehearsal?.technical_gaps || props.run.requirement_draft?.technical_gaps || [])
     .filter(g => (g.depends_on || []).every(c => ids.has(c.question_id) && c.values.includes(props.answers[c.question_id])))
+    .map(g=>({...g,summary:readable(g.summary),resolution:readable(g.resolution),objects:g.objects.map(readable),field_refs:g.field_refs.map(readable)}))
 })
 const ready = computed(() => !gaps.value.length && questions.value.filter(q => q.blocking).every(q => !!props.answers[q.id]?.trim()))
 const configurationOnly = computed(() => !questions.value.length && !!gaps.value.length)
-const basis = computed(() => props.run.requirement?.summary || props.run.requirement_draft?.summary || props.run.query_rehearsal?.summary || '')
+const basis = computed(() => readable(props.run.requirement?.summary || props.run.requirement_draft?.summary || props.run.query_rehearsal?.summary || ''))
 const statisticsRules = computed(() => {
   const draft = props.run.requirement_draft
   const confirmed = props.run.requirement
@@ -51,7 +54,7 @@ const statisticsRules = computed(() => {
     ? [draft?.analysis_steps, props.run.query_rehearsal?.skeleton, confirmed?.analysis_steps]
     : [confirmed?.analysis_steps]
   const rules: unknown[] = candidates.find(items => Array.isArray(items) && items.some(item => typeof item === 'string' && item.trim())) || []
-  return [...new Set(rules.filter((item): item is string => typeof item === 'string').map(item => item.trim()).filter(Boolean))]
+  return [...new Set(rules.filter((item): item is string => typeof item === 'string').map(item => readable(item.trim())).filter(Boolean))]
 })
 const labels = computed(() => props.run.plan?.sql_program?.steps?.at(-1)?.output_labels || {})
 const explanation = computed(() => resultDescription(props.run))
@@ -132,7 +135,7 @@ function openRecord() { recordOpen.value = true }
         <p v-else class="block-placeholder">{{ run.result ? '本次没有额外的结果说明。' : '查询完成后展示结果说明。' }}</p>
       </section>
     </div>
-    <ExecutionRecord v-model:visible="recordOpen" :run="run" :gaps="gaps"/>
+    <ExecutionRecord v-model:visible="recordOpen" :run="run" :gaps="gaps" :format-text="readable"/>
   </div>
 </template>
 

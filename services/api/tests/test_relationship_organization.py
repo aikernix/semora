@@ -33,6 +33,20 @@ def retained(payload):
                        'reason':'整组适合一起分析'} for g in payload['groups']]}
 
 
+def test_organization_timeout_falls_back_to_complete_original_group(monkeypatch):
+    monkeypatch.setattr('app.relationship_organization.ORGANIZATION_GROUP_LIMIT',1)
+    class Model:
+        async def complete_json(self,system,user):
+            if json.loads(user)['phase']=='organization':raise TimeoutError('temporary timeout')
+            return {'relations':[]}
+    engine=prepared(source(3),Model())
+    organized=asyncio.run(engine.organize())
+    assert set(organized)=={tuple(sorted(engine.cards))}
+    assert not engine.incomplete_units()
+    assert asyncio.run(engine.discover())==[]
+    assert engine.scope['discovery_complete'] is True
+
+
 def test_split_large_group_drives_actual_comparisons_and_resumes_without_model_calls(monkeypatch):
     monkeypatch.setattr('app.relationship_organization.ORGANIZATION_GROUP_LIMIT',2)
     class Model:
@@ -107,7 +121,7 @@ def test_invalid_model_organization_is_discarded_after_retries_without_failing_s
             return {'groups':[{'table_ids':g['table_ids']+['missing-table'],
                                'reason':'包含编造表'}]}
     model=Model();engine=prepared(source(3),model)
-    assert asyncio.run(engine.organize())=={}
+    assert list(asyncio.run(engine.organize()))==[tuple(sorted(engine.cards))]
     assert model.calls==3
     assert engine.stage_result('organization')['mode']=='selected_groups'
     assert len(engine.scope['discarded_groups'])==1

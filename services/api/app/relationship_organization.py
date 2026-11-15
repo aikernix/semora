@@ -42,7 +42,7 @@ def salvage_organization(result, payload):
         try:
             OrganizationOutput.model_validate(result)
         except (ValidationError,TypeError,ValueError,AttributeError) as exc:
-            raise DiscoveryIncomplete('invalid_organization_response',{'validation':str(exc)[:400]}) from exc
+            raise DiscoveryIncomplete('invalid_organization_response',details={'validation':str(exc)[:400]}) from exc
         raise DiscoveryIncomplete('invalid_organization_response')
     valid=[]; discarded=[]
     for index,raw in enumerate(result['groups']):
@@ -89,7 +89,7 @@ class OrganizationMixin:
         """Organize only oversized groups; one original group is sent per request."""
         records=[]; pending=[]; skipped=0
         for ids,words in sorted(groups.items()):
-            group={'group_id':digest([ids,sorted(words)])[:ORGANIZATION_GROUP_ID_LENGTH],
+            group={'group_id':digest(['safe-organization-v2',ids,sorted(words)])[:ORGANIZATION_GROUP_ID_LENGTH],
                    'keywords':sorted(words),'table_ids':list(ids)}
             old=self.work.get('organized_group',group['group_id'])
             if old and old['status']=='completed':
@@ -109,8 +109,18 @@ class OrganizationMixin:
 
         async def organize(bundle):
             group=bundle[0]
-            result=await self.request('organization',ORGANIZATION_SYSTEM,
-                                      self.organization_payload(bundle),OrganizationOutput)
+            try:
+                result=await self.request('organization',ORGANIZATION_SYSTEM,
+                                          self.organization_payload(bundle),OrganizationOutput)
+            except Exception as exc:
+                if self.fatal_error(exc):raise
+                value=original_group(group,'整理请求失败，保留完整召回组继续分析')
+                value.update(deferred='organization_failed',failure={'error_type':type(exc).__name__,'reason':str(exc)[:500]})
+                self.log_request('relationship.organization.fallback',{'job_id':self.work.job_id,'group_id':group['group_id']},
+                    table_ids=group['table_ids'],**value['failure'])
+                if self.work.claim('organized_group',group['group_id']):self.work.finish('organized_group',group['group_id'],value)
+                records.append(value)
+                return value
             for output in result.get('groups',[]):
                 output['keywords']=sorted(group['keywords'])
             value=effective_group(result,group)

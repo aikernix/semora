@@ -13,6 +13,7 @@ from .run_state import revision
 
 
 SUMMARY_TIMEOUT_SECONDS = 20
+SUMMARY_MAX_ROWS = 100
 PACKET_MAX_BYTES = 32_000
 
 
@@ -87,6 +88,14 @@ def summary_packet(workflow, run):
 
 async def summarize_result(workflow, run):
     initial = revision(run)
+    if run.result.row_count > SUMMARY_MAX_ROWS:
+        if run.agent_memory.get("user_cancelled"):
+            raise TaskSupersededError("查询已取消，不生成结果说明")
+        workflow.emit(run, "result.summary.skipped", RunStatus.EXPLAINING,
+                      {"summary": "返回结果超过100条，跳过结果说明",
+                       "reason": "row_count_limit", "row_count": run.result.row_count,
+                       "limit": SUMMARY_MAX_ROWS}, "result_summarizer")
+        return ""
     fallback = basic_result_description(run.result)
     text, mode = fallback, "basic"
     if run.result.rows and workflow.model.configured:

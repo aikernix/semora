@@ -1,10 +1,4 @@
-"""Offline mapping-level acceptance; never calls a model, database, or publisher."""
-import argparse
-import json
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'services' / 'api'))
+"""Pure mapping comparison helpers for relationship regression tests."""
 from app.relationship_normalization import join_signature
 
 
@@ -56,12 +50,3 @@ def compare(reference, runs):
     return {'runs': results, 'mapping_differences': differences,
             'same_request_stable': all(not d['added'] and not d['removed'] for d in differences) if comparable else None,
             'note': 'Proposals are not approved relations. Unclassified extras are not automatically errors. Technical failures are not negative findings.'}
-
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--reference', required=True)
-    parser.add_argument('runs', nargs='+')
-    args = parser.parse_args()
-    print(json.dumps(compare(json.loads(Path(args.reference).read_text()),
-                             [json.loads(Path(p).read_text()) for p in args.runs]), ensure_ascii=False, indent=2))

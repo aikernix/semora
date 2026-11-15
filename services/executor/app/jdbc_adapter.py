@@ -32,15 +32,38 @@ def configuration(cfg):
     dialect = product.get("dialect", "")
     if cfg["type"] == "oceanbase":
         dialect = cfg.get("compatibility_mode", "")
+    if cfg["type"] == "vastbase":
+        dialect = cfg.get("compatibility_mode") or "postgres"
     if not driver.get("builtin"):
         dialect = driver.get("dialect", "")
     strategy = {"postgres": "postgres", "mysql": "mysql", "oracle": "oracle", "tsql": "sqlserver_permissions"}.get(dialect, "")
+    if cfg["type"] == "vastbase":
+        strategy = "postgres"  # Vastbase keeps the openGauss transaction boundary in every compatibility mode.
     if not driver.get("builtin"):
         strategy = driver.get("readonly_strategy", "")
     if driver.get("pagination") == "scan_only":
         strategy = ""
     driver={**driver, "effective_pagination":baseline_pagination(dialect,driver.get("pagination","baseline")), "sql_baseline":SQL_BASELINE_ID}
     return driver, dialect, strategy
+
+
+def record_detected_compatibility(cfg, connection, datasource_id=""):
+    detected = connection.get("detected_compatibility_mode", "")
+    if cfg["type"] != "vastbase" or detected not in {"postgres", "oracle", "mysql", "tsql"}:
+        return False
+    changed = cfg.get("compatibility_mode") != detected
+    expected = {"postgres": "postgresql", "oracle": "oracle", "mysql": "mysql", "tsql": "mssql"}[detected]
+    properties = dict(cfg.get("properties", {}))
+    if properties.get("db_compatibility") != expected:
+        properties["db_compatibility"] = expected
+        cfg["properties"] = properties
+        changed = True
+    if changed:
+        cfg["_validation"] = ""
+    cfg["compatibility_mode"] = detected
+    if changed and datasource_id:
+        connection_store.save(datasource_id, cfg)
+    return changed
 
 def jdbc_url(cfg):
     if cfg.get("jdbc_url"):
@@ -58,6 +81,8 @@ def jdbc_url(cfg):
         return f"jdbc:sqlserver://{host}:{port};databaseName={db};encrypt=true;trustServerCertificate=false"
     if kind == "oceanbase":
         return f"jdbc:oceanbase://{host}:{port}/{db}"
+    if kind == "vastbase":
+        return f"jdbc:vastbase://{host}:{port}/{db}"
     raise HTTPException(422, "请填写该厂商驱动要求的 JDBC 连接串")
 
 def bind_parameters(sql, parameters):
@@ -95,7 +120,7 @@ def validation_fingerprint(cfg, driver):
     clean={k:v for k,v in cfg.items() if k != "_validation"}
     return hashlib.sha256(json.dumps([clean,{k:v for k,v in driver.items() if k != "classpath"}],sort_keys=True).encode()).hexdigest()
 
-def run(cfg, operation, *, execution_id=None, timeout_ms=None, validating=False, **payload):
+def run(cfg, operation, *, execution_id=None, timeout_ms=None, validating=False, datasource_id="", **payload):
     from .timeouts import scan_timeout_ms, query_timeout_ms
     timeout_ms = timeout_ms if timeout_ms is not None else (scan_timeout_ms() if operation == "scan" else query_timeout_ms())
     driver, dialect, strategy = configuration(cfg)
@@ -147,6 +172,8 @@ def run(cfg, operation, *, execution_id=None, timeout_ms=None, validating=False,
             if isinstance(value.get("probes"), dict):
                 value["probes"] = {key: normalize_sql_probe(probe, dialect) for key, probe in value["probes"].items()}
             connection = value.get("connection", value)
+            if record_detected_compatibility(cfg, connection, datasource_id):
+                driver, dialect, strategy = configuration(cfg)
             connection["database"] = connection.get("database") or cfg.get("database", "")
             connection.update(dialect=dialect, compatibility_mode=cfg.get("compatibility_mode", ""), product_override=cfg.get("product_override", ""))
             if operation == "scan":
@@ -183,12 +210,15 @@ def cancel(execution_id):
 
 def validate(body, probe_keys=None):
     cfg=settings(body);driver,dialect,strategy=configuration(cfg)
+    if cfg["type"] == "vastbase" and not cfg.get("compatibility_mode"):
+        run(cfg,"test",timeout_ms=10000,datasource_id=body.datasource_id)
+        driver,dialect,strategy=configuration(cfg)
     if not dialect or not strategy:raise HTTPException(409,"请管理员配置方言和只读策略")
     from semora_contracts.sql_probes import probe_catalog
     catalog = probe_catalog(dialect, driver.get("effective_pagination", "baseline"))
     selected = set(catalog) if probe_keys is None else set(probe_keys)
     if not selected <= catalog.keys(): raise HTTPException(422, "未知探测项目")
-    inspected=run(cfg,"test",timeout_ms=90000,probe_capabilities=True,
+    inspected=run(cfg,"test",timeout_ms=90000,probe_capabilities=True,datasource_id=body.datasource_id,
                   probe_catalog={k: v for k, v in catalog.items() if k in selected})
     inspected.setdefault("probes", {})
     for key in selected:
@@ -199,7 +229,7 @@ def validate(body, probe_keys=None):
     import sqlglot
     sql=sqlglot.parse_one("SELECT 1 AS semora_probe LIMIT 1",read="postgres").sql(dialect=dialect)
     if dialect=="oracle":sql="SELECT 1 AS semora_probe FROM DUAL"+(" WHERE ROWNUM <= 1" if driver.get("effective_pagination")=="rownum" else " FETCH FIRST 1 ROWS ONLY")
-    result=run(cfg,"query",sql=sql,parameters=[],validating=True,timeout_ms=5000,max_rows=1,max_bytes=1024)
+    result=run(cfg,"query",sql=sql,parameters=[],validating=True,timeout_ms=5000,max_rows=1,max_bytes=1024,datasource_id=body.datasource_id)
     if result.get("row_count")!=1:raise HTTPException(409,"查询验证未返回预期结果")
     cfg["_validation"]=validation_fingerprint(cfg,driver)
     connection_store.save(body.datasource_id,cfg)

@@ -5,13 +5,15 @@ from . import mysql_adapter
 from semora_contracts.sql_probes import PROBE_CATALOG_VERSION, probe_catalog, probe_matches
 
 def probe_native(kind, dsn, keys=None):
-    if kind not in {"mysql","postgresql"}:
+    from . import adapter_registry
+    protocol = adapter_registry.protocol(kind)
+    if protocol not in {"mysql","postgres"}:
         raise ValueError("native capability probe requires an explicit adapter")
-    dialect = "mysql" if kind == "mysql" else "postgres"
+    dialect = "mysql" if protocol=="mysql" else "postgres"
     queries = probe_catalog(dialect)
     selected = set(queries) if keys is None else set(keys)
     if not selected <= queries.keys(): raise ValueError("unknown probe key")
-    factory=(lambda:mysql_adapter.connect(dsn,3000)) if kind=="mysql" else (lambda:psycopg.connect(dsn,connect_timeout=5))
+    factory=(lambda:mysql_adapter.connect(dsn,3000)) if protocol=="mysql" else (lambda:psycopg.connect(dsn,connect_timeout=5))
     probes={}
     with factory() as connection:
         for feature, spec in queries.items():
@@ -20,9 +22,9 @@ def probe_native(kind, dsn, keys=None):
                 probes[feature] = {"status": "unverified", "reason": "probe_conversion_unavailable"}
                 continue
             try:
-                if kind=="mysql":mysql_adapter.begin_readonly(connection,3000)
+                if protocol=="mysql":mysql_adapter.begin_readonly(connection,3000)
                 with connection.cursor() as cursor:
-                    if kind=="postgresql":
+                    if protocol=="postgres":
                         cursor.execute("SET TRANSACTION READ ONLY")
                         cursor.execute("SET LOCAL statement_timeout='3s'")
                     cursor.execute(spec["sql"])
@@ -33,6 +35,6 @@ def probe_native(kind, dsn, keys=None):
                 # Failure means unavailable, not proof of a missing SQL feature.
                 code=getattr(exc,"sqlstate",None)
                 if code is None and exc.args and isinstance(exc.args[0],int):code=exc.args[0]
-                probes[feature]=normalize_sql_probe({"status":"unavailable","code":code}, "mysql" if kind == "mysql" else "postgres")
+                probes[feature]=normalize_sql_probe({"status":"unavailable","code":code}, dialect)
             finally:connection.rollback()
     return {"sql_baseline":SQL_BASELINE_ID,**probes}

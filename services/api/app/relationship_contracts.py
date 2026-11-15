@@ -95,7 +95,7 @@ class ProposedRelation(Output):
     source_table_id:str
     target_table_id:str
     key_pairs:list[Pair]=Field(min_length=1)
-    reason:str=Field(min_length=1,max_length=60)
+    reason:str=Field(min_length=1)
     guards:list[Guard]=Field(default_factory=list)
 
 
@@ -103,8 +103,14 @@ class ProposalOutput(Output):
     relations:list[ProposedRelation]
 
 
+class AgentConclusion(Output):
+    relations:list[ProposedRelation]
+    checked_table_ids:list[str]
+    gaps:list[str]
+
+
 class EvidenceGap(Output):
-    reason:str=Field(min_length=1,max_length=120)
+    reason:str=Field(min_length=1)
     request:Literal['definition','profile']|None=None
 
 
@@ -112,7 +118,7 @@ class CompactDecision(Output):
     candidate_id:str
     outcome:Literal['usable','exclude','needs_evidence']
     kind:Literal['entity_reference','direct_record_reference','identity','lineage','shared_entity','unknown']
-    reason:str=Field(min_length=1,max_length=60)
+    reason:str=Field(min_length=1)
     code:ExclusionCode=''
     gaps:list[EvidenceGap]=Field(default_factory=list)
     # Omitted means unchanged. [] explicitly removes existing additional conditions.

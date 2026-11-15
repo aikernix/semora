@@ -59,6 +59,25 @@ def validate_logical_refs(plan, materials: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(errors))
 
 
+def validate_required_object_gaps(report, materials: dict[str, Any]) -> list[str]:
+    """Check structured necessity claims, without interpreting business keywords."""
+    objects, fields, _ = _catalog(materials)
+    required = {use.object for use in report.required_object_uses}
+    errors = [f"必需对象缺少已加载资料：{name}" for name in sorted(required - objects.keys())]
+    for gap in report.technical_gaps:
+        if gap.kind != "relation":
+            continue
+        endpoints = set(gap.objects)
+        if len(endpoints) < 2:
+            errors.append("关联缺口必须声明至少两个当前查询必需对象")
+        if endpoints - required:
+            errors.append("关联缺口涉及未证明必要性的候选对象：" + ", ".join(sorted(endpoints - required)))
+        for ref in gap.field_refs:
+            if ref not in fields or ref.rsplit(".", 1)[0] not in endpoints:
+                errors.append(f"关联缺口属性必须来自所声明对象的已有资料：{ref}")
+    return list(dict.fromkeys(errors))
+
+
 def _column_names(node, aliases):
     values = set()
     for col in node.find_all(exp.Column):

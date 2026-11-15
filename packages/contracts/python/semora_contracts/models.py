@@ -243,6 +243,12 @@ class LogicalQueryPlan(BaseModel):
     sequence: list[str] = Field(default_factory=list, max_length=12)
 
 
+class QueryObjectUse(BaseModel):
+    object: str = Field(min_length=1, description="当前查询必需对象的准确name；不是检索候选列表。")
+    requirement: str = Field(min_length=1, max_length=500, description="该对象承担的当前输出、筛选、统计、时间或连接路径要求；不能使用未来可能新增的需求。")
+    reason: str = Field(min_length=1, max_length=500, description="结合已有定义说明该对象为何不可省略；关键词相似或出现在资料中不构成必要性依据。")
+
+
 class QueryUnderstanding(BaseModel):
     summary: str = Field(min_length=1, max_length=1200, description="给业务用户看的需求理解：目标、范围及统计方式，不含数据库表列名、技术编码或SQL表达式。")
     target_state: Literal["known", "needs_direction"]
@@ -267,10 +273,15 @@ class QueryUnderstanding(BaseModel):
         max_length=16,
         description="现有资料无法唯一确定且会改变结果的业务选择。提供业务语言选项与自由补充；同义表达可直接理解，不重复询问已有确认。",
     )
+    required_object_uses: list[QueryObjectUse] = Field(
+        default_factory=list,
+        max_length=64,
+        description="先判断单对象能否满足当前需求，再列最小必要对象及各自用途。关联缺口涉及的对象必须在此有必要性依据；待确认分支只列该分支确实需要的对象。历史记录可为空。",
+    )
     technical_gaps: list[QueryConfigurationGap] = Field(
         default_factory=list,
         max_length=64,
-        description="有依据的关联、数据映射或执行障碍；不包含业务定义、指标口径或范围待确认。",
+        description="当前查询必需且有依据的关联、数据映射或执行障碍；候选对象间缺少关系、未来可能需要的联查及业务口径待确认均不属于当前配置缺口。",
     )
     logical_plan: LogicalQueryPlan | None = Field(
         default=None,

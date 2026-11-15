@@ -47,13 +47,13 @@ class ConnectionStore:
         dsn = os.getenv(secret_ref, "")
         if not dsn:
             return None
-        if datasource_type == "postgresql":
+        if datasource_type in {"postgresql", "vastbase"}:
             value = conninfo_to_dict(dsn)
             return dict(type=datasource_type, host=value.get("host", "localhost"),
                         port=int(value.get("port", 5432)), database=value.get("dbname", ""),
                         username=value.get("user", ""), password=value.get("password", ""),
                         _options={k: v for k, v in value.items() if k not in {"host", "port", "dbname", "user", "password"}})
-        if datasource_type != "mysql":
+        if datasource_type not in {"mysql", "goldendb"}:
             return None
         url = urlsplit(dsn)
         return dict(type=datasource_type, host=url.hostname or "", port=url.port or 3306,
@@ -104,13 +104,13 @@ class ConnectionStore:
 
     @staticmethod
     def dsn(value):
-        if value["type"] == "postgresql":
+        if value["type"] in {"postgresql", "vastbase"}:
             return make_conninfo(host=value["host"], port=value["port"], dbname=value["database"],
                                  user=value["username"], password=value["password"], **{**value.get("_options", {}), **value.get("properties", {})})
         host = value["host"]
         if ":" in host and not host.startswith("["):
             host = f"[{host}]"
-        if value["type"] != "mysql":
+        if value["type"] not in {"mysql", "goldendb"}:
             raise ValueError("JDBC 配置不生成原生 DSN")
         scheme = "mysql"
         query = "?" + urlencode(value["properties"]) if value.get("properties") else ""

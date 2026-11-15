@@ -3,15 +3,20 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 PRODUCTS = {
-    "postgresql": {"label": "PostgreSQL", "port": 5432, "transport": "native", "dialect": "postgres"},
-    "mysql": {"label": "MySQL", "port": 3306, "transport": "native", "dialect": "mysql"},
+    "postgresql": {"label": "PostgreSQL", "port": 5432, "transport": "native", "protocol": "postgres", "dialect": "postgres"},
+    "mysql": {"label": "MySQL", "port": 3306, "transport": "native", "protocol": "mysql", "dialect": "mysql"},
     "oracle": {"label": "Oracle", "port": 1521, "transport": "jdbc", "driver_id": "oracle", "dialect": "oracle"},
     "sqlserver": {"label": "SQL Server", "port": 1433, "transport": "jdbc", "driver_id": "sqlserver", "dialect": "tsql"},
     "oceanbase": {"label": "OceanBase", "port": 2881, "transport": "jdbc", "driver_id": "oceanbase"},
-    "goldendb": {"label": "GoldenDB", "port": 8880, "transport": "jdbc"},
-    "vastbase": {"label": "海量数据库 / Vastbase", "port": 5432, "transport": "jdbc"},
+    "goldendb": {"label": "GoldenDB", "port": 8880, "transport": "native", "protocol": "mysql", "dialect": "mysql"},
+    "vastbase": {"label": "海量数据库 / Vastbase", "port": 5432, "transport": "jdbc", "driver_id": "vastbase", "dialect": "postgres"},
     "jdbc": {"label": "自定义 JDBC", "port": 5432, "transport": "jdbc"},
 }
+
+
+def native_protocol(kind: str) -> str:
+    item = PRODUCTS.get(kind, {})
+    return item.get("protocol", "") if item.get("transport") == "native" else ""
 
 SQL_BASELINE_ID = "portable-read-v1"
 SQL_OPTIONAL_FEATURES = {
@@ -67,7 +72,7 @@ class DatabaseConnection(BaseModel):
         if not self.jdbc_url and (not self.host or not self.database):
             raise ValueError("请填写地址和数据库，或 JDBC 连接串")
         if self.jdbc_url:
-            if self.type in {"mysql", "postgresql"} or not self.jdbc_url.startswith("jdbc:"):
+            if native_protocol(self.type) or not self.jdbc_url.startswith("jdbc:"):
                 raise ValueError("JDBC 连接串只适用于 JDBC 产品")
             # URLs/properties are public configuration: credentials must use secret fields.
             import re
@@ -78,12 +83,12 @@ class DatabaseConnection(BaseModel):
         import re
         if any(re.search(r"(?i)password|passwd|pwd|secret|token|credential|^(user|username)$", k) for k in self.properties):
             raise ValueError("高级属性不得包含账号或密码")
-        if self.type in {"postgresql","mysql"} and self.catalog and self.catalog!=self.database:
+        if native_protocol(self.type) and self.catalog and self.catalog!=self.database:
             raise ValueError("原生连接的 Catalog 必须与数据库名一致，其他数据库请新增数据源")
-        if self.type=="mysql" and self.schema_name and self.schema_name!=self.database:
-            raise ValueError("MySQL 原生连接的 Schema 必须与数据库名一致")
-        if self.type == "mysql" and set(self.properties)-{"ssl_ca","ssl_cert","ssl_key","ssl_verify_cert","ssl_verify_identity"}:
-            raise ValueError("MySQL 原生连接仅支持 ssl_ca / ssl_cert / ssl_key / ssl_verify_cert / ssl_verify_identity 属性")
+        if native_protocol(self.type)=="mysql" and self.schema_name and self.schema_name!=self.database:
+            raise ValueError("MySQL 协议原生连接的 Schema 必须与数据库名一致")
+        if native_protocol(self.type)=="mysql" and set(self.properties)-{"ssl_ca","ssl_cert","ssl_key","ssl_verify_cert","ssl_verify_identity"}:
+            raise ValueError("MySQL 协议原生连接仅支持 ssl_ca / ssl_cert / ssl_key / ssl_verify_cert / ssl_verify_identity 属性")
         if self.type == "oceanbase" and self.compatibility_mode not in {"mysql", "oracle"}:
             raise ValueError("OceanBase 必须选择 MySQL 或 Oracle 模式")
         return self

@@ -159,6 +159,35 @@ def test_full_graph_uses_sql_authoring_not_intent_compiler(monkeypatch):
     assert restored.sql.requirement_version==restored.requirement.version
 
 
+def test_analysis_returns_candidate_gap_to_model_for_correction(monkeypatch):
+    w, session, execute, _, _, runner = native_harness(monkeypatch)
+    report = deepcopy(runner.return_value[0])
+    report['required_object_uses'] = [
+        {'object': 'item', 'requirement': 'List requested identifiers',
+         'reason': 'The requested identifiers are mapped on this object'}
+    ]
+    invalid = deepcopy(report)
+    invalid['technical_gaps'] = [{
+        'kind': 'relation', 'summary': 'Candidate relation is unavailable',
+        'required_for': 'join', 'objects': ['item', 'candidate'],
+        'evidence_refs': ['ontology'], 'resolution': 'Add a relation',
+    }]
+
+    async def corrected_submission(*args, **kwargs):
+        validate = args[6]
+        with pytest.raises(ValueError, match='未证明必要性'):
+            validate(invalid)
+        validate(report)
+        return report, []
+
+    runner.side_effect = corrected_submission
+    run = asyncio.run(w.start(session.id, 'List items', domain='test'))
+    assert run.status == RunStatus.COMPLETED, run.error
+    assert not run.query_rehearsal.technical_gaps
+    assert run.query_rehearsal.required_object_uses[0].object == 'item'
+    assert execute.await_count == 1
+
+
 def test_first_preview_display_event_recovers_from_actual_persisted_result(monkeypatch):
     from app.control_state import restore_run,run_payload
     w,session,_,_,_,_=native_harness(monkeypatch)

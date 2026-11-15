@@ -1,6 +1,68 @@
 from semora_contracts import LogicalQueryPlan, SQLProgram, SQLProgramStep
 
 from app.query_alignment import inspect_alignment, validate_logical_refs
+from app.query_alignment import validate_required_object_gaps
+from semora_contracts import QueryUnderstanding
+import pytest
+
+
+def gap_report(required=("organization", "loan"), **gap_changes):
+    gap = {
+        "kind": "relation", "summary": "Required information cannot be connected",
+        "required_for": "join", "objects": ["organization", "loan"],
+        "field_refs": ["organization.name", "loan.customer_id"],
+        "evidence_refs": ["ontology", "request"], "resolution": "Configure the required mapping",
+        **gap_changes,
+    }
+    return QueryUnderstanding(
+        summary="Summarize records by their owning organization",
+        target_state="known",
+        required_object_uses=[
+            {"object": name, "requirement": "Requested grouping or measure",
+             "reason": "Provides information unavailable from the other required object"}
+            for name in required
+        ],
+        technical_gaps=[gap],
+    )
+
+
+def test_single_object_query_does_not_require_relations_between_candidates():
+    report = gap_report(required=("loan",))
+    report.technical_gaps = []
+    assert validate_required_object_gaps(report, materials()) == []
+
+
+def test_candidate_relation_cannot_block_single_object_query():
+    errors = validate_required_object_gaps(gap_report(required=("loan",)), materials())
+    assert any("未证明必要性" in error and "organization" in error for error in errors)
+
+
+def test_genuine_required_relation_gap_is_preserved():
+    packet = materials()
+    packet["relations"] = []
+    report = gap_report()
+    assert validate_required_object_gaps(report, packet) == []
+    assert len(report.technical_gaps) == 1
+
+
+@pytest.mark.parametrize("changes", [
+    {"objects": ["loan"]},
+    {"objects": ["loan", "loan"]},
+    {"field_refs": ["loan.unknown"]},
+    {"field_refs": ["other.id"]},
+])
+def test_relation_gap_requires_distinct_endpoints_and_verified_fields(changes):
+    assert validate_required_object_gaps(gap_report(**changes), materials())
+
+
+def test_unknown_required_object_cannot_supply_necessity_evidence():
+    assert validate_required_object_gaps(gap_report(required=("loan", "unknown")), materials())
+
+
+def test_historical_understanding_without_object_uses_remains_readable():
+    report = QueryUnderstanding.model_validate({"summary": "Historical query", "target_state": "known"})
+    assert report.required_object_uses == []
+    assert validate_required_object_gaps(report, materials()) == []
 
 
 def materials():

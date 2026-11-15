@@ -5,7 +5,7 @@ from copy import deepcopy
 
 import pytest
 from fastapi import HTTPException
-from semora_contracts.database import DatabaseConnection, PRODUCTS
+from semora_contracts.database import DatabaseConnection, PRODUCTS, native_protocol
 from services.executor.app import adapter_registry, jdbc_adapter, drivers
 from services.executor.app.connection_settings import ConnectionStore
 from app.mdl_export import build_mdl, merge_snapshot, relationship_id
@@ -19,6 +19,81 @@ def test_every_product_is_explicit_and_version_independent(kind):
     assert adapter_registry.product(cfg.type)["transport"] in {"native","jdbc"}
     assert "version" not in DatabaseConnection.model_fields
     with pytest.raises(HTTPException):adapter_registry.product("unknown")
+
+
+@pytest.mark.parametrize("kind,protocol,dialect",[
+    ("goldendb","mysql","mysql"),
+])
+def test_builtin_protocol_products_need_no_driver_selection(kind,protocol,dialect):
+    cfg=connection(kind)
+    assert native_protocol(kind)==protocol
+    assert adapter_registry.protocol(kind)==protocol
+    assert adapter_registry.dialect(cfg)==dialect
+    dsn=ConnectionStore.dsn(cfg.model_dump(mode="json"))
+    assert dsn.startswith("mysql://") if protocol=="mysql" else "host=db" in dsn
+    assert cfg.driver_id==""
+    with pytest.raises(ValueError,match="JDBC 连接串"):
+        connection(kind,jdbc_url="jdbc:vendor://db/test")
+
+
+def test_vastbase_automatically_uses_vendor_jdbc_without_driver_selection(monkeypatch):
+    cfg=connection("vastbase")
+    assert PRODUCTS["vastbase"]["transport"]=="jdbc"
+    assert PRODUCTS["vastbase"]["driver_id"]=="vastbase"
+    assert drivers.BUILTINS["vastbase"]==("cn.com.vastbase.Driver","vastbase-jdbc-2.13.2v.jar")
+    assert jdbc_adapter.jdbc_url(cfg.model_dump(mode="json"))=="jdbc:vastbase://db:1521/FREEPDB1"
+    monkeypatch.setattr(jdbc_adapter.drivers,"resolve_driver",lambda key:{"id":key,"builtin":True})
+    value=cfg.model_dump(mode="json")
+    _,dialect,strategy=jdbc_adapter.configuration(value)
+    assert dialect==strategy=="postgres"
+
+
+def test_vastbase_detected_mode_drives_dialect_properties_and_invalidates_validation(monkeypatch):
+    monkeypatch.setattr(jdbc_adapter.drivers,"resolve_driver",lambda key:{"id":key,"builtin":True})
+    saved={}
+    monkeypatch.setattr(jdbc_adapter.connection_store,"save",lambda key,value:saved.update(key=key,value=deepcopy(value)))
+    cfg=connection("vastbase").model_dump(mode="json")
+    cfg["_validation"]="previous"
+    changed=jdbc_adapter.record_detected_compatibility(cfg,{"detected_compatibility_mode":"oracle"},"source-1")
+    assert changed and saved["key"]=="source-1"
+    assert cfg["compatibility_mode"]=="oracle"
+    assert cfg["properties"]["db_compatibility"]=="oracle"
+    assert cfg["_validation"]==""
+    driver,dialect,strategy=jdbc_adapter.configuration(cfg)
+    assert dialect=="oracle" and strategy=="postgres"
+    assert driver["effective_pagination"]=="rownum"
+
+
+def test_vastbase_api_dialect_uses_detected_server_mode(monkeypatch):
+    from types import SimpleNamespace
+    from app import sql_dialect
+    source=SimpleNamespace(type="vastbase",scan_result={"connection":{"detected_compatibility_mode":"oracle"}})
+    monkeypatch.setattr(sql_dialect.datasource_service.repository,"get",lambda key:source)
+    assert sql_dialect.dialect_for("source-1")=="oracle"
+
+
+@pytest.mark.parametrize("kind,expected",[
+    ("goldendb","MYSQL"),("vastbase","POSTGRES"),
+])
+def test_protocol_products_keep_native_mdl_target(kind,expected):
+    mdl,report=build_mdl(fixture_snapshot(),kind)
+    assert mdl is not None,report
+    assert mdl["dataSource"]==expected
+
+
+@pytest.mark.parametrize("kind,table_id,sql_part",[
+    ("goldendb","db.report","information_schema.VIEWS"),
+])
+def test_protocol_products_use_native_relation_definition_reader(kind,table_id,sql_part,monkeypatch):
+    from services.executor.app import main
+    captured={}
+    def query(body,token):
+        captured["sql"]=body.sql
+        return {"rows":[["SELECT 1"]]}
+    monkeypatch.setattr(main,"execute_query",query)
+    body=main.RelationDefinitionInput(datasource_id="x",type=kind,secret_ref="DATASOURCE_X_URL",table_id=table_id)
+    assert main.relation_definitions(body)["status"]=="available"
+    assert sql_part in captured["sql"]
 
 def test_credentials_only_in_secret_fields_and_encrypted_store(tmp_path):
     store=ConnectionStore(str(tmp_path))
@@ -88,7 +163,7 @@ def test_mdl_deterministic_composite_join_precision_and_real_wren_build():
 
 def test_unknown_type_permission_gap_or_bad_join_cannot_export_silently():
     source=fixture_snapshot();source["tables"][0]["columns"][0]["type"]="vendor_geometry"
-    assert build_mdl(source,"goldendb")[0] is None
+    assert build_mdl(source,"jdbc")[0] is None
     source=fixture_snapshot();source["permission_gaps"]=["constraints:denied"]
     assert build_mdl(source,"postgresql")[0] is None
     source=fixture_snapshot();source["foreign_keys"][0]["target_columns"]=["missing"]

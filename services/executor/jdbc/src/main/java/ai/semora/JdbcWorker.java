@@ -68,6 +68,27 @@ public final class JdbcWorker {
                 info.put("read_only",false);info.put("readonly_failure","compatibility_mode_mismatch");
             }
         }
+        if(text(q.path("connection"),"type").equals("vastbase")) {
+            String detected="unknown";
+            try(Statement s=c.createStatement()) {
+                s.setQueryTimeout(5);
+                try(ResultSet r=s.executeQuery("SHOW dbcompatibility")) {
+                    if(r.next()) {
+                        String mode=r.getString(1).toUpperCase(Locale.ROOT);
+                        detected=switch(mode) {
+                            case "A","ORACLE" -> "oracle";
+                            case "B","MYSQL" -> "mysql";
+                            case "PG","POSTGRESQL","POSTGRES" -> "postgres";
+                            case "MSSQL","SQLSERVER","TSQL" -> "tsql";
+                            default -> "unknown";
+                        };
+                    }
+                }
+            }catch(SQLException ignored){}finally{c.rollback();}
+            info.put("detected_compatibility_mode",detected);
+            info.put("compatibility_detection",detected.equals("unknown")?"unavailable":"verified");
+            info.put("driver_selection","automatic_builtin_v");
+        }
         if(q.path("probe_capabilities").asBoolean(false)&&safe)info.put("probes",probes(c,q));
         return info;
     }
@@ -171,7 +192,8 @@ public final class JdbcWorker {
                 for(Map<String,Object> k:keys) foreignKeys.add(map("source_table",tableId,"columns",k.get("columns"),"target_table",k.get("target_table"),"target_columns",k.get("target_columns"),"name",k.get("name"),"origin","declared"));
             }catch(SQLException e){gaps.add(tableId+":foreign_keys:"+e.getSQLState());}
             if(!q.path("metadata_queries").has("constraints"))try { Map<String,SortedMap<Integer,String>> indices=new TreeMap<>();Set<String> unsupportedIndices=new HashSet<>();
-                try(ResultSet r=m.getIndexInfo(tc,ts,tn,true,false)) { while(r.next()) {
+                // Read existing metadata; exact statistics may invoke DBMS_STATS on Oracle.
+                try(ResultSet r=m.getIndexInfo(tc,ts,tn,true,true)) { while(r.next()) {
                     String n=r.getString("INDEX_NAME"),col=r.getString("COLUMN_NAME");
                     String filter=r.getString("FILTER_CONDITION");
                     if(n!=null&&(col==null||(filter!=null&&!filter.isEmpty())))unsupportedIndices.add(n);
@@ -181,7 +203,7 @@ public final class JdbcWorker {
                 List<Map<String,Object>> unique=new ArrayList<>();indices.forEach((k,v)->unique.add(map("name",k,"columns",new ArrayList<>(v.values()),"origin","unique_index")));t.put("unique_constraints",unique);
             }catch(SQLException e){gaps.add(tableId+":unique_constraints:"+e.getSQLState());}
             if(!q.path("metadata_queries").has("constraints"))try { Map<String,SortedMap<Integer,String>> indices=new TreeMap<>();Map<String,Boolean> uniqueness=new HashMap<>();Set<String> unsupportedIndices=new HashSet<>();
-                try(ResultSet r=m.getIndexInfo(tc,ts,tn,false,false)) { while(r.next()) {
+                try(ResultSet r=m.getIndexInfo(tc,ts,tn,false,true)) { while(r.next()) {
                     if(r.getShort("TYPE")==DatabaseMetaData.tableIndexStatistic)continue;
                     String n=r.getString("INDEX_NAME"),col=r.getString("COLUMN_NAME");
                     String filter=r.getString("FILTER_CONDITION");

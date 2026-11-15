@@ -157,6 +157,7 @@ def reserve_sql_repair(run, issue):
 async def structured(workflow, run, prompt, payload, schema):
     """A malformed response gets one format correction, never a fresh ReAct."""
     from .run_state import revision
+    from .sql_model_context import sql_model_payload
 
     initial = revision(run)
     value = None
@@ -170,7 +171,7 @@ async def structured(workflow, run, prompt, payload, schema):
                 prompt,
                 json.dumps(
                     {
-                        **payload,
+                        **sql_model_payload(payload, reference_materials=material(run)),
                         "output_contract": schema.model_json_schema(),
                         **(
                             {
@@ -191,6 +192,10 @@ async def structured(workflow, run, prompt, payload, schema):
             value = raw
             parsed = schema.model_validate(raw)
             candidate = parsed if schema is SQLProgram else None
+            if schema is StepRepair:
+                candidate = SQLProgram.model_validate(payload["program"])
+                step = next(s for s in candidate.steps if s.name == payload["current_step"])
+                step.sql, step.parameters = parsed.sql, parsed.parameters
             if schema is CoverageReview and parsed.edits:
                 original = SQLProgram(
                     summary="SQL核对",
@@ -209,6 +214,9 @@ async def structured(workflow, run, prompt, payload, schema):
                 previous = []
                 objects = [o["object"] for o in payload.get("materials", {}).get("objects", [])]
                 for step in candidate.steps:
+                    if schema is StepRepair and step.name != payload["current_step"]:
+                        previous.append(step.name)
+                        continue
                     tables = (
                         previous
                         if step.engine == "local"
@@ -220,6 +228,11 @@ async def structured(workflow, run, prompt, payload, schema):
                     )
                     try:
                         tree = readonly_tree(step.sql, tables)
+                        if step.engine == "source":
+                            from .sql_column_refs import validate_physical_column_refs
+
+                            validate_physical_column_refs(tree, [o for o in objects
+                                if o.get("dataSourceId") == step.data_source_id])
                         validate_grouping(tree, objects)
                         if step.engine == "source":
                             from .database_profile import validate_features
@@ -338,13 +351,20 @@ async def analyse(workflow, run, question, ontology, scope):
             report = Understanding.model_validate(value)
             # Reuse form dependency validation, not the query compiler.
             validate_questions(report.questions)
+            from .query_alignment import validate_required_object_gaps
+
+            errors = validate_required_object_gaps(report, toolkit.context_state["packet"])
+            if errors:
+                raise ValueError("；".join(errors) + "。重新核对最小必要对象；移除可省略关联的缺口，保留有依据的真实障碍。")
             return report
+
+        from .query_context_wire import encode_payload
 
         tools = toolkit.tools()
         value, memory = await run_agent(
             workflow.model,
             UNDERSTAND,
-            task,
+            encode_payload(task),
             tools,
             [],
             toolkit.event,

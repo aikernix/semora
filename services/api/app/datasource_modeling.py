@@ -15,11 +15,13 @@ from uuid import uuid4
 
 import psycopg
 
+from .relationship_rules import MIN_REFERENCE_COVERAGE
+
 from .datasource_table_storage import tables_digest
 from .mdl_export import column_type
 from .relationship_evidence import recall_field_pairs, finalize_relationships, technically_pending
 
-GENERATOR_VERSION = "source-ontology-v18-explicit-groups"
+GENERATOR_VERSION = "source-ontology-v19-semantic-inference"
 PROFILE_VERSION = "indexed-directional-v3-context"
 TERMINAL = {"completed", "completed_with_pending", "failed", "cancelled"}
 GENERIC_NAMES = {"id", "code", "name", "type", "status", "date"}
@@ -226,6 +228,8 @@ def model_candidate(value, cards, table_maps, domain=None):
         target,[k['target'] for k in key_pairs],scope,
         [{'kind':'model_discovery','reason':str(value.get('reason','')),'query_role':str(value.get('role',''))},
          {'kind':'target_unique_index','confirmed':_indexed(target,[k['target'] for k in key_pairs],unique=True)}],.8,domain=domain)
+    if value.get('shared_keywords'):
+        candidate['evidence'].append({'kind':'shared_keywords','keywords':list(value['shared_keywords'])})
     if value.get('family_lead_from'):
         candidate['evidence'].append({'kind':'structural_family_lead','source_table_id':value['family_lead_from']})
     if value.get('profile_statistics') is not None:
@@ -707,6 +711,22 @@ class ModelingRepository:
         self.memory_jobs[job_id] = value
         return value
 
+    def domain_cross_jobs(self, domain: str):
+        """Latest persisted analysis per unordered source pair, including zero-result jobs."""
+        if self.dsn:
+            with self._connect() as connection:
+                rows = connection.execute('''SELECT DISTINCT ON
+                    (LEAST(datasource_id,peer_datasource_id),GREATEST(datasource_id,peer_datasource_id)) id
+                    FROM semora_meta.datasource_onboarding_jobs WHERE domain=%s AND kind='cross_source'
+                    ORDER BY LEAST(datasource_id,peer_datasource_id),GREATEST(datasource_id,peer_datasource_id),created_at DESC''', (domain,)).fetchall()
+            return [self.get_job(row[0]) for row in rows]
+        latest = {}
+        for job in self.memory_jobs.values():
+            if job.get('domain') != domain or job.get('kind') != 'cross_source':continue
+            pair=tuple(sorted((job['datasource_id'],job['peer_datasource_id'])))
+            if pair not in latest or job['created_at'] > latest[pair]['created_at']:latest[pair]=job
+        return list(latest.values())
+
     def latest_job(self, datasource_id: str, kind="onboarding"):
         if self.dsn:
             with self._connect() as connection:
@@ -797,8 +817,8 @@ class ModelingRepository:
                 and (not scope or v["scope"] == scope) and (domain is None or v.get("domain") == domain)]
 
     def list_cross_candidates(self, left_id, right_id, domain):
-        return [v for v in self.memory_candidates.values() if v["scope"] == "cross_source"
-                and v.get("domain") == domain and {v["source_datasource_id"], v["target_datasource_id"]} == {left_id, right_id}]
+        values = self.list_candidates(left_id, "cross_source", domain) + self.list_candidates(right_id, "cross_source", domain)
+        return list({item["id"]: item for item in values if {item["source_datasource_id"], item["target_datasource_id"]} == {left_id, right_id}}.values())
 
     def get_candidate(self, candidate_id):
         if candidate_id in self.memory_candidates:
@@ -1024,6 +1044,15 @@ class ModelingService:
             raise ValueError('分析规则或结构资料已变化，请新建关键词任务；原结果仍可查看')
         return engine
 
+    def _withhold_incomplete(self,job,candidates):
+        details=job.get('details',{})
+        if not (details.get('technical_incomplete') or details.get('cross_failed_batches') or details.get('cross_pair_budget_exceeded')):
+            return False
+        self._update(job,'completed_with_pending','incomplete',100,
+            details={**details,'technical_incomplete':True,'relationships_updated':False,
+                     'unpublished_proposals':len(candidates)},completed_at=_now())
+        return True
+
     async def _run_relationship_stage(self, job):
         async with self.source_locks.setdefault(job['datasource_id'],asyncio.Lock()):
             try:
@@ -1051,7 +1080,11 @@ class ModelingService:
                     result=await engine.discover()
                     job['details']['proposal_count']=len(result)
                 job['details']['model_calls']=engine.metrics['calls']
-                self._update(job,'completed',stage+'_complete',100,completed_at=_now())
+                gaps=engine.incomplete_units()
+                job['details'].update(technical_incomplete=bool(gaps),incomplete_count=len(gaps),
+                    incomplete_stages=sorted({v['stage'] for v in gaps}))
+                self._update(job,'completed_with_pending' if gaps else 'completed',
+                    'incomplete' if gaps else stage+'_complete',100,completed_at=_now())
             except asyncio.CancelledError:
                 self._update(job,'cancelled','cancelled',job.get('progress',0),completed_at=_now())
                 raise
@@ -1062,22 +1095,28 @@ class ModelingService:
 
     def resume_failed(self, datasource_id, job_id):
         job = self.repository.get_job(job_id)
-        if job['datasource_id'] != datasource_id or job.get('kind', 'onboarding') != 'onboarding':
+        if job['datasource_id'] != datasource_id or job.get('kind', 'onboarding') not in {'onboarding','cross_source'}:
             raise KeyError(job_id)
         current = self.repository.latest_job(datasource_id)
         if current and current['status'] not in TERMINAL:
             raise ValueError('已有分析任务正在运行')
-        if job['status'] != 'failed' or not job.get('details', {}).get('checkpoint_ref'):
+        resumable=job['status']=='failed' or (job['status']=='completed_with_pending' and (
+            job.get('kind')=='cross_source' or job.get('details',{}).get('technical_incomplete')))
+        if not resumable or not job.get('details', {}).get('checkpoint_ref'):
             raise ValueError('该任务没有可恢复的失败检查点')
         job.setdefault('details', {})['resume_research'] = True
-        self._update(job, 'queued', 'resuming', job.get('progress', 0), error=None, completed_at=None)
-        self.tasks[job_id] = asyncio.create_task(self._run_relationship_stage(job) if job['details'].get('stage_only')
+        job['details']['resume_attempt']=job['details'].get('resume_attempt',0)+1
+        for key in ('stage_done','stage_total','stage_failed'):
+            job['details'].pop(key,None)
+        self._update(job, 'queued', 'resuming', 0, error=None, completed_at=None)
+        self.tasks[job_id] = asyncio.create_task(self._run_cross_source(job) if job.get('kind')=='cross_source'
+            else self._run_relationship_stage(job) if job['details'].get('stage_only')
             else self._run_onboarding(job, force=bool(job['details'].get('force'))))
         return job
 
-    async def cancel(self, datasource_id: str, job_id: str):
+    async def cancel(self, datasource_id: str, job_id: str, *, kind="onboarding"):
         job = self.repository.get_job(job_id)
-        if job["datasource_id"] != datasource_id or job.get("kind", "onboarding") != "onboarding":
+        if job["datasource_id"] != datasource_id or job.get("kind", "onboarding") != kind:
             raise KeyError(job_id)
         if job["status"] in TERMINAL:
             return job
@@ -1153,10 +1192,30 @@ class ModelingService:
             continue
 
     def _update(self, job, status, phase, progress, **extra):
+        previous_status,previous_phase=job.get('status'),job.get('phase')
+        # A newly requested diagnostic stage may reset its own progress; retries,
+        # follow-up evidence and phase changes within an execution may not.
+        reset_stage=status=='queued' and (job.get('details',{}).get('stage_only') or (
+            phase=='resuming' and previous_status in TERMINAL))
+        if not reset_stage:
+            progress=max(job.get('progress',0),progress)
+        if status not in TERMINAL and job.get('progress',0)<100:
+            progress=min(progress,99)
         job.update(status=status, phase=phase, progress=progress, **extra)
         details = job.get("details", {})
         for key in ("query_table_roles", "coverage"):
             details.pop(key, None)
+        if (previous_status,previous_phase)!=(status,phase):
+            import logging,sys,traceback
+            diagnostic={'event':'relationship.job.failed' if status=='failed' else 'relationship.job.phase',
+                'job_id':job['id'],'datasource_id':job.get('datasource_id'),'peer_datasource_id':job.get('peer_datasource_id'),
+                'domain':job.get('domain'),'kind':job.get('kind','onboarding'),'status':status,'phase':phase,
+                'previous_phase':previous_phase,'progress':progress,
+                'counts':{k:details[k] for k in ('model_calls','stage_done','stage_total','tables','accepted','research_pending') if k in details}}
+            if status=='failed':
+                diagnostic.update(error=job.get('error'),error_type=type(sys.exc_info()[1]).__name__ if sys.exc_info()[1] else None,
+                    traceback=traceback.format_tb(sys.exc_info()[2]))
+            logging.getLogger('semora.model').log(logging.ERROR if status=='failed' else logging.INFO,_json(diagnostic))
         if status in TERMINAL and details.get("checkpoint_ref"):
             from .relationship_inputs import Checkpoints
             import json, time
@@ -1260,13 +1319,23 @@ class ModelingService:
             raise ValueError("关联分析需要模型与验证能力，请执行在线分析")
         async def discovery_progress(stage, done, total):
             if job and not job.get("ephemeral"):
-                self._update(job, "profiling", stage, 50 + int(16 * done / max(1, total)),
+                start,end={'extracting_keywords':(40,48),'organizing_recall_groups':(48,54),
+                           'comparing':(54,64),'analyzing_large_groups':(64,67),
+                           'comparing_cross_source':(55,67)}.get(stage,(50,67))
+                self._update(job, "profiling", stage, start + int((end-start) * done / max(1, total)),
                     details={**job.get("details", {}), "discovery_stage": stage, "stage_done": done,
-                             "stage_total": total, "model_calls": state["metrics"]["calls"]})
+                             "stage_total": total, "stage_failed":state.get('stage_failed',0),
+                             "model_calls": state["metrics"]["calls"]})
         async def agent_tool(kind,args): return await self._relationship_agent_tool(cards,kind,args)
         if discover:
-            engine = KeywordDiscovery(cards, structured_model, state, save, discovery_progress,
-                repository=self.repository,tool=agent_tool)
+            if (job or {}).get('kind') == 'cross_source':
+                from .cross_source_discovery import CrossSourceDiscovery
+                engine = CrossSourceDiscovery(cards, structured_model, state, save, discovery_progress,
+                    repository=self.repository, tool=agent_tool,
+                    left_source_id=job['datasource_id'], right_source_id=job['peer_datasource_id'])
+            else:
+                engine = KeywordDiscovery(cards, structured_model, state, save, discovery_progress,
+                    repository=self.repository,tool=agent_tool)
             if (job or {}).get('details',{}).get('resume_research'): engine.work.recover()
             proposed = await engine.run()
         else:
@@ -1277,6 +1346,19 @@ class ModelingService:
                      "discarded_groups":sum(len(scope.get('discarded_groups',[])) for scope in state.get('keyword_pipeline',{}).values() if isinstance(scope,dict)),
                      "discarded_candidates":len(state.get('discarded_candidates',[]))}
             job.setdefault("details", {}).update(details)
+            if (job or {}).get('kind') == 'cross_source':
+                job['details'].update(getattr(engine, 'summary', {}))
+            gaps=engine.incomplete_units() if discover else []
+            conclusion_gaps=list(engine.scope.get('conclusion_gaps',{}).values()) if discover else []
+            unresolved_tables={t for g in conclusion_gaps for t in g.get('table_ids',[])}
+            job['details'].update(unresolved_group_count=sum(bool(g.get('table_ids') or g.get('gaps')) for g in conclusion_gaps),
+                unresolved_table_count=len(unresolved_tables),
+                discovery_covered_tables=max(0,len(cards)-len(unresolved_tables)))
+            cross_gaps=int(job['details'].get('cross_failed_batches',0))+int(bool(job['details'].get('cross_pair_budget_exceeded')))
+            job['details'].update(technical_incomplete=bool(gaps or cross_gaps),
+                incomplete_count=len(gaps)+cross_gaps,
+                incomplete_stages=sorted({v['stage'] for v in gaps}|({'comparing_cross_source'} if cross_gaps else set())),
+                discovery_complete=not bool(gaps or cross_gaps))
         by_id = {c["id"]: c for c in candidates}
         converted,discarded=convert_model_candidates(proposed,cards,table_maps,(job or {}).get('domain'))
         for c in converted:
@@ -1524,7 +1606,7 @@ class ModelingService:
                 continue
             profile = next((e.get('statistics', {}) for e in reversed(c['evidence']) if e.get('kind') == 'value_profile'), {})
             observed = observations.get((c['target_datasource_id'], c['target_table_id'], tuple(c['target_columns'])), [])
-            if not profile or profile.get('directional_coverage', 0) >= .98 or not any(v['source_table'] != c['source_table_id'] for v in observed):
+            if not profile or profile.get('directional_coverage', 0) >= MIN_REFERENCE_COVERAGE or not any(v['source_table'] != c['source_table_id'] for v in observed):
                 continue
             audit_key = digest([c['research_key'], 'target-domain-v1', observed])
             cached = state['research'].get(audit_key)
@@ -1660,9 +1742,10 @@ class ModelingService:
                         prior["evidence_grade"] = "medium"
                         prior["evidence"] = [e for e in prior["evidence"] if e.get("kind") != "foreign_key"]
                     candidates.append(prior)
-                self._update(job, "profiling", "profiling", 68)
+                self._update(job, "profiling", "profiling", 40)
                 table_map = {table["id"]: table for table in tables}
                 await self._semantic_review(candidates, {identifier: table_map}, job, persisted_only)
+                if self._withhold_incomplete(job,candidates):return
                 # Human-disabled joins never re-enter the active or pending result sets, even with a new ID.
                 candidates[:] = [c for c in candidates if c["id"] not in disabled_ids and join_signature(c) not in disabled_signatures]
                 finalize_relationships(candidates)
@@ -1698,6 +1781,7 @@ class ModelingService:
                     details={
                         **job.get("details", {}),
                         "package_status": package_status,
+                        "relationships_updated": True,
                         "objects": package["object_count"],
                         "relations": package["relation_count"],
                         "not_generated": sum(c["status"] != "accepted" for c in candidates),
@@ -1734,6 +1818,9 @@ class ModelingService:
     def start_cross_source(self, domain: str, left_id: str, right_id: str):
         if left_id == right_id:
             raise ValueError("请选择两个不同的数据源")
+        if any(job['status'] not in TERMINAL and {job['datasource_id'],job['peer_datasource_id']}=={left_id,right_id}
+               for job in self.repository.domain_cross_jobs(domain)):
+            raise ValueError('这两个数据源已有分析任务正在运行')
         for identifier in (left_id, right_id):
             source = self.datasources.repository.get(identifier)
             package = self.repository.get_package(identifier)
@@ -1835,6 +1922,10 @@ class ModelingService:
             mapping = {"_source": {"object": source_object["name"], **source_fields},
                        "_target": {"object": target_object["name"], **target_fields}}
             generated = package_relations([{**candidate, "source_table_id": "_source", "target_table_id": "_target"}], mapping)
+            if any(e.get('kind') == 'manual_domain_relation' for e in candidate.get('evidence', [])):
+                from .domain_relationships import relation_for_record
+                manual = relation_for_record(candidate, configuration)
+                generated = [manual] if manual else []
             if generated:
                 from .relation_output import published_relationship
                 generated[0]["metadata"]["relationshipRecord"] = published_relationship(candidate)
@@ -1855,7 +1946,11 @@ class ModelingService:
             self.repository.get_package(left.id)
             self.repository.get_package(right.id)
             self._update(job, "discovering", "discovering", 25)
-            candidates = []
+            from .relationship_normalization import join_signature
+            saved = self.repository.list_cross_candidates(left.id, right.id, job['domain'])
+            disabled_ids = {item['id'] for item in saved if item.get('status') == 'disabled'}
+            disabled_signatures = {join_signature(item) for item in saved if item.get('status') == 'disabled'}
+            candidates = [item for item in saved if item.get('status') == 'accepted']
             self._update(job, "profiling", "profiling", 55)
             lmap = {table["id"]: table for table in left.scan_result.get("tables") or []}
             rmap = {table["id"]: table for table in right.scan_result.get("tables") or []}
@@ -1863,18 +1958,30 @@ class ModelingService:
             await self._semantic_review(candidates, {left.id: lmap, right.id: rmap}, job)
             if any(tables_digest(self.datasources.repository.get(sid).scan_result.get("tables") or []) != fingerprint for sid, fingerprint in input_hashes.items()):
                 raise ValueError("跨源研究期间结构已变化，请重新分析")
+            if self._withhold_incomplete(job,candidates):return
+            candidates[:] = [item for item in candidates if item['id'] not in disabled_ids and join_signature(item) not in disabled_signatures]
             finalize_relationships(candidates, cross_source=True)
             from .query_relationships import deduplicate_query_edges
             deduplicate_query_edges(candidates)
+            if self.repository.get_job(job['id']).get('details',{}).get('cancel_requested'):
+                raise asyncio.CancelledError()
+            # Publication is one final, non-cancellable commit boundary.
+            self._update(job,'building','publishing',99)
+            for candidate in candidates:
+                self.repository.replace_candidates([candidate],
+                    input_hashes[candidate['source_datasource_id']], input_hashes[candidate['target_datasource_id']])
             if self.ontology:
                 await self._apply_cross_relations(job["domain"], candidates, (left.id, right.id))
-            pending_count = sum(c.get('research_pending') is True for c in candidates)
+            discovery_pending = int(job.get('details', {}).get('cross_failed_batches', 0)) + int(bool(job.get('details', {}).get('cross_pair_budget_exceeded')))
+            pending_count = sum(c.get('research_pending') is True for c in candidates) + discovery_pending
             self._update(
                 job,
                 "completed_with_pending" if pending_count else "completed",
                 "complete_with_pending" if pending_count else "complete",
                 100,
                 details={
+                    **job.get('details',{}),
+                    "relationships_updated": True,
                     "candidates": len(candidates),
                     "accepted": sum(item["status"] == "accepted" for item in candidates),
                     "not_generated": sum(c["status"] != "accepted" for c in candidates),
@@ -1882,6 +1989,9 @@ class ModelingService:
                 },
                 completed_at=_now(),
             )
+        except asyncio.CancelledError:
+            self._record_requested_cancellation(job)
+            raise
         except Exception as exc:
             self._update(
                 job,

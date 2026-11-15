@@ -19,7 +19,7 @@ def attach_identity(result, body):
         adapter.update(dialect=dialect, readonly_strategy=strategy,
                        session_properties_fingerprint=fingerprint(cfg.get("properties", {})))
     else:
-        dialect = {"mysql": "mysql", "postgresql": "postgres"}[body.type]
+        dialect = adapter_registry.dialect(body)
         adapter = {"type": body.type, "driver": result.get("driver"), "driver_version": result.get("driver_version")}
     result.update(dialect=dialect, adapter_fingerprint=fingerprint(adapter),
                   connection_fingerprint=fingerprint({"configuration": config, "adapter": adapter}))

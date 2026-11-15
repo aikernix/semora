@@ -129,7 +129,8 @@ class ResearchTools:
             """补齐完成当前需求必需的对象资料，说明用途；资料足够时直接提交。"""
             if not self.context_state:
                 return {"available": False, "message": "准备资料缺失"}
-            return supplement_context(
+            from .query_context_wire import model_material
+            result = supplement_context(
                 self.workflow,
                 self.run,
                 self.ontology,
@@ -139,6 +140,9 @@ class ResearchTools:
                 reason,
                 self.scope,
             )
+            if "prepared_context" in result:
+                result = {**result, "prepared_context": model_material(result["prepared_context"])}
+            return result
 
         async def read_evidence() -> dict:
             """读取本次需求已取得的知识证据，不重新检索。"""

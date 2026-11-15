@@ -118,7 +118,7 @@ def test_connection_configuration(body: ConfigureDataSource, x_semora_internal_t
         raise HTTPException(422, str(exc)) from exc
     if adapter_registry.is_jdbc(body.type):
         return jdbc_adapter.run(value, "test", timeout_ms=10000)
-    inspect = {"mysql": mysql_adapter.inspect, "postgresql": inspect_connection}[body.type]
+    inspect = mysql_adapter.inspect if adapter_registry.protocol(body.type)=="mysql" else inspect_connection
     return inspect(connection_store.dsn(value))
 
 
@@ -284,9 +284,9 @@ def healthz() -> dict:
 def test_datasource(body: DataSourceInput, x_semora_internal_token: str | None = Header(default=None)) -> dict:
     require_internal_token(x_semora_internal_token)
     if adapter_registry.is_jdbc(body.type):
-        result = jdbc_adapter.run(jdbc_adapter.settings(body), "test", timeout_ms=10000)
+        result = jdbc_adapter.run(jdbc_adapter.settings(body), "test", timeout_ms=10000, datasource_id=body.datasource_id)
     else:
-        inspect = {"mysql": mysql_adapter.inspect, "postgresql": inspect_connection}[body.type]
+        inspect = mysql_adapter.inspect if adapter_registry.protocol(body.type)=="mysql" else inspect_connection
         result = inspect(resolve_datasource(body))
     from .probe_identity import attach_identity
     return {"datasource_id": body.datasource_id, **attach_identity(result, body)}
@@ -297,13 +297,13 @@ def scan_datasource(body: DataSourceScanInput, x_semora_internal_token: str | No
     require_internal_token(x_semora_internal_token)
     with scan_control.operation(body.execution_id):
         if adapter_registry.is_jdbc(body.type):
-            result = jdbc_adapter.run(jdbc_adapter.settings(body), "scan", tables=body.tables or [], execution_id=body.execution_id, timeout_ms=scan_timeout_ms())
-        elif body.type == "mysql":
+            result = jdbc_adapter.run(jdbc_adapter.settings(body), "scan", tables=body.tables or [], execution_id=body.execution_id, timeout_ms=scan_timeout_ms(), datasource_id=body.datasource_id)
+        elif adapter_registry.protocol(body.type)=="mysql":
             cfg = connection_store.get(body.datasource_id,body.secret_ref,body.type) or {}
             prefix = cfg.get("database", "") + "."
             table_names = [t[len(prefix):] if t.startswith(prefix) else t for t in body.tables] if body.tables else None
             result = mysql_adapter.scan(resolve_datasource(body), sensitivity_level, table_names)
-        elif body.type == "postgresql":
+        elif adapter_registry.protocol(body.type)=="postgres":
             cfg = connection_store.get(body.datasource_id,body.secret_ref,body.type) or {}
             result = scan_postgresql(resolve_datasource(body), body.tables, cfg.get("schema_name"))
             if body.tables:
@@ -335,7 +335,7 @@ def execute_query(body: QueryInput, x_semora_internal_token: str | None = Header
             execution_id=body.execution_id,
             timeout_ms=min(body.timeout_ms or query_timeout_ms(), query_timeout_ms()),
             max_rows=min(body.max_rows or 1000, int(os.getenv("MAX_RESULT_ROWS", "1000"))),
-            max_bytes=min(body.max_bytes or 10485760, int(os.getenv("MAX_RESULT_BYTES", "10485760"))))
+            max_bytes=min(body.max_bytes or 10485760, int(os.getenv("MAX_RESULT_BYTES", "10485760"))), datasource_id=body.datasource.datasource_id)
         result["rows"] = [[mask_sensitive(result["columns"][i], v, set(body.sensitive_columns)) for i,v in enumerate(row)] for row in result["rows"]]
         result["bytes_returned"] = len(json.dumps(result["rows"], ensure_ascii=False).encode())
         return result
@@ -350,26 +350,27 @@ def execute_query(body: QueryInput, x_semora_internal_token: str | None = Header
     max_bytes = min(body.max_bytes or hard_max_bytes, hard_max_bytes)
     timeout_ms = min(body.timeout_ms or hard_timeout_ms, hard_timeout_ms)
     connection: psycopg.Connection | None = None
+    native_protocol = adapter_registry.protocol(body.datasource.type)
     try:
-        factory = (lambda: mysql_adapter.connect(dsn, timeout_ms)) if body.datasource.type == "mysql" else (lambda: psycopg.connect(dsn, autocommit=False))
+        factory = (lambda: mysql_adapter.connect(dsn, timeout_ms)) if native_protocol=="mysql" else (lambda: psycopg.connect(dsn, autocommit=False))
         with factory() as connection:
             if body.execution_id:
                 with ACTIVE_QUERIES_LOCK:
                     ACTIVE_QUERIES[body.execution_id] = connection
             with connection.cursor() as cursor:
-                if body.datasource.type == "mysql":
+                if native_protocol=="mysql":
                     mysql_adapter.begin_readonly(connection, timeout_ms)
                 else:
                     cursor.execute("SET TRANSACTION READ ONLY")
                 # PostgreSQL does not accept bind parameters in SET statements.
                 # set_config keeps the timeout parameterized and transaction-local.
-                if body.datasource.type != "mysql":
+                if native_protocol!="mysql":
                     cursor.execute("SELECT set_config('statement_timeout', %s, true)", (f"{timeout_ms}ms",))
                 cursor.execute(body.sql, body.parameters)
                 columns = [column[0] for column in cursor.description or []]
                 from .result_types import column_types, encode_scalar
                 rows = cursor.fetchmany(max_rows + 1)
-                result_types = column_types(cursor.description, body.datasource.type == 'mysql', rows,
+                result_types = column_types(cursor.description, native_protocol=="mysql", rows,
                     getattr(getattr(cursor,"_result",None),"fields",None))
                 truncated = len(rows) > max_rows
                 rows = rows[:max_rows]
@@ -441,12 +442,12 @@ def estimate_query(body: EstimateInput, x_semora_internal_token: str | None = He
     assert_readonly(body.sql, adapter_registry.dialect(body.datasource))
     if adapter_registry.is_jdbc(body.datasource.type):
         # Authentication/permissions must be checked before reporting preflight unavailable.
-        result = jdbc_adapter.run(jdbc_adapter.settings(body.datasource), "test", timeout_ms=body.timeout_ms)
+        result = jdbc_adapter.run(jdbc_adapter.settings(body.datasource), "test", timeout_ms=body.timeout_ms, datasource_id=body.datasource.datasource_id)
         if not result.get("read_only"):
             raise HTTPException(409, detail={"error_type": "permission", "message": "尚未通过只读验证"})
         raise HTTPException(422, detail={"error_type": "capability", "operation": "estimate", "message": "该 JDBC 来源不支持无副作用预检，请告警后实际只读执行"})
     dsn = resolve_datasource(body.datasource)
-    if body.datasource.type == "mysql":
+    if adapter_registry.protocol(body.datasource.type)=="mysql":
         return mysql_adapter.estimate(dsn, body.sql, body.parameters, body.timeout_ms)
     try:
         with psycopg.connect(dsn, autocommit=False) as connection:
@@ -667,13 +668,13 @@ class RelationDefinitionInput(DataSourceInput):
 @app.post("/internal/v1/datasources/relation-definitions")
 def relation_definitions(body: RelationDefinitionInput, x_semora_internal_token: str | None = Header(default=None)):
     require_internal_token(x_semora_internal_token)
-    if body.type == "mysql":
+    if adapter_registry.protocol(body.type)=="mysql":
         parts = body.table_id.split(".")
         if len(parts) != 2:
             raise HTTPException(422, "视图标识需包含数据库及名称")
         sql = "SELECT VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA=%(schema)s AND TABLE_NAME=%(name)s LIMIT 1"
         parameters = {"schema": parts[0], "name": parts[1]}
-    elif body.type == "postgresql":
+    elif adapter_registry.protocol(body.type)=="postgres":
         sql = "SELECT pg_get_viewdef(to_regclass(%(table)s), true) LIMIT 1"
         parameters = {"table": body.table_id}
     else:

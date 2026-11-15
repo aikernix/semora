@@ -17,6 +17,7 @@ BUILTINS = {
     "oracle": ("oracle.jdbc.OracleDriver", "ojdbc11-23.6.0.24.10.jar"),
     "sqlserver": ("com.microsoft.sqlserver.jdbc.SQLServerDriver", "mssql-jdbc-12.8.1.jre11.jar"),
     "oceanbase": ("com.oceanbase.jdbc.Driver", "oceanbase-client-2.4.13.jar"),
+    "vastbase": ("cn.com.vastbase.Driver", "vastbase-jdbc-2.13.2v.jar"),
 }
 LOCK = threading.RLock()
 

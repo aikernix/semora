@@ -1,4 +1,4 @@
-from scripts.compare_relationship_runs import compare
+from relationship_comparison import compare
 
 
 def edge(field):
