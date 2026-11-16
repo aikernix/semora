@@ -19,6 +19,11 @@ class OntologyCoreClient:
         self.internal_token = internal_token or os.getenv("INTERNAL_TOKEN", "semora-dev-internal")
 
     async def _request(self, method: str, endpoint: str, **kwargs: Any) -> Any:
+        # Legacy records can contain database Decimal scores. Strip retired
+        # relation fields before HTTP encoding, for every publication entry point.
+        if 'json' in kwargs:
+            from .relation_output import clean_relations
+            kwargs['json'] = clean_relations(kwargs['json'])
         try:
             async with httpx.AsyncClient(timeout=20) as client:
                 response = await client.request(

@@ -119,6 +119,16 @@ def finalize_relationships(candidates, *, cross_source=False):
         if candidate["evidence_grade"] in {"foreign_key", "manual"} or candidate.get("reviewed_by"):
             continue
         evidence = candidate["evidence"]
+        from .relationship_profile import timeout_awaiting_review
+        profile = next((e.get('statistics', {}) for e in reversed(evidence) if e.get('kind') == 'value_profile'), {})
+        if timeout_awaiting_review(profile, cross_source):
+            candidate['status'] = 'pending'
+            candidate['research_pending'] = False
+            candidate['evidence'] = [e for e in evidence if e.get('kind') not in {'confirmation', 'profile_timeout'}]
+            candidate['evidence'].append({'kind':'profile_timeout','reason':'取证超时，关联暂未证实，请人工确认',
+                'profile_id':profile.get('profile_id')})
+            candidate['evidence'].append({'kind':'confirmation','decision':'pending','reasons':['profile_timeout']})
+            continue
         # A temporary tool/model failure is not evidence against a relationship.
         # Keep a previously accepted relation, but never promote a new pending candidate.
         if technically_pending(candidate):

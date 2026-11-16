@@ -5,6 +5,35 @@ import httpx
 from app.ontology import OntologyCoreClient, OntologyCoreError
 
 
+@pytest.mark.parametrize('entry', ['save_configuration', 'save_draft', 'update_source_package', 'append_cross_relations'])
+def test_all_relation_write_entries_strip_decimal_scores_before_http_encoding(monkeypatch, entry):
+    import json
+    from decimal import Decimal
+    original = {'relations': [{'name': 'r', 'metadata': {'relationshipRecord': {
+        'confidence': Decimal('0.98'), 'key_pairs': [{'source': 'a', 'target': 'b'}],
+        'evidence': [{'confidence': Decimal('0.9'), 'coverage': 0.85}]}}}],
+        'relationshipRecords': [{'confidence': Decimal('0'), 'status': 'accepted'}]}
+    requests = []
+    def handler(request):
+        payload = json.loads(request.content)
+        assert 'confidence' not in request.content.decode()
+        assert payload['relations'][0]['metadata']['relationshipRecord']['key_pairs'] == [{'source': 'a', 'target': 'b'}]
+        assert payload['relations'][0]['metadata']['relationshipRecord']['evidence'] == [{'coverage': 0.85}]
+        assert payload['relationshipRecords'] == [{'status': 'accepted'}]
+        requests.append(request)
+        return httpx.Response(200, json=payload)
+    client_factory = httpx.AsyncClient
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: client_factory(
+        transport=httpx.MockTransport(handler), **kwargs))
+    client = OntologyCoreClient()
+    method = getattr(client, entry)
+    args = ('example', original) if entry in {'save_configuration', 'save_draft'} else (original,)
+    asyncio.run(method(*args))
+    assert len(requests) == 1
+    assert original['relationshipRecords'][0]['confidence'] == Decimal('0')
+    assert original['relations'][0]['metadata']['relationshipRecord']['evidence'][0]['confidence'] == Decimal('0.9')
+
+
 @pytest.mark.parametrize("legacy", [False, True])
 def test_snapshot_consumes_ontology_without_wren_dependency(legacy):
     def handler(request):

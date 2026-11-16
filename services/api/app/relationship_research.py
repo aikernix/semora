@@ -8,7 +8,7 @@ VERSION = "query-relationship-research-v23-bidirectional-coverage80"
 
 def factual_evidence(evidence):
     """Internal decisions and previous model opinions are not source evidence."""
-    excluded = {"structural_acceptance", "review_policy", "source_code", "confirmation", "model_review_deferred", "research_complete",
+    excluded = {"profile_timeout", "structural_acceptance", "review_policy", "source_code", "confirmation", "model_review_deferred", "research_complete",
                 "model_semantic_review", "independent_review", "join_contract",
                 "automatic_exclusion", "research_gap", "tool_unavailable", "profile_unavailable", "competition", "model_table_proposal", "model_discovery", "target_domain_audit_complete"}
     return [entry for entry in evidence if entry.get("kind") not in excluded]

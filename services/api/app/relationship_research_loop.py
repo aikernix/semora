@@ -253,7 +253,9 @@ async def run(candidates, packet_for, fetch, model, persist, progress):
                 await assess(disagreement, SYSTEM, 'model_semantic_review', repair=True, allow_tools=False)
             for c in entries:
                 required = ['model_semantic_review'] + (['independent_review'] if c['review_required'] else [])
-                if all(any(e.get('kind') == kind for e in c['evidence']) for kind in required) and not any(e.get('kind') in {'research_gap', 'tool_unavailable'} for e in c['evidence']):
+                from .relationship_profile import timeout_awaiting_review
+                profile = next((e.get('statistics', {}) for e in reversed(c['evidence']) if e.get('kind') == 'value_profile'), {})
+                if all(any(e.get('kind') == kind for e in c['evidence']) for kind in required) and not any(e.get('kind') in {'research_gap', 'tool_unavailable'} for e in c['evidence']) and not timeout_awaiting_review(profile,c.get('scope')=='cross_source'):
                     c['evidence'].append({'kind': 'research_complete', 'version': VERSION})
         else:
             for c in entries:

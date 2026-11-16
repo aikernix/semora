@@ -94,15 +94,30 @@ def test_data_guidance_is_inserted_before_review_output_schema():
 
 
 def test_published_records_keep_own_evidence_and_omit_research_neighbors():
+    from decimal import Decimal
     from app.relation_output import published_relationship
     original = {**relation(), 'evidence': [{'kind': 'value_profile', 'statistics': {'matched_keys': 3}}],
                 'other_proposals': [{'id': 'unapproved'}], 'target_domain_observations': [{'source_table': 'another'}],
-                'research_key': 'checkpoint-internal'}
+                'research_key': 'checkpoint-internal', 'confidence': Decimal('0.98')}
     record = published_relationship(original)
     assert record['evidence'] == original['evidence']
     assert 'other_proposals' not in record and 'research_key' not in record
+    assert 'confidence' not in record
+    assert original['confidence'] == Decimal('0.98')
     record['evidence'][0]['statistics']['matched_keys'] = 9
     assert original['evidence'][0]['statistics']['matched_keys'] == 3
+
+
+def test_published_records_strip_nested_legacy_scores_before_json_encoding():
+    import json
+    from decimal import Decimal
+    from app.relation_output import published_relationship
+    original = {'confidence': Decimal('0.9'), 'evidence': [
+        {'confidence': Decimal('0.8'), 'coverage': 0.85, 'key_pairs': [{'source': 'a', 'target': 'b'}]}]}
+    record = published_relationship(original)
+    assert json.loads(json.dumps(record)) == {'evidence': [
+        {'coverage': 0.85, 'key_pairs': [{'source': 'a', 'target': 'b'}]}]}
+    assert 'confidence' in original['evidence'][0]
 
 
 @pytest.mark.parametrize('changes', [

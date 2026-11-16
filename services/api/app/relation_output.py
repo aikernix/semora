@@ -2,8 +2,8 @@
 def published_relationship(candidate):
     """Research neighbors stay in checkpoints, never inside a published relation."""
     from copy import deepcopy
-    return {k: deepcopy(v) for k, v in candidate.items()
-            if k not in {'other_proposals', 'target_domain_observations', 'research_key'}}
+    return clean_relations({k: deepcopy(v) for k, v in candidate.items()
+            if k not in {'other_proposals', 'target_domain_observations', 'research_key'}})
 
 
 def clean_relations(value):

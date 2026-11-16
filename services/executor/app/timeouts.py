@@ -8,3 +8,7 @@ def scan_timeout_ms():
 
 def query_timeout_ms():
     return max(100, int(os.getenv('QUERY_TIMEOUT_MS', '30000')))
+
+
+def relationship_profile_timeout_ms():
+    return min(30000, max(100, int(os.getenv('RELATIONSHIP_PROFILE_TIMEOUT_MS', '30000'))))

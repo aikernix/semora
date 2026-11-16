@@ -22,7 +22,7 @@ from .mdl_export import column_type
 from .relationship_evidence import recall_field_pairs, finalize_relationships, technically_pending
 
 GENERATOR_VERSION = "source-ontology-v21-bidirectional-coverage80"
-PROFILE_VERSION = "bidirectional-random-v4"
+PROFILE_VERSION = "bidirectional-index-random-v5"
 TERMINAL = {"completed", "completed_with_pending", "failed", "cancelled"}
 GENERIC_NAMES = {"id", "code", "name", "type", "status", "date"}
 
@@ -66,6 +66,18 @@ def _indexed(table: dict[str, Any], columns: list[str], *, unique: bool = False)
         [str(value).lower() for value in (key if unique else key[: len(wanted)])] == wanted
         for key in _keys(table, unique_only=unique)
     )
+
+
+def sampling_key(table):
+    """Use existing unconditional integer unique keys; never create an index."""
+    columns = {c['name']: c for c in table.get('columns', [])}
+    for key in _keys(table, unique_only=True):
+        if len(key) == 1:
+            column = columns.get(key[0], {})
+            if re.fullmatch(r'(?:tinyint|smallint|mediumint|int|integer|bigint|int2|int4|int8|serial|bigserial)(?:\(\d+\))?(?: unsigned)?',
+                            str(column.get('type') or '').strip().lower()):
+                return key[0]
+    return None
 
 
 def _physical_table(table: dict[str, Any]) -> str:
@@ -1232,34 +1244,45 @@ class ModelingService:
         source_table = next(t for t in item.scan_result["tables"] if t["id"] == candidate["source_table_id"])
         target_table = next(t for t in (target_item or item).scan_result["tables"] if t["id"] == candidate["target_table_id"])
         async with self.probe_lock:
-            return await self.executor_request(
-            "POST",
-            "datasources/profile-relationship",
-            json={
-                "datasource": {
-                    "datasource_id": item.id,
-                    "type": item.type,
-                    "secret_ref": item.secret_ref,
-                },
-                "target_datasource": {
-                    "datasource_id": target_item.id,
-                    "type": target_item.type,
-                    "secret_ref": target_item.secret_ref,
-                }
-                if target_item
-                else None,
-                "source_table": candidate["source_table_id"],
-                "source_columns": candidate["source_columns"],
-                "target_table": candidate["target_table_id"],
-                "target_columns": candidate["target_columns"],
-                "sample_rows": 200,
-                "source_index_confirmed": _indexed(source_table, candidate["source_columns"]),
-                "target_unique_index_confirmed": _indexed(target_table, candidate["target_columns"], unique=True),
-                "allow_bounded_unindexed": True,
-                "guards": candidate.get("condition_template", {}).get("guards", []),
-                "target_context_enums": declared_enums(target_table),
-            },
-        )
+            try:
+                return await self.executor_request(
+                    "POST",
+                    "datasources/profile-relationship",
+                    json={
+                        "datasource": {
+                            "datasource_id": item.id,
+                            "type": item.type,
+                            "secret_ref": item.secret_ref,
+                        },
+                        "target_datasource": {
+                            "datasource_id": target_item.id,
+                            "type": target_item.type,
+                            "secret_ref": target_item.secret_ref,
+                        }
+                        if target_item
+                        else None,
+                        "source_table": candidate["source_table_id"],
+                        "source_columns": candidate["source_columns"],
+                        "target_table": candidate["target_table_id"],
+                        "target_columns": candidate["target_columns"],
+                        "sample_rows": 100,
+                        "source_index_confirmed": _indexed(source_table, candidate["source_columns"]),
+                        "target_unique_index_confirmed": _indexed(target_table, candidate["target_columns"], unique=True),
+                        "allow_bounded_unindexed": True,
+                        "guards": candidate.get("condition_template", {}).get("guards", []),
+                        "target_context_enums": declared_enums(target_table),
+                        "source_sampling_key": sampling_key(source_table),
+                        "target_sampling_key": sampling_key(target_table),
+                    },
+                )
+            except Exception as exc:
+                detail = getattr(exc, 'detail', None)
+                directions = detail.get('directions', {}) if isinstance(detail, dict) else {}
+                from .relationship_profile import is_timeout
+                if directions and all(is_timeout(p) for p in directions.values()):
+                    return {'method':'bidirectional_random_membership_v4','sample_budget':100,
+                        'profile_id':detail.get('profile_id'),'raw_values_retained':False,**directions}
+                raise
 
     async def _relationship_agent_tool(self, cards, kind, args):
         from .relationship_inputs import digest, dialect_settings

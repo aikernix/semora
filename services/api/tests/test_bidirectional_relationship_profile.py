@@ -90,6 +90,89 @@ def test_high_reverse_coverage_supports_nonunique_reference():
     assert 'target_uniqueness_unverified' not in c['evidence'][-1]['reasons']
 
 
+@pytest.mark.parametrize('initial', ['accepted', 'unresolved'])
+@pytest.mark.parametrize('cross_source', [False, True])
+def test_profile_timeout_is_review_queue_not_technical_pending(initial,cross_source):
+    stats=profile(.1,.1)
+    stats['reverse']={'status':'unavailable','db_error_code':3024}
+    c=proposed(stats)
+    c['status']=initial
+    finalize_relationships([c],cross_source=cross_source)
+    assert c['status']=='pending' and c['research_pending'] is False
+    assert c['evidence'][-1]['reasons']==['profile_timeout']
+    assert any(e.get('kind')=='profile_timeout' and '超时' in e['reason'] for e in c['evidence'])
+
+
+def test_cross_source_100_keys_at_80_percent_can_pass_despite_other_direction_timeout():
+    stats=profile(.8,0)
+    stats['forward'].update(source_nonnull_distinct_keys=100,matched_keys=80)
+    stats['reverse']={'status':'unavailable','db_error_code':3024}
+    c=proposed(stats)
+    finalize_relationships([c],cross_source=True)
+    assert c['status']=='accepted'
+
+
+def test_low_coverage_without_timeout_does_not_get_timeout_reason():
+    c=proposed(profile(.79,.79))
+    finalize_relationships([c],cross_source=True)
+    assert c['status']!='accepted'
+    assert not any(e.get('kind')=='profile_timeout' for e in c['evidence'])
+
+
+def test_timeout_does_not_block_cross_publication_or_keep_old_timed_out_edge():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from app.datasource_modeling import ModelingRepository, ModelingService, _candidate, tables_digest
+    source={'id':'events','name':'events','columns':[{'name':'ref','type':'bigint'},{'name':'other','type':'bigint'}]}
+    target={'id':'registry','name':'registry','columns':[{'name':'code','type':'bigint'}]}
+    repository=ModelingRepository(dsn='')
+    records={sid:SimpleNamespace(id=sid,scan_result={'tables':[t]}) for sid,t in [('a',source),('b',target)]}
+    for sid,t in [('a',source),('b',target)]:
+        repository.save_package(sid,tables_digest([t]),{'objects':[],'relations':[]},'ready',0)
+    good=_candidate('a','b',source,['ref'],target,['code'],'cross_source',proposed(profile())['evidence'],status='accepted',domain='demo')
+    timeout_stats=profile(.1,.1)
+    timeout_stats['reverse']={'status':'unavailable','db_error_code':3024}
+    timed=_candidate('a','b',source,['other'],target,['code'],'cross_source',proposed(timeout_stats)['evidence'],status='accepted',domain='demo')
+    configuration={'objects':[
+        {'name':'events','dataSourceId':'a','metadata':{'sourceTableId':'events'},'properties':[{'column':n,'name':n} for n in ['ref','other']]},
+        {'name':'registry','dataSourceId':'b','metadata':{'sourceTableId':'registry'},'properties':[{'column':'code','name':'code'}]}],
+        'relations':[{'name':'old','from':'events','to':'registry','metadata':{'candidateId':timed['id']}}]}
+    ontology=SimpleNamespace(get_configuration=AsyncMock(return_value=configuration),save_configuration=AsyncMock())
+    service=ModelingService(SimpleNamespace(repository=SimpleNamespace(get=records.__getitem__)),None,repository=repository,ontology_service=ontology)
+    async def review(candidates,*args,**kwargs):candidates.extend([good,timed])
+    service._semantic_review=review
+    job=repository.create_job('a',kind='cross_source',peer_datasource_id='b',domain='demo')
+    asyncio.run(service._run_cross_source(job))
+    assert job['status']=='completed' and job['details']['relationships_updated'] is True
+    assert timed['status']=='pending'
+    published=ontology.save_configuration.await_args.args[1]['relations']
+    assert [r['metadata']['candidateId'] for r in published]==[good['id']]
+    assert any(c['id']==timed['id'] and c['status']=='pending' for c in repository.list_cross_candidates('a','b','demo'))
+
+
+def test_api_preserves_double_timeout_as_relation_evidence():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from fastapi import HTTPException
+    from app.datasource_modeling import ModelingRepository,ModelingService
+    source=SimpleNamespace(id='a',type='mysql',secret_ref='DATASOURCE_A_URL',
+        scan_result={'tables':[{'id':'events','columns':[{'name':'ref','type':'bigint'}]}]})
+    unavailable={'status':'unavailable','db_error_code':3024}
+    fetch=AsyncMock(side_effect=HTTPException(503,{'profile_id':'p','directions':{
+        'forward':unavailable,'reverse':unavailable}}))
+    service=ModelingService(None,fetch,repository=ModelingRepository(dsn=''))
+    candidate={'source_table_id':'events','target_table_id':'events','source_columns':['ref'],
+        'target_columns':['ref'],'condition_template':{}}
+    result=asyncio.run(service._profile(source,candidate))
+    assert result['forward']==unavailable and result['reverse']==unavailable
+    assert fetch.await_args.kwargs['json']['sample_rows']==100
+    c=proposed(result)
+    finalize_relationships([c])
+    assert c['status']=='pending' and c['research_pending'] is False
+
+
 def test_positive_partial_coverage_cannot_bypass_threshold_with_model_agreement():
     c=proposed(profile(.01,.03))
     finalize_relationships([c])

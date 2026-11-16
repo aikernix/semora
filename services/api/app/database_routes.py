@@ -16,7 +16,7 @@ from .datasources import datasource_service
 from .mdl_export import build_mdl, merge_snapshot, column_type
 from .datasource_table_storage import tables_digest
 from .ontology import ontology_service
-from .datasource_modeling import ModelingService, TERMINAL, _indexed, package_objects, package_relations, GENERATOR_VERSION
+from .datasource_modeling import ModelingService, TERMINAL, _indexed, package_objects, package_relations, GENERATOR_VERSION, sampling_key
 from .relation_output import clean_relations
 
 router=APIRouter(prefix="/api/v1")
@@ -206,7 +206,7 @@ def _relationship_view(candidate):
         "origin": origin,
         "evidence_grade": grade,
         "review_note": candidate.get("review_note", ""),
-        "decision_reason": next((e.get("reason") for e in reversed(candidate.get("evidence", [])) if e.get("kind") in {"automatic_exclusion", "independent_review", "model_semantic_review", "research_gap", "tool_unavailable", "profile_unavailable", "profile_audit_unavailable"}), ""),
+        "decision_reason": next((e.get("reason") for e in reversed(candidate.get("evidence", [])) if e.get("kind") in {"profile_timeout", "automatic_exclusion", "independent_review", "model_semantic_review", "research_gap", "tool_unavailable", "profile_unavailable", "profile_audit_unavailable"}), ""),
         "predicates": candidate.get("condition_template", {}).get("guards", []),
         "automatically_excluded": candidate.get("status") == "rejected" and any(e.get("kind") == "automatic_exclusion" for e in candidate.get("evidence", [])),
     }
@@ -418,8 +418,10 @@ async def profile(identifier: str,candidate_id: str):
         raise HTTPException(422,"该候选没有满足安全采样要求的来源索引和目标唯一索引")
     result=await executor_request("POST","datasources/profile-relationship",json={"datasource":payload(item),
         "source_table":candidate["source_table"],"source_columns":candidate["columns"],
-        "target_table":candidate["target_table"],"target_columns":candidate["target_columns"],"sample_rows":200,
-        "source_index_confirmed":True,"target_unique_index_confirmed":True})
+        "target_table":candidate["target_table"],"target_columns":candidate["target_columns"],"sample_rows":100,
+        "source_index_confirmed":True,"target_unique_index_confirmed":True,
+        "source_sampling_key":sampling_key(source_table),
+        "target_sampling_key":sampling_key(target_table)})
     candidate["profile"]=result;datasource_service.repository.save(item)
     return result
 

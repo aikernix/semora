@@ -369,7 +369,7 @@ def test_executor_profiles_directional_membership_without_returning_values(monke
     result = executor.profile_relationship(body)
     assert result["directional_coverage"] == 1
     assert result["raw_values_retained"] is False
-    assert timeouts and set(timeouts)=={10000}
+    assert timeouts and set(timeouts)=={30000}
     assert "rows" not in result
 
     result=executor.profile_relationship(body.model_copy(update={"source_index_confirmed":False,"target_unique_index_confirmed":False}))
