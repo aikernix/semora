@@ -30,7 +30,7 @@ class Understanding(QueryUnderstanding):
 
 class StepRepair(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    sql: str = Field(min_length=1, max_length=100000, description="修复后的完整PostgreSQL基准SQL，参数使用:name；不是目标方言SQL。")
+    sql: str = Field(min_length=1, max_length=100000, description="修复后的完整SQL，使用当前步骤指定方言，参数使用:name。")
     parameters: dict = Field(default_factory=dict)
     change_summary: str = Field(
         min_length=1,
@@ -42,7 +42,7 @@ class StepRepair(BaseModel):
 class CoverageEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
     step: str
-    sql: str = Field(min_length=1, max_length=100000, description="业务冲突修正后的完整PostgreSQL基准SQL，参数使用:name；不做目标方言适配。")
+    sql: str = Field(min_length=1, max_length=100000, description="业务冲突修正后的完整SQL，使用该步骤指定方言，参数使用:name。")
     parameters: dict | None = None
     requirement_quote: str = Field(min_length=1, max_length=500)
     change_summary: str = Field(
@@ -116,9 +116,10 @@ def context(workflow, run, question):
         source = datasource_service.repository.get(source_id)
         from .database_profile import source_profile
 
-        sources.append({"id": source_id, "name": source.name, **source_profile(source)})
+        from .sql_dialect import dialect_for
+        sources.append({"id": source_id, "name": source.name, **source_profile(source), "dialect": dialect_for(source_id)})
     return {
-        "sql_contract": {"authoring_dialect": "postgres", "parameter_style": ":name"},
+        "sql_contract": {"authoring_dialect": "per_step", "local_dialect": "duckdb", "parameter_style": ":name"},
         "request": question,
         "confirmed_answers": confirmed_fact_context(workflow, run),
         "materials": packet,
@@ -143,7 +144,7 @@ def sql_context(workflow, run, question, requirement):
     return payload
 
 
-MAX_SQL_REPAIRS = 5
+MAX_SQL_REPAIRS = 3
 
 
 def reserve_sql_repair(run, issue):
@@ -166,6 +167,8 @@ async def structured(workflow, run, prompt, payload, schema):
     from .sql_errors import SQLIssue
     for attempt in range(MAX_SQL_REPAIRS + 2):
         previous_value = value
+        if attempt:
+            reserve_sql_repair(run, contract_error)
         try:
             raw = await workflow.model.complete_json(
                 prompt,
@@ -227,7 +230,9 @@ async def structured(workflow, run, prompt, payload, schema):
                         ]
                     )
                     try:
-                        tree = readonly_tree(step.sql, tables)
+                        from .sql_dialect import step_dialect
+                        step.dialect = step_dialect(step)
+                        tree = readonly_tree(step.sql, tables, step.dialect)
                         if step.engine == "source":
                             from .sql_column_refs import validate_physical_column_refs
 
@@ -248,6 +253,8 @@ async def structured(workflow, run, prompt, payload, schema):
                             "同源关联直接在source SQL中完成，local不能访问物理表。"
                         ) from exc
                     previous.append(step.name)
+            if candidate is not None and schema is SQLProgram:
+                parsed = candidate
             return parsed
         except TaskSupersededError:
             raise
@@ -262,9 +269,15 @@ async def structured(workflow, run, prompt, payload, schema):
             if isinstance(exc, SQLIssue):
                 if exc.kind != "sql":
                     raise
+                diagnostic = {"attempt": attempt + 1, "error_stage": exc.stage,
+                              "error_type": exc.kind, "reason": str(exc)[:1600]}
+                run.agent_memory.setdefault("sql_validation_rejections", []).append(diagnostic)
+                run.agent_memory["sql_validation_rejections"] = run.agent_memory["sql_validation_rejections"][-8:]
+                if callable(getattr(workflow, "emit", None)):
+                    workflow.emit(run, "sql.validation.rejected", run.status,
+                                  {**diagnostic, "summary": "SQL未通过程序校验：" + str(exc)[:1600]}, "sql_author")
                 if previous_value is not None and value == previous_value:
-                    raise ValueError("模型重复提交相同无效SQL，已停止重复修复") from exc
-                reserve_sql_repair(run, str(exc))
+                    raise ValueError("模型重复提交相同无效SQL，已停止重复修复；校验原因：" + str(exc)[:1600]) from exc
             elif format_corrections:
                 raise
             else:
@@ -457,7 +470,8 @@ async def check_coverage(workflow, run, payload, program):
     alignment = inspect_alignment(logical, program, payload.get("materials", {}))
     run.agent_memory["sql_alignment"] = [{"findings": alignment}]
     # A plain projection with no deterministic finding has no scope/aggregation interaction to reconcile.
-    trees = [sqlglot.parse_one(s.sql, read="postgres") for s in program.steps]
+    from .sql_dialect import parse_query
+    trees = [parse_query(s.sql, s.dialect or "postgres") for s in program.steps]
     if not alignment and len(trees) == 1 and not any(trees[0].find(t) for t in (exp.AggFunc, exp.Join, exp.Subquery)):
         return program
     try:
@@ -558,7 +572,7 @@ async def repair_step(workflow, run, name, issue):
         confirmed_requirement=run.requirement.model_dump(mode="json") if run.requirement else None,
         program=run.plan.sql_program.model_dump(mode="json"),
         current_step=name,
-        editable_baseline={"dialect": "postgres", "sql": step.sql, "parameters": step.parameters},
+        editable_baseline={"dialect": "duckdb" if step.engine == "local" else dialect_for(step.data_source_id), "sql": step.sql, "parameters": step.parameters},
         execution_diagnostic={
             "target_dialect": "duckdb" if step.engine == "local" else dialect_for(step.data_source_id),
             "target_sql": current_artifact.physical_sql if current_artifact else None,
@@ -576,7 +590,8 @@ async def repair_step(workflow, run, name, issue):
     from .run_state import digest
 
     before_hash = digest([step.sql, step.parameters])
-    step.sql, step.parameters = fixed.sql, fixed.parameters
+    from .sql_dialect import step_dialect
+    step.sql, step.parameters, step.dialect = fixed.sql, fixed.parameters, step_dialect(step)
     run.agent_memory.setdefault("sql_repairs", []).append(
         {"step": name, "error": issue, "change_summary": fixed.change_summary, "attempt": attempt}
     )

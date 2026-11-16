@@ -43,7 +43,7 @@ def source_profile(source):
             "sql_baseline": {"id": SQL_BASELINE_ID,
                 "preferred_syntax": "优先通用SQL；features为true表示已验证，false表示已确认不支持，null表示未知、允许数据库预检；仅对已确认不支持的能力使用等价写法",
                 "pagination": capabilities.get("pagination_strategy") or ("rownum" if source.type=="oracle" else "sqlglot")},
-            "dialect": capabilities.get("dialect"),"compatibility_mode": connection.get("compatibility_mode"),
+            "dialect": capabilities.get("dialect"),"compatibility_mode": connection.get("detected_compatibility_mode") or connection.get("compatibility_mode"),
             "driver_version": connection.get("driver_version"), "capabilities": capabilities,
             "function_capabilities": {k: {key: p[key] for key in ("status", "scope", "method", "function", "argument_kinds", "context") if key in p}
                 for k, p in functions.items()},

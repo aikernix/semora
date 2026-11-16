@@ -229,12 +229,6 @@ class KeywordDiscovery(OrganizationMixin, Discovery):
                             if visible is None:
                                 visible = payload['source_a']['tables'] + payload['source_b']['tables']
                             result,discarded=self.valid_proposals(result,visible,payload.get('comparison_pairs'))
-                            if discarded and attempt<attempts-1:
-                                raise DiscoveryIncomplete('invalid_relation_proposals',details={'relations':discarded})
-                            if discarded and kind in {'compare','cross_compare'}:
-                                repaired=await self.repair_field_proposals(kind,system,payload,visible,discarded)
-                                merged={self.proposal_key(r):r for r in result['relations']+repaired}
-                                result['relations']=list(merged.values())
                         elif contract is OrganizationOutput:
                             from .relationship_organization import salvage_organization
                             result,discarded=salvage_organization(result,payload)

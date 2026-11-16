@@ -89,18 +89,18 @@ def test_non_capability_faults_never_poison_recorded_support(monkeypatch, kind):
     assert not datasources.datasource_service.repository.get("source").scan_result.get("sql_feedback")
 
 
-def test_fifth_repair_can_succeed_without_a_sixth_attempt(monkeypatch):
+def test_third_repair_can_succeed_without_a_fourth_attempt(monkeypatch):
     w, session, _, estimate, model, _ = native_harness(monkeypatch)
     original = deepcopy(model.complete_json.return_value)
     model.complete_json.side_effect = [original] + [
         {"sql": "SELECT id" + "+0" * n + " AS id FROM items ORDER BY id", "change_summary": f"Correction {n}"}
-        for n in range(1, 6)
+        for n in range(1, 4)
     ]
-    estimate.side_effect = [ExecutorOperationError("syntax", 1064)] * 5 + [{"estimated_rows": 2}]
+    estimate.side_effect = [ExecutorOperationError("syntax", 1064)] * 3 + [{"estimated_rows": 2}]
     run = asyncio.run(w.start(session.id, "List identifiers", domain="test"))
     assert run.status.value == "completed", run.error
-    assert run.agent_memory["sql_repair_count"] == [{"attempts": 5}]
-    assert len(query_model_calls(model)) == estimate.await_count == 6
+    assert run.agent_memory["sql_repair_count"] == [{"attempts": 3}]
+    assert len(query_model_calls(model)) == estimate.await_count == 4
     assert run.result.rows == [[1], [2]]
 
 
@@ -147,17 +147,17 @@ def test_missing_function_is_recorded_as_statement_evidence_without_disabling_fe
     assert source_profile(source)["features"]["window_functions"] is None
 
 
-def test_generation_and_database_corrections_share_five_rounds(monkeypatch):
+def test_generation_and_database_corrections_share_three_rounds(monkeypatch):
     w, session, _, estimate, model, _ = native_harness(monkeypatch)
     original = deepcopy(model.complete_json.return_value)
     invalid = deepcopy(original)
     invalid["steps"][0]["sql"] = "SELECT id FROM outside_materials"
     model.complete_json.side_effect = [invalid, original] + [
         {"sql": "SELECT id" + "+0" * n + " AS id FROM items ORDER BY id", "change_summary": f"Correction {n}"}
-        for n in range(1, 5)
+        for n in range(1, 3)
     ]
-    estimate.side_effect = [ExecutorOperationError("syntax", 1064)] * 4 + [{"estimated_rows": 2}]
+    estimate.side_effect = [ExecutorOperationError("syntax", 1064)] * 2 + [{"estimated_rows": 2}]
     run = asyncio.run(w.start(session.id, "List identifiers", domain="test"))
     assert run.status.value == "completed", run.error
-    assert run.agent_memory["sql_repair_count"] == [{"attempts": 5}]
-    assert len(query_model_calls(model)) == 6
+    assert run.agent_memory["sql_repair_count"] == [{"attempts": 3}]
+    assert len(query_model_calls(model)) == 4

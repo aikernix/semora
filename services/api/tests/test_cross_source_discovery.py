@@ -147,20 +147,12 @@ def test_failed_batch_does_not_block_other_cross_source_pairs():
     engine.cross_regions = lambda: iter([payloads_for_pair(engine, pair) for pair in pairs])
     proposals = asyncio.run(engine.run())
     assert len(proposals) == len(pairs) - 1
-    assert engine.summary['cross_failed_batches'] == 1
+    assert engine.summary['cross_failed_batches'] == 0
     assert all(proposal['shared_keywords'] == ['客户编号'] for proposal in proposals)
-    assert len(model.calls) == len(pairs) + 2  # Three scoped retries for the bad batch, all other batches succeed.
-    before=len(model.calls)
-    assert engine.stage_result('cross_discovery') is None
-    model.invalid_pair=None
-    restored=CrossSourceDiscovery(cards,model,state,lambda:None,repository=SimpleNamespace(dsn=''),
-        left_source_id='a',right_source_id='b',keyword_records=records)
-    restored.cross_regions=lambda:iter([payloads_for_pair(restored,pair) for pair in pairs])
-    recovered=asyncio.run(restored.run())
-    assert len(model.calls)==before+1
-    assert len(recovered)==len(pairs)
-    assert restored.summary['cross_failed_batches']==0
-    assert restored.stage_result('cross_discovery') is not None
+    assert len(model.calls) == len(pairs)
+    assert engine.stage_result('cross_discovery') is not None
+    assert engine.scope['discarded_relations']
+
 
 
 def test_large_keyword_is_batched_instead_of_skipped(monkeypatch):

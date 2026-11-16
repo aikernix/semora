@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 import sqlglot
+from .sql_dialect import parse_query
 from sqlglot import exp
 
 
@@ -92,7 +93,7 @@ def _tree_facts(program):
     columns, grouped, filtered = set(), set(), set()
     aggregates, has_order, limits = [], False, []
     for step in program.steps:
-        tree = sqlglot.parse_one(step.sql, read="postgres")
+        tree = parse_query(step.sql, dialect=step.dialect or "postgres")
         aliases = {t.alias_or_name.lower(): t.name.lower() for t in tree.find_all(exp.Table)}
         columns |= _column_names(tree, aliases)
         for group in tree.find_all(exp.Group):
@@ -190,7 +191,7 @@ def inspect_alignment(plan, program, materials: dict[str, Any]) -> list[dict[str
         })
     step_tables = []
     for step in program.steps:
-        tree = sqlglot.parse_one(step.sql, read="postgres")
+        tree = parse_query(step.sql, dialect=step.dialect or "postgres")
         step_tables.append({table.name.lower() for table in tree.find_all(exp.Table)})
     for ref in plan.relation_refs:
         relation = relations.get(ref, {})

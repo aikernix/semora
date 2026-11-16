@@ -146,6 +146,17 @@ function openPair(pair:any){selectedPairKey.value=pair.key;relationFilter.value=
 function openPairPicker(){crossLeft.value='';crossRight.value='';pairPickerVisible.value=true}
 function canAnalyze(pair:any){return !saving.value&&!startingPair.value&&terminalJob(pair.job)&&[pair.left.id,pair.right.id].every(id=>crossSources.value.some(s=>s.id===id))}
 function requestAnalysis(pair:any){if(canAnalyze(pair)){error.value='';analysisConfirmation.value=pair}}
+async function resumeCrossAnalysis(pair:any){
+  if(!pair.job||!canAnalyze(pair))return
+  const domain=selectedDomain.value,version=loadVersion,id=pair.job.id
+  startingPair.value=pair.key;error.value=''
+  try{
+    const job=(await api.post(`/datasources/${pair.job.datasource_id}/onboarding/${id}/resume`)).data
+    if(domain!==selectedDomain.value||version!==loadVersion)return
+    crossJobs.value[pair.key]=job;message.value='已继续上次跨源分析。';void pollCross()
+  }catch(reason:any){if(domain===selectedDomain.value)error.value=reason.response?.data?.detail||'继续分析失败'}
+  finally{if(domain===selectedDomain.value&&version===loadVersion)startingPair.value=''}
+}
 function pairState(pair:any){return pair.job?.status==='cancelling'?'正在取消':!terminalJob(pair.job)?'正在分析':pair.job?.status==='cancelled'?'已取消':pair.job?.status==='failed'?'分析失败':pair.job?.details?.technical_incomplete?'部分分析未完成':pair.counts.pending?'有待审核':pair.rows.length?'已有关联':pair.job?'已分析':'未分析'}
 function canCancel(pair:any){return !terminalJob(pair.job)&&pair.job.phase!=='publishing'&&pair.job.status!=='cancelling'&&!cancellingPair.value}
 async function cancelCrossAnalysis(pair:any){
@@ -379,7 +390,7 @@ onUnmounted(() => { if (crossTimer) clearTimeout(crossTimer) })
             <div v-if="!terminalJob(pair.job)" class="pair-progress"><t-progress :percentage="pair.job.progress||0" size="small"/><small>{{crossMessage(pair.job)}}</small></div>
             <p v-else-if="pair.job?.details?.technical_incomplete" class="pair-error">部分范围未完成，原生效关系保留。</p><p v-else-if="pair.job?.error" class="pair-error">{{names.text(pair.job.error)}}</p>
             <p v-else class="pair-description">{{pair.job?.completed_at?`最近分析：${new Date(pair.job.completed_at).toLocaleString()}`:pair.rows.length?'查看关联详情或重新分析。':'尚未分析，可选择分析或手动添加表间关系。'}}</p>
-            <div class="pair-card-actions"><t-button variant="outline" @click="openPair(pair)">查看关联关系</t-button><t-button v-if="terminalJob(pair.job)" theme="primary" :loading="startingPair===pair.key" :disabled="!canAnalyze(pair)" @click="requestAnalysis(pair)">{{pair.job||pair.rows.length?'重新分析关联关系':'分析关联关系'}}</t-button><t-button v-else theme="danger" variant="outline" :loading="cancellingPair===pair.key||pair.job.status==='cancelling'" :disabled="!canCancel(pair)" @click="cancelCrossAnalysis(pair)">{{pair.job.phase==='publishing'?'正在发布结果':pair.job.status==='cancelling'?'正在取消':'取消分析'}}</t-button></div>
+            <div class="pair-card-actions"><t-button variant="outline" @click="openPair(pair)">查看关联关系</t-button><t-button v-if="pair.job?.details?.checkpoint_ref && (pair.job?.status==='failed' || (pair.job?.status==='completed_with_pending' && pair.job?.details?.technical_incomplete)) && terminalJob(pair.job)" variant="outline" :loading="startingPair===pair.key" :disabled="!canAnalyze(pair)" @click="resumeCrossAnalysis(pair)">继续上次分析</t-button><t-button v-if="terminalJob(pair.job)" theme="primary" :loading="startingPair===pair.key" :disabled="!canAnalyze(pair)" @click="requestAnalysis(pair)">{{pair.job||pair.rows.length?'重新分析关联关系':'分析关联关系'}}</t-button><t-button v-else theme="danger" variant="outline" :loading="cancellingPair===pair.key||pair.job.status==='cancelling'" :disabled="!canCancel(pair)" @click="cancelCrossAnalysis(pair)">{{pair.job.phase==='publishing'?'正在发布结果':pair.job.status==='cancelling'?'正在取消':'取消分析'}}</t-button></div>
           </article>
         </div>
         <div v-else class="empty-hint">请先添加至少两个数据源，再建立库与库之间的关联。</div>

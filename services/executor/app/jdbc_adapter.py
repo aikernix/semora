@@ -164,6 +164,7 @@ def run(cfg, operation, *, execution_id=None, timeout_ms=None, validating=False,
                 if result.get("error_class") in {"ClassNotFoundException","NoClassDefFoundError","UnsupportedClassVersionError","AbstractMethodError","NoSuchMethodError"}:
                     raise HTTPException(409,detail={"error_type":"unknown","message":"JDBC 驱动类、配套依赖或 Java 版本不兼容","driver_error_class":result["error_class"]})
                 exc = Exception(result.get("code"))
+                exc.sql_message = result.get("sql_message")
                 exc.sqlstate = result.get("sqlstate")
                 if result.get("code") in {1017,1031,18456,229,230,900,903,907,933,936,102,156,904,942,207,208,1045,1044,1142,1143,1227,1064,1054,1146}:
                     exc.sqlstate = None

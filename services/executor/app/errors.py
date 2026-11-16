@@ -39,7 +39,9 @@ def database_error(exc, operation):
         elif code in {1054,1146,1305,1055} and len(args)>1:
             # MySQL quotes identifiers with single quotes in these messages.
             names=re.findall(r"'([A-Za-z_][A-Za-z0-9_.$]{0,199})'",str(args[1]))
-            if names:diagnostic['message']='Referenced identifiers: '+', '.join(names[:4])
+            if names:
+                diagnostic['message']='Referenced identifiers: '+', '.join(names[:4])
+                if code==1054:diagnostic['column']=names[0]
         elif code == 1247:
             diagnostic['message']='An aggregate output alias cannot be referenced inside another ORDER BY expression; use the aggregate expression itself.'
         elif code == 1064 and len(args)>1 and str(args[1]).startswith('You have an error in your SQL syntax;'):
@@ -50,5 +52,25 @@ def database_error(exc, operation):
             if near:
                 tokens=re.findall(r'\b(?:ROW_NUMBER|OVER|PARTITION|WITH|RECURSIVE|LATERAL|FILTER|NULLS|FIRST|LAST|CASE|CAST|ORDER|GROUP|BY)\b',near[1],re.I)
                 diagnostic={'position_line':near[2], 'sql_tokens':list(dict.fromkeys(t.upper() for t in tokens))[:12]}
+    if kind in {'syntax','schema','unsupported_sql'}:
+        # Vendor SQL errors may include values or connection strings. Keep the
+        # explanatory structure and position while masking those values.
+        trusted = getattr(exc, 'sql_message', None)
+        try:
+            import pymysql
+            if isinstance(exc, pymysql.err.MySQLError) and len(args)>1:
+                trusted = str(args[1])
+        except ImportError:
+            pass
+        if trusted:
+            text = re.sub(r"'(?:[^']|'')*'", "'<value>'", str(trusted))
+            text = re.sub(r'\b\w+://\S+', '<connection>', text)
+            import os
+            for key, secret in os.environ.items():
+                if len(secret)>=8 and any(word in key.upper() for word in ('PASSWORD','TOKEN','SECRET','API_KEY')):
+                    text = text.replace(secret, '<secret>')
+            diagnostic['message'] = text[:4000]
+        if getattr(exc, 'sqlstate', None):
+            diagnostic['sqlstate'] = str(exc.sqlstate)[:12]
     return HTTPException(502,detail={'error_type':kind,'db_error_code':code,
         'operation':operation,'message':messages[kind],**({'diagnostic':diagnostic} if diagnostic else {})})

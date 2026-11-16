@@ -267,8 +267,6 @@ class CrossSourceDiscovery(KeywordDiscovery):
             request_key = digest([self.version, CROSS_COMPARE_SYSTEM, payload])
             if any(failure.get('comparison_pairs')==payload['comparison_pairs'] for failure in previous_failures):
                 self.work.retry_completed('cross_compare',request_key)
-            discarded_before = sum(item.get('request_key') == request_key
-                                   for item in self.scope.get('discarded_relations', []))
             try:
                 result = await self.request('cross_compare', CROSS_COMPARE_SYSTEM, payload, ProposalOutput)
             except Exception as exc:
@@ -278,13 +276,6 @@ class CrossSourceDiscovery(KeywordDiscovery):
                                  'error_type': type(exc).__name__, 'error': str(exc)[:500]})
                 self.save()
                 return
-            discarded_after = sum(item.get('request_key') == request_key
-                                  for item in self.scope.get('discarded_relations', []))
-            if discarded_after > discarded_before:
-                failures.append({'comparison_pairs': payload['comparison_pairs'],
-                                 'request_key':request_key,
-                                 'error_type': 'invalid_relation_proposals',
-                                 'discarded': discarded_after - discarded_before})
             for relation in result['relations']:
                 relation = self.attach_keyword_evidence(relation)
                 proposals[self.proposal_key(relation)] = relation

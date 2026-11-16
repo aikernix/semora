@@ -24,7 +24,7 @@ flowchart TD
     M -->|返回不超过100条| N[模型结果说明]
 ```
 
-模型生成 PostgreSQL 基准方言 SQL，SQLGlot 转为目标方言；数据库 EXPLAIN 和实际执行验证可执行性。语法正确不等于业务含义已获证明。当前包含 MySQL / PostgreSQL 原生协议与多个 JDBC 产品适配入口；具体产品模式、驱动、参数、方言及预校验能力需按实例验证，不能仅凭 SQLGlot 支持该方言就宣布完整支持。
+模型按步骤的实际执行方言生成 SQL：source 使用数据源探测的方言、版本和兼容模式，local 使用 DuckDB；SQLGlot 按同一方言解析与渲染，数据库 EXPLAIN 和实际执行验证可执行性。语法正确不等于业务含义已获证明。当前包含 MySQL / PostgreSQL 原生协议与多个 JDBC 产品适配入口；具体产品模式、驱动、参数、方言及预校验能力需按实例验证，不能仅凭 SQLGlot 支持该方言就宣布完整支持。
 
 理解角色调用资料工具，产出 `QueryUnderstanding`；SQL 角色依据原始需求、实际确认答案、相关定义、表结构、身份键和数据库版本，产出 `SQLProgram`，不继承未确认草案的结论。结构由 Pydantic JSON Schema 随请求提供。二者使用独立请求上下文，不累积原始 HTTP 记录；提示词在 `semora_agent/sql_prompts.py`，通用研究及协议提示词在 `semora_agent/prompts.py`。
 
@@ -77,3 +77,5 @@ JSON格式及结构问题最多一次契约纠正。语法、字段、类型和�
 ```powershell
 docker compose -f docker-compose.yml -f deploy/compose.mvp.yml logs -f api executor
 ```
+
+SQL 生成、校验及执行错误共用最多三次修复机会；修复输入包含当前原始 SQL、实际发送的 SQL、数据库错误码及脱敏诊断。新步骤持久化 dialect；旧步骤未记录 dialect 时沿用原 PostgreSQL 解释方式，以兼容历史记录。

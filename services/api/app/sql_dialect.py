@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import sqlglot
 from sqlglot import exp
 from sqlglot.optimizer.scope import traverse_scope
@@ -15,8 +16,9 @@ from .sql_errors import SQLIssue
 def dialect_for(source_id):
     source = datasource_service.repository.get(source_id)
     dialect = PRODUCTS.get(source.type,{}).get("dialect") or ("postgres" if source.type=="postgres" else "")
-    if source.type == "vastbase":
-        detected = source.scan_result.get("connection", {}).get("detected_compatibility_mode", "")
+    if source.type in {"vastbase", "oceanbase"}:
+        connection = source.scan_result.get("connection", {})
+        detected = connection.get("detected_compatibility_mode") or connection.get("compatibility_mode") or source.scan_result.get("capabilities", {}).get("dialect", "")
         if detected in {"postgres", "oracle", "mysql", "tsql"}:
             dialect = detected
     if not dialect:
@@ -30,13 +32,42 @@ def dialect_for(source_id):
     return dialect
 
 
-def readonly_tree(sql, allowed_tables):
+def parse_statements(sql, dialect):
+    # Named bindings are a transport contract, independent of SQL dialect.
+    # Token offsets protect strings, quoted identifiers, comments and PG casts.
+    tokens = sqlglot.Dialect.get_or_raise(dialect).tokenize(sql)
+    replacements, names = [], {}
+    for left, right in zip(tokens, tokens[1:]):
+        if left.token_type.name == "COLON" and right.start == left.end + 1 and re.fullmatch(r"[A-Za-z_]\w*", right.text):
+            marker = f"semora_named_param_{len(names)}"
+            names[marker] = right.text
+            replacements.append((left.start, right.end + 1, ":" + marker))
+    source = sql
+    for start, end, replacement in reversed(replacements):
+        source = source[:start] + replacement + source[end:]
+    trees = sqlglot.parse(source, read=dialect)
+    for tree in trees:
+        if tree is not None:
+            for node in tree.find_all(exp.Placeholder):
+                if node.this in names:
+                    node.set("this", names[node.this])
+    return trees
+
+
+def parse_query(sql, dialect="postgres"):
+    trees = parse_statements(sql, dialect)
+    if len(trees) != 1 or trees[0] is None:
+        raise SQLIssue("每步必须是一条查询")
+    return trees[0]
+
+
+def readonly_tree(sql, allowed_tables, dialect="postgres"):
     if "__semora_bind_" in sql:
         raise SQLIssue("SQL使用了保留参数标识")
     try:
-        statements = sqlglot.parse(sql, read="postgres")
-    except sqlglot.errors.ParseError as exc:
-        raise SQLIssue("基准SQL解析失败：" + str(exc)[:1500]) from exc
+        statements = parse_statements(sql, dialect)
+    except (sqlglot.errors.ParseError, sqlglot.errors.TokenError) as exc:
+        raise SQLIssue("SQL解析失败：" + str(exc)[:1500]) from exc
     if len(statements) != 1 or not isinstance(
         statements[0], (exp.Select, exp.Union, exp.Intersect, exp.Except)
     ):
@@ -44,7 +75,7 @@ def readonly_tree(sql, allowed_tables):
     tree = statements[0]
     if tree.find(exp.Parameter) or tree.find(exp.PropertyEQ):
         raise SQLIssue(
-            "基准SQL不允许会话变量或赋值；参数使用:name。分组取最后一条请使用分组关联或相关子查询，不依赖变量求值顺序。"
+            "SQL不允许会话变量或赋值；参数使用:name。分组取最后一条请使用分组关联或相关子查询，不依赖变量求值顺序。"
         )
     forbidden = (
         exp.Insert,
@@ -168,7 +199,7 @@ def compile_step(step, ontology, results=None, *, template=False, row_limit=1000
         ]
         dialect = dialect_for(step.data_source_id)
         source_label = datasource_service.repository.get(step.data_source_id).name
-    tree = readonly_tree(step.sql, allowed)
+    tree = readonly_tree(step.sql, allowed, step.dialect or "postgres")
     if step.engine == "source":
         from .sql_column_refs import validate_physical_column_refs
 
@@ -240,7 +271,7 @@ def compile_step(step, ontology, results=None, *, template=False, row_limit=1000
     # truncation rather than allowing false absence/counts downstream.
     if tree.args.get("limit") is None:
         tree = tree.limit(row_limit + 1)
-    if dialect == "mysql":
+    if dialect == "mysql" and not step.dialect:
         # MySQL forbids aggregate output aliases inside ORDER BY expressions.
         # Its generator emulates PG null ordering with CASE, so resolve local
         # aggregate aliases before generation rather than deleting null order.
@@ -311,7 +342,7 @@ def compile_step(step, ontology, results=None, *, template=False, row_limit=1000
             "engine": "sql-native-v1",
             "sql_baseline": SQL_BASELINE_ID,
             "baseline_hash": hashlib.sha256(step.sql.encode()).hexdigest(),
-            "source_dialect": "postgres",
+            "source_dialect": step.dialect or "postgres",
             "target_dialect": dialect,
             "data_source_label": source_label,
             "local_dependencies": local_tables,
@@ -319,3 +350,7 @@ def compile_step(step, ontology, results=None, *, template=False, row_limit=1000
             "inputs_bound": not template,
         },
     )
+
+
+def step_dialect(step):
+    return "duckdb" if step.engine == "local" else dialect_for(step.data_source_id)

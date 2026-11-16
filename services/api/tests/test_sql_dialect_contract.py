@@ -21,8 +21,8 @@ sources = source_fixture
 @pytest.mark.parametrize("prompt", [AUTHOR, COVERAGE, REPAIR])
 def test_all_sql_writers_share_the_same_baseline_contract(prompt):
     assert SQL_CONTRACT in prompt
-    assert "PostgreSQL" in SQL_CONTRACT
-    assert "目标方言" in SQL_CONTRACT
+    assert "dialect" in SQL_CONTRACT
+    assert "DuckDB" in SQL_CONTRACT
 
 
 @pytest.mark.parametrize("engine,source", [("source", "a"), ("source", "b"), ("local", "")])
@@ -64,7 +64,7 @@ def test_review_receives_baseline_contract_and_target_profile(monkeypatch):
     assert run.status == RunStatus.COMPLETED, run.error
     for call in query_model_calls(model):
         payload = json.loads(call.args[1])
-        assert payload["sql_contract"] == {"authoring_dialect": "postgres", "parameter_style": ":name"}
+        assert payload["sql_contract"] == {"authoring_dialect": "per_step", "local_dialect": "duckdb", "parameter_style": ":name"}
         assert payload["data_sources"][0]["version"] == "16.1"
 
 

@@ -739,7 +739,7 @@ def test_bad_output_envelope_still_retries_and_preserves_diagnostic_context(monk
     assert persisted['error_code']=='invalid_output_contract'
 
 
-def test_invalid_relation_is_retried_then_discarded_without_losing_valid_relations():
+def test_invalid_relation_is_ignored_without_retrying_valid_siblings():
     from app.relationship_contracts import ProposalOutput
     from app.relationship_keywords import COMPARE_SYSTEM
     source=cards(4);ids=list(source)
@@ -759,7 +759,7 @@ def test_invalid_relation_is_retried_then_discarded_without_losing_valid_relatio
         'phase':'compare','tables':list(source.values()),
         'comparison_pairs':[[ids[0],ids[1]],[ids[2],ids[3]]]},ProposalOutput))
     assert result['relations']==[{**valid,'guards':[]}]
-    assert model.calls==6
+    assert model.calls==1
     assert engine.metrics['discarded_relations']>=1
     discarded=engine.scope['discarded_relations'][0]
     assert discarded['code']=='unknown_relation_field'
@@ -767,7 +767,7 @@ def test_invalid_relation_is_retried_then_discarded_without_losing_valid_relatio
     assert discarded['details']['fields']==[{'side':'target','field':'missing_field'}]
 
 
-def test_unknown_field_is_rechecked_with_only_its_two_tables():
+def test_unknown_field_is_ignored_without_extra_model_calls():
     from app.relationship_contracts import ProposalOutput
     from app.relationship_keywords import COMPARE_SYSTEM
     values=cards(4);ids=list(values)
@@ -782,8 +782,8 @@ def test_unknown_field_is_rechecked_with_only_its_two_tables():
     model=Model();engine=KeywordDiscovery(values,model,{},lambda:None)
     result=asyncio.run(engine.request('compare',COMPARE_SYSTEM,{'phase':'compare','tables':list(values.values()),
         'comparison_pairs':[[ids[0],ids[1]]]},ProposalOutput))
-    assert result['relations']==[{**corrected,'guards':[]}]
-    assert model.sizes==[4,4,4,2]
+    assert result['relations']==[]
+    assert model.sizes==[4]
 
 
 def test_valid_fields_cannot_escape_requested_comparison_pair():
@@ -793,7 +793,7 @@ def test_valid_fields_cannot_escape_requested_comparison_pair():
     assert result['relations']==[] and bad[0]['code']=='unrequested_relation_pair'
 
 
-def test_malformed_relation_contract_does_not_invalidate_other_items_after_retries():
+def test_malformed_relation_contract_does_not_invalidate_other_items():
     from app.relationship_contracts import ProposalOutput
     from app.relationship_keywords import COMPARE_SYSTEM
     source=cards(2);ids=list(source)

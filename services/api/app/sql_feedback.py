@@ -3,6 +3,7 @@ import hashlib
 from datetime import datetime, timezone
 
 import sqlglot
+from .sql_dialect import parse_query
 from sqlglot import exp
 
 from .datasources import datasource_service
@@ -18,7 +19,7 @@ def record_sql_rejection(step, artifact, error, stage):
     source = datasource_service.repository.get(step.data_source_id)
     functions, features = [], []
     try:
-        tree = sqlglot.parse_one(step.sql, read="postgres")
+        tree = parse_query(step.sql, dialect=getattr(step, "dialect", "") or "postgres")
         functions = sorted({f.name.upper() if isinstance(f, exp.Anonymous) else f.sql_name() for f in tree.find_all(exp.Func)})[:16]
         if tree.find(exp.Window): features.append("window_functions")
         if tree.find(exp.With): features.append("cte")

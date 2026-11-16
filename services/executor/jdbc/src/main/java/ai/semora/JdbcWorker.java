@@ -377,7 +377,7 @@ public final class JdbcWorker {
             result=map("ok",true,"result",result);
         } catch(Throwable e) {
             SQLException sql=e instanceof SQLException?(SQLException)e:null;
-            result=map("ok",false,"sqlstate",sql==null?null:sql.getSQLState(),"code",sql==null?null:sql.getErrorCode(),"error_class",e.getClass().getSimpleName());
+            result=map("ok",false,"sqlstate",sql==null?null:sql.getSQLState(),"code",sql==null?null:sql.getErrorCode(),"error_class",e.getClass().getSimpleName(),"sql_message",sql==null?null:sql.getMessage());
         }
         output.println(JSON.writeValueAsString(result));output.flush();
     }

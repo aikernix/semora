@@ -307,8 +307,8 @@ def test_repair_budget_shared_and_result_not_fabricated(monkeypatch):
         {'sql':'SELECT id+0+0+0 AS id FROM items','change_summary':'Fifth correction'}]
     run=asyncio.run(w.start(session.id,'List items',domain='test'))
     assert run.status==RunStatus.FAILED and run.result is None
-    assert len(query_model_calls(model))==6 and estimate.await_count==6
-    assert run.agent_memory['sql_repair_count']==[{'attempts':5}]
+    assert len(query_model_calls(model))==4 and estimate.await_count==4
+    assert run.agent_memory['sql_repair_count']==[{'attempts':3}]
     execute.assert_not_called()
 
 

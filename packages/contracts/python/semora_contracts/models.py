@@ -360,10 +360,11 @@ class SQLProgramStep(BaseModel):
         description="source查询物理数据源；local仅查询先前步骤的结果表，不能读取本体对象或物理源表。",
     )
     data_source_id: str = ""
+    dialect: str = Field(default="", description="本步骤SQL方言，由程序根据执行目标确认。")
     sql: str = Field(
         min_length=1,
         max_length=100000,
-        description="完整PostgreSQL基准SQL。标量参数:name；动态键集合IN (:name)，复合键(a,b) IN (:name)。local步骤用先前步骤name作为表名。",
+        description="使用本步骤执行目标方言的完整SQL。标量参数:name；动态键集合IN (:name)，复合键(a,b) IN (:name)。local步骤用先前步骤name作为表名。",
     )
     parameters: dict[str, Any] = Field(default_factory=dict)
     inputs: list[SQLInputBinding] = Field(

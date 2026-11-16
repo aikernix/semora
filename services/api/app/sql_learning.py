@@ -4,6 +4,7 @@ import hashlib
 import logging
 
 import sqlglot
+from .sql_dialect import parse_query
 from sqlglot import exp
 from .datasources import datasource_service
 
@@ -14,7 +15,7 @@ def record_sql_success(step, result):
     if step.engine != "source" or result.row_count == 0:
         return
     source = datasource_service.repository.get(step.data_source_id)
-    tree = sqlglot.parse_one(step.sql, read="postgres")
+    tree = parse_query(step.sql, dialect=getattr(step, "dialect", "") or "postgres")
     observed = {}
     for select in ([tree] if isinstance(tree, exp.Select) else []):
         for expression in select.expressions:

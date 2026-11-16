@@ -5,7 +5,7 @@ import re
 from semora_contracts import ExecutionResult, RunStatus
 from .executor_errors import ExecutorOperationError
 from .sql_errors import SQLIssue, issue_data, repairable
-from .sql_dialect import compile_step
+from .sql_dialect import compile_step, parse_query
 from .result_engine import local_query
 
 
@@ -33,7 +33,7 @@ class SQLExecution:
                 break
             objects = [o for o in self.ontology.get("objects", []) if previous.engine == "source" and
                 (o.get("dataSourceId") or self.ontology.get("dataSourceId")) == previous.data_source_id]
-            result_keys[previous.name] = validate_join_grain(sqlglot.parse_one(previous.sql, read="postgres"), objects, result_keys)
+            result_keys[previous.name] = validate_join_grain(parse_query(previous.sql, previous.dialect or "postgres"), objects, result_keys)
         value = compile_step(
             step,
             self.ontology,
@@ -56,11 +56,6 @@ class SQLExecution:
                     artifact = self.artifact(step, prior, template=True)
                     break
                 except SQLIssue as exc:
-                    if getattr(exc, "stage", "") == "join_grain":
-                        counts = self.run.agent_memory.setdefault("grain_repairs", [{}])[0]
-                        counts[step.name] = counts.get(step.name, 0) + 1
-                        if counts[step.name] > 2:
-                            raise SQLIssue(str(exc), kind="incomplete", stage="join_grain")
                     if not repairable(exc):
                         raise
                     from .sql_authoring import repair_step
@@ -125,11 +120,6 @@ class SQLExecution:
                             step.name + "：数据库预校验能力不可用，将通过实际只读执行验证。"
                         )
                         break
-                    if getattr(exc, "stage", "") == "join_grain":
-                        counts = self.run.agent_memory.setdefault("grain_repairs", [{}])[0]
-                        counts[step.name] = counts.get(step.name, 0) + 1
-                        if counts[step.name] > 2:
-                            raise SQLIssue(str(exc), kind="incomplete", stage="join_grain")
                     if not repairable(exc):
                         raise
                     artifact.compilation["validation"] = {
@@ -232,11 +222,6 @@ class SQLExecution:
                         )
                     break
                 except Exception as exc:
-                    if getattr(exc, "stage", "") == "join_grain":
-                        counts = self.run.agent_memory.setdefault("grain_repairs", [{}])[0]
-                        counts[step.name] = counts.get(step.name, 0) + 1
-                        if counts[step.name] > 2:
-                            raise SQLIssue(str(exc), kind="incomplete", stage="join_grain")
                     if not repairable(exc):
                         raise
                     if step.name in self.run.source_artifacts:
