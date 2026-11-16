@@ -322,7 +322,7 @@ public final class JdbcWorker {
         return v.toString();
     }
     static Map<String,Object> query(Connection c,JsonNode q) throws SQLException,IOException {
-        long started=System.nanoTime();int max=q.path("max_rows").asInt(1000),timeout=q.path("timeout_ms").asInt(15000);
+        long started=System.nanoTime();int max=q.path("max_rows").asInt(1000),timeout=q.path("timeout_ms").asInt(30000);
         readonly(c,text(q,"strategy"),timeout);
         try(PreparedStatement s=c.prepareStatement(text(q,"sql"))) {
             s.setQueryTimeout(Math.max(1,(timeout+999)/1000));s.setMaxRows(max+1);int index=1;

@@ -41,7 +41,7 @@ def source_profile(source):
     return {"type": source.type, "vendor": connection.get("product") or vendor,
             "version": version or None, "features": features, "feature_status": feature_status,
             "sql_baseline": {"id": SQL_BASELINE_ID,
-                "preferred_syntax": "优先通用SQL；features为true表示已验证，false表示已确认不支持，null表示未知、允许数据库预检；仅对已确认不支持的能力使用等价写法",
+                "preferred_syntax": "按实际方言、版本和兼容模式编写；优先features为true的已验证能力，false采用等价写法，null表示未验证、允许数据库预检",
                 "pagination": capabilities.get("pagination_strategy") or ("rownum" if source.type=="oracle" else "sqlglot")},
             "dialect": capabilities.get("dialect"),"compatibility_mode": connection.get("detected_compatibility_mode") or connection.get("compatibility_mode"),
             "driver_version": connection.get("driver_version"), "capabilities": capabilities,

@@ -372,8 +372,8 @@ def test_executor_profiles_directional_membership_without_returning_values(monke
     assert timeouts and set(timeouts)=={10000}
     assert "rows" not in result
 
-    with pytest.raises(HTTPException, match="索引"):
-        executor.profile_relationship(body.model_copy(update={"source_index_confirmed": False}))
+    result=executor.profile_relationship(body.model_copy(update={"source_index_confirmed":False,"target_unique_index_confirmed":False}))
+    assert result['forward']['directional_coverage']==1 and result['reverse']['directional_coverage']==1
 
 
 def test_model_candidate_conversion_discards_only_invalid_proposals():

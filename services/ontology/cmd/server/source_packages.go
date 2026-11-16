@@ -387,6 +387,7 @@ func (s *Store) migrateReferenceDefinitions(ctx context.Context) error {
 }
 
 type sourcePackageUpdate struct {
+	AppendRelations     bool              `json:"appendRelations,omitempty"`
 	DataSourceID        string            `json:"dataSourceId"`
 	SchemaHash          string            `json:"schemaHash"`
 	GeneratorVersion    string            `json:"generatorVersion"`
@@ -424,6 +425,16 @@ func (s *Store) updateSourcePackage(ctx context.Context, input sourcePackageUpda
 	}
 	if !reflect.DeepEqual(actual, input.ExpectedTableHashes) {
 		return &validationError{issues: []ValidationIssue{{"sourcePackage", "表结构已变化，请重新分析"}}}
+	}
+	if input.AppendRelations {
+		var current []byte
+		if err = tx.QueryRowContext(ctx, `SELECT payload FROM semora_meta.datasource_ontology_packages WHERE datasource_id=$1`, sid).Scan(&current); err != nil {
+			return err
+		}
+		input.Payload, err = appendPackageRelations(current, input.Payload)
+		if err != nil {
+			return err
+		}
 	}
 	domainRows, err := tx.QueryContext(ctx, `SELECT domain,payload FROM ontology_core.drafts ORDER BY domain FOR UPDATE`)
 	if err != nil {

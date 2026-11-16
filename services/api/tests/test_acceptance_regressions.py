@@ -244,7 +244,8 @@ def test_sql_contract_keeps_original_user_authority_separate_from_model_interpre
     payload = json.loads(query_model_calls(model)[-1].args[1])
     assert payload["original_request"] == "All records of matching entities"
     assert payload["request"]["summary"] == "UNCONFIRMED WRONG SCOPE"
-    assert payload["request"]["analysis_steps"] == ["Only flagged rows"]
+    assert payload["request"]["sequence"] == ["Only flagged rows"]
+    assert 'analysis_steps' not in payload['request']
     assert payload["confirmed_answers"] == []
     from semora_agent.sql_prompts import AUTHOR
     assert "不是额外的用户确认" in AUTHOR

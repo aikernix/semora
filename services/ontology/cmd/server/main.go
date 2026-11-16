@@ -303,6 +303,7 @@ func main() {
 	mux.HandleFunc("/api/v1/ontology/configurations/{domain}", app.internal(app.effectiveConfiguration))
 	mux.HandleFunc("/api/v1/ontology/configurations/{domain}/sources/{source}", app.internal(app.unbindSource))
 	mux.HandleFunc("/api/v1/ontology/source-packages", app.internal(app.sourcePackage))
+	mux.HandleFunc("/api/v1/ontology/cross-relations/append", app.internal(app.appendCrossRelations))
 	mux.HandleFunc("/api/v1/ontology/domains", app.internal(app.createDomain))
 	mux.HandleFunc("/api/v1/ontology/publish", app.internal(app.publish))
 	mux.HandleFunc("/api/v1/ontology/snapshots/latest", app.internal(app.latest))

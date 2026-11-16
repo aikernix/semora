@@ -159,6 +159,8 @@ async def structured(workflow, run, prompt, payload, schema):
     """A malformed response gets one format correction, never a fresh ReAct."""
     from .run_state import revision
     from .sql_model_context import sql_model_payload
+    from .sql_execution_scope import program_output_contract
+    from .sql_input_compaction import compact_output_schema
 
     initial = revision(run)
     value = None
@@ -175,7 +177,8 @@ async def structured(workflow, run, prompt, payload, schema):
                 json.dumps(
                     {
                         **sql_model_payload(payload, reference_materials=material(run)),
-                        "output_contract": schema.model_json_schema(),
+                        "output_contract": compact_output_schema(program_output_contract(payload, schema.model_json_schema())
+                        if schema is SQLProgram else schema.model_json_schema()),
                         **(
                             {
                                 "invalid_response": value,
@@ -392,6 +395,8 @@ async def analyse(workflow, run, question, ontology, scope):
         understood = parse(value)
         run.agent_memory["analyst"] = memory
     report = QueryUnderstanding(**understood.model_dump(mode="json"))
+    from .query_relation_repair import supplement
+    await supplement(workflow, run, question, ontology, scope, saved, report)
     route_business_definitions(report)
     prune_answered_questions(report, run.user_answers)
     validate_questions(report.questions)

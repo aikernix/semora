@@ -1,6 +1,7 @@
 """The only API-side transport to the isolated business SQL Executor."""
 
 import os
+import asyncio
 import httpx
 from semora_contracts import ExecutionResult
 from .datasources import datasource_service
@@ -27,26 +28,40 @@ class ExecutorClient:
 
         url = os.getenv("EXECUTOR_URL", "http://localhost:8002")
         async with httpx.AsyncClient(timeout=35) as client:
-            response = await request_executor(
-                client,
-                f"{url}/internal/v1/query",
-                operation="query",
-                json={
-                    "sql": sql,
-                    "parameters": parameters,
-                    "sensitive_columns": sensitive_columns,
-                    "timeout_ms": int(settings["query_timeout_seconds"]) * 1000,
-                    "max_rows": int(settings["max_result_rows"]),
-                    "max_bytes": int(settings["max_result_mb"]) * 1024 * 1024,
-                    "execution_id": settings.get("execution_id"),
-                    "datasource": self.datasource_payload(
-                        str(settings.get("data_source_id") or "")
-                    ),
-                },
-                headers={
-                    "X-Semora-Internal-Token": os.getenv("INTERNAL_TOKEN", "semora-dev-internal")
-                },
-            )
+            try:
+                response = await request_executor(
+                    client,
+                    f"{url}/internal/v1/query",
+                    operation="query",
+                    json={
+                        "sql": sql,
+                        "parameters": parameters,
+                        "sensitive_columns": sensitive_columns,
+                        "timeout_ms": int(settings["query_timeout_seconds"]) * 1000,
+                        "max_rows": int(settings["max_result_rows"]),
+                        "max_bytes": int(settings["max_result_mb"]) * 1024 * 1024,
+                        "execution_id": settings.get("execution_id"),
+                        "datasource": self.datasource_payload(
+                            str(settings.get("data_source_id") or "")
+                        ),
+                    },
+                    headers={
+                        "X-Semora-Internal-Token": os.getenv("INTERNAL_TOKEN", "semora-dev-internal")
+                    },
+                )
+            except asyncio.CancelledError:
+                # wait_for cancels this call at the per-statement deadline.
+                # Stop its worker before allowing a retry to start.
+                if settings.get('execution_id'):
+                    try:
+                        cancellation = await client.post(f"{url}/internal/v1/executions/{settings['execution_id']}/cancel",
+                            timeout=2, headers={'X-Semora-Internal-Token':os.getenv('INTERNAL_TOKEN','semora-dev-internal')})
+                        cancellation.raise_for_status()
+                    except httpx.HTTPError:
+                        import logging
+                        logging.getLogger(__name__).warning('Timed-out SQL worker cancellation did not complete')
+                raise
+
             return ExecutionResult.model_validate(response.json())
 
     async def estimate(self, sql: str, parameters: dict, data_source_id: str) -> dict:

@@ -49,3 +49,10 @@ test('result explanation is not repeated when it only restates the scope and row
   run.answer = '符合条件的记录主要集中在本月。'
   expect(resultDescription(run)).toBe('符合条件的记录主要集中在本月。')
 })
+
+test('a timeout retry is visible in execution history without being a SQL rewrite', () => {
+  const events = [event('source.step.retry', { step: 'read', attempt: 2, max_attempts: 2,
+    summary: '本条SQL执行超时，正在重试（第2次，共2次）' }, 'executing')]
+  expect(analysisOutcomes(events)).toMatchObject([{ title: '重试超时查询', summary: '本条SQL执行超时，正在重试（第2次，共2次）' }])
+  expect(businessOutcomes(events).some(e => e.key === 'revision')).toBe(false)
+})

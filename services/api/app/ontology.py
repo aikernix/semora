@@ -77,6 +77,9 @@ class OntologyCoreClient:
     async def update_source_package(self, value: dict[str, Any]) -> dict[str, Any]:
         return await self._request('PUT','/api/v1/ontology/source-packages',json=value)
 
+    async def append_cross_relations(self, value: dict[str, Any]) -> dict[str, Any]:
+        return await self._request('POST', '/api/v1/ontology/cross-relations/append', json=value)
+
     async def bind_knowledge_bases(self, domain: str, ids: list[str]) -> dict[str, Any]:
         return await self._request("PATCH", f"/api/v1/ontology/drafts/{domain}/knowledge-bases",
                                    json={"knowledgeBaseIds": ids})

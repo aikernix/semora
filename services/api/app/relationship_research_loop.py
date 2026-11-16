@@ -16,16 +16,11 @@ async def audit_structural_acceptances(candidates, fetch, persist):
         if (c.get('status') != 'accepted' or c.get('evidence_grade') in {'foreign_key', 'manual'}
                 or c.get('reviewed_by') or any(e.get('kind') == 'value_profile' for e in c['evidence'])):
             continue
-        structural = (any(e.get('kind') == 'structural_acceptance' for e in c['evidence'])
-                      or any(e.get('kind') == 'research_complete' for e in c['evidence'])
-                      or (any(e.get('kind') == 'review_policy' and e.get('required') is False for e in c['evidence'])
-                          and any(e.get('kind') == 'model_semantic_review' and e.get('supported') is True for e in c['evidence'])))
         try:
             evidence = await fetch(c, 'profile')
         except Exception as exc:
-            # A strong structural reference is not downgraded by an optional
-            # contradiction-check outage. Real profile contradictions still reopen review below.
-            evidence = {'kind': 'profile_audit_unavailable' if structural else 'tool_unavailable',
+            # Preserve the prior publication on outages, without approving new proposals.
+            evidence = {'kind': 'tool_unavailable',
                         'tool': 'profile', 'reason': type(exc).__name__, 'error_message': str(exc)[:500]}
         c['evidence'].append(evidence)
         if evidence.get('kind') == 'value_profile':
@@ -56,7 +51,7 @@ async def run(candidates, packet_for, fetch, model, persist, progress):
         c["evidence"] = [e for e in factual_evidence(c["evidence"])
                          if not (e.get("kind") == "value_profile" and (
                              sorted(e.get('statistics',{}).get('guards_applied',[]),key=lambda g:json.dumps(g,sort_keys=True)) != guards
-                             or e.get('statistics', {}).get('method') in {'indexed_directional_membership_v1','indexed_directional_membership_v2'}))]
+                             or e.get('statistics', {}).get('method') in {'indexed_directional_membership_v1','indexed_directional_membership_v2','indexed_directional_membership_v3_context'}))]
         todo.append(c)
     todo.sort(key=lambda c: (c.get("source_datasource_id", ""), c.get("source_table_id", ""),
                              tuple(c.get("source_columns", [])), c.get("target_table_id", ""), c["id"]))
@@ -232,11 +227,7 @@ async def run(candidates, packet_for, fetch, model, persist, progress):
 
         if fits:
             first = await assess(entries, SYSTEM, "model_semantic_review")
-            from .relationship_review_policy import structure_is_sufficient
             for c in entries:
-                if structure_is_sufficient(c, first.get(c['id'], {})):
-                    c['evidence'].append({'kind': 'structural_acceptance', 'reason': first[c['id']]['reason'], 'version': 'structural-v1'})
-                    continue
                 if first.get(c["id"], {}).get("query_outcome") == "usable" and not any(e.get("kind") == "value_profile" for e in c["evidence"]):
                     await obtain(c, "profile")
             await persist(entries)
@@ -244,12 +235,15 @@ async def run(candidates, packet_for, fetch, model, persist, progress):
             uncertain = []
             for c in entries:
                 reasons = review_reasons(c, first.get(c['id'], {}))
-                c['review_required'] = bool(reasons)
+                from .relationship_profile import support
+                profile = next((e.get('statistics', {}) for e in reversed(c['evidence']) if e.get('kind') == 'value_profile'), {})
+                data_blocked = bool(profile) and not support(profile, c.get('scope') == 'cross_source')['high_coverage']
+                c['review_required'] = bool(reasons) and not data_blocked
                 c['review_reasons'] = reasons
-                c['review_policy_version'] = 'ambiguity-v1'
-                c['evidence'].append({'kind': 'review_policy', 'required': bool(reasons),
-                                      'reasons': reasons, 'version': 'ambiguity-v1'})
-                if reasons:
+                c['review_policy_version'] = 'ambiguity-v2-coverage80'
+                c['evidence'].append({'kind': 'review_policy', 'required': c['review_required'],
+                                      'reasons': reasons, 'data_gate_not_met':data_blocked, 'version':c['review_policy_version']})
+                if c['review_required']:
                     uncertain.append(c)
             second = await assess(uncertain, REVIEW_SYSTEM, 'independent_review') if uncertain else {}
             disagreement = [c for c in uncertain if c['id'] in first and c['id'] in second and

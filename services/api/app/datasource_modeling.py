@@ -21,8 +21,8 @@ from .datasource_table_storage import tables_digest
 from .mdl_export import column_type
 from .relationship_evidence import recall_field_pairs, finalize_relationships, technically_pending
 
-GENERATOR_VERSION = "source-ontology-v19-semantic-inference"
-PROFILE_VERSION = "indexed-directional-v3-context"
+GENERATOR_VERSION = "source-ontology-v21-bidirectional-coverage80"
+PROFILE_VERSION = "bidirectional-random-v4"
 TERMINAL = {"completed", "completed_with_pending", "failed", "cancelled"}
 GENERIC_NAMES = {"id", "code", "name", "type", "status", "date"}
 
@@ -1252,7 +1252,7 @@ class ModelingService:
                 "source_columns": candidate["source_columns"],
                 "target_table": candidate["target_table_id"],
                 "target_columns": candidate["target_columns"],
-                "sample_rows": 200 if target_item else 100,
+                "sample_rows": 200,
                 "source_index_confirmed": _indexed(source_table, candidate["source_columns"]),
                 "target_unique_index_confirmed": _indexed(target_table, candidate["target_columns"], unique=True),
                 "allow_bounded_unindexed": True,
@@ -1296,7 +1296,10 @@ class ModelingService:
         from .relationship_lineage import describe_view
         import logging
         cards = build_inputs(table_maps)
-        save_inputs(self.repository, cards, table_maps)
+        # Query repair deliberately has only selected tables. It must never run
+        # full-source input reconciliation (which prunes absent tables).
+        if (job or {}).get('kind') != 'query_relation_repair':
+            save_inputs(self.repository, cards, table_maps)
         checkpoints = Checkpoints()
         checkpoints.cleanup()
         job_id = (job or {}).get("id", digest(cards)[:32])
@@ -1421,11 +1424,14 @@ class ModelingService:
             state["metrics"]["profile_requests"] = state["metrics"].get("profile_requests", 0) + 1
             profile = await self._profile(source, c, target if target.id != source.id else None)
             if not _indexed(table_maps[c['target_datasource_id']][c['target_table_id']], c['target_columns'], unique=True):
-                if await verify_target_key(c):
-                    c['evidence'].append({'kind': 'verified_target_uniqueness', 'confirmed': True,
-                        'method': 'bounded_full_key_check', 'scope': 'current_data',
-                        'guards': c.get('condition_template', {}).get('guards', [])})
-                    profile['target_uniqueness'] = 'observed_current_data'
+                try:
+                    if await verify_target_key(c):
+                        c['evidence'].append({'kind': 'verified_target_uniqueness', 'confirmed': True,
+                            'method': 'bounded_full_key_check', 'scope': 'current_data',
+                            'guards': c.get('condition_template', {}).get('guards', [])})
+                        profile['target_uniqueness'] = 'observed_current_data'
+                except Exception as exc:
+                    c['evidence'].append({'kind':'key_probe_unavailable','tool':'target_key','reason':type(exc).__name__})
             self.repository.save_column_profile(c, profile)
             return {"kind": "value_profile", "statistics": {k: v for k, v in profile.items() if k != "signature"}}
         observed_unique = {}
@@ -1501,7 +1507,7 @@ class ModelingService:
             except Exception as exc:
                 if isinstance(exc,ValueError) and str(exc).startswith('Unknown source dialect'):
                     raise
-                c['evidence'].append({'kind':'tool_unavailable','tool':'target_key',
+                c['evidence'].append({'kind':'key_probe_unavailable','tool':'target_key',
                                       'reason':type(exc).__name__,'error_message':str(exc)[:500]})
             snapshots = sorted([(c['source_datasource_id'], c['source_table_id'], source),
                                 (c['target_datasource_id'], c['target_table_id'], target)], key=lambda v: (v[0], v[1]))
@@ -1553,12 +1559,17 @@ class ModelingService:
                     except Exception as exc:
                         if isinstance(exc,ValueError) and str(exc).startswith('Unknown source dialect'):
                             raise
-                        c['evidence'].append({'kind':'tool_unavailable','tool':'target_key',
+                        c['evidence'].append({'kind':'key_probe_unavailable','tool':'target_key',
                             'reason':type(exc).__name__,'error_message':str(exc)[:500]})
                 source = table_maps[c["source_datasource_id"]][c["source_table_id"]]
                 su = _indexed(source, c["source_columns"], unique=True)
                 tu = any(e.get("kind") in {"target_unique_index", "verified_target_uniqueness"} and e.get("confirmed") for e in c["evidence"])
-                c["cardinality"] = ("1:1" if su else "N:1") if tu else ("1:N" if su else "unknown")
+                # Without proven uniqueness, plan for multiple matches rather
+                # than claiming an exact single match or blocking the relation.
+                c["cardinality"] = ("1:1" if su else "N:1") if tu else ("1:N" if su else "N:N")
+                c['evidence'] = [e for e in c['evidence'] if e.get('kind') != 'cardinality_basis']
+                c['evidence'].append({'kind':'cardinality_basis','source_unique_confirmed':su,
+                    'target_unique_confirmed':tu,'method':'declared_or_verified_keys_else_conservative_many'})
                 finalize_relationships([c], cross_source=c["scope"] == "cross_source")
                 latest_profile = next((e.get('statistics', {}) for e in reversed(c['evidence']) if e.get('kind') == 'value_profile'), {})
                 c['evidence'] = [e for e in c['evidence'] if not (e.get('kind') == 'tool_unavailable' and e.get('tool') == 'target_context')]
@@ -1581,9 +1592,11 @@ class ModelingService:
                 self._update(job, "profiling", "researching", 68 + int(30 * done / max(1, total)), details={**job.get("details", {}), "researched": done, "research_total": total, "model_calls": state["metrics"]["calls"] + state["metrics"].get("research_calls", 0)})
         class ResearchModel:
             async def complete_json(_, system, user):
-                if state["metrics"]["calls"] + state["metrics"].get("research_calls", 0) >= int(os.getenv("RELATIONSHIP_MAX_MODEL_CALLS", "2000")):
+                if state["metrics"]["calls"] + state["metrics"].get("research_calls", 0) >= (job or {}).get('details', {}).get('model_call_limit', int(os.getenv("RELATIONSHIP_MAX_MODEL_CALLS", "2000"))):
                     raise ValueError("model_call_budget_exhausted")
                 state["metrics"]["research_calls"] = state["metrics"].get("research_calls", 0) + 1
+                if job:
+                    job.setdefault('details', {})['model_calls'] = state['metrics']['calls'] + state['metrics']['research_calls']
                 save()
                 return await structured_model.complete_json(system, user)
         await research(candidates, packet_for, fetch, ResearchModel(), persist, progress)
@@ -1606,7 +1619,8 @@ class ModelingService:
                 continue
             profile = next((e.get('statistics', {}) for e in reversed(c['evidence']) if e.get('kind') == 'value_profile'), {})
             observed = observations.get((c['target_datasource_id'], c['target_table_id'], tuple(c['target_columns'])), [])
-            if not profile or profile.get('directional_coverage', 0) >= MIN_REFERENCE_COVERAGE or not any(v['source_table'] != c['source_table_id'] for v in observed):
+            from .relationship_profile import support
+            if not profile or support(profile, c.get('scope') == 'cross_source')['high_coverage'] or not any(v['source_table'] != c['source_table_id'] for v in observed):
                 continue
             audit_key = digest([c['research_key'], 'target-domain-v1', observed])
             cached = state['research'].get(audit_key)

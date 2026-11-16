@@ -49,7 +49,11 @@ def local_query(artifact, results, settings):
             "max_temp_directory_size": "0B",
         },
     )
-    timer = threading.Timer(float(settings.get("query_timeout_seconds", 30)), con.interrupt)
+    timed_out = threading.Event()
+    def interrupt():
+        timed_out.set()
+        con.interrupt()
+    timer = threading.Timer(float(settings.get("query_timeout_seconds", 30)), interrupt)
     try:
         timer.start()
         for name in artifact.compilation.get("local_dependencies", list(results)):
@@ -73,6 +77,9 @@ def local_query(artifact, results, settings):
                     + ")",
                     result.rows,
                 )
+        if timed_out.is_set():
+            from .executor_errors import ExecutorOperationError
+            raise ExecutorOperationError('timeout', diagnostic={'timeout_origin':'system'})
         con.execute("EXPLAIN " + artifact.physical_sql, artifact.parameters)
         cursor = con.execute(artifact.physical_sql, artifact.parameters)
         limit = int(settings.get("max_result_rows", 1000))
@@ -91,6 +98,9 @@ def local_query(artifact, results, settings):
         size = len(json.dumps(serialized, default=str, ensure_ascii=False).encode())
         if size > int(settings.get("max_result_mb", 10)) * 1024 * 1024:
             raise SQLIssue("本地查询结果超过大小限制", kind="incomplete")
+        if timed_out.is_set():
+            from .executor_errors import ExecutorOperationError
+            raise ExecutorOperationError('timeout', diagnostic={'timeout_origin':'system'})
         return ExecutionResult(
             columns=[d[0] for d in cursor.description],
             column_types=[str(d[1]) for d in cursor.description],
@@ -100,6 +110,11 @@ def local_query(artifact, results, settings):
             truncated=len(rows) > limit,
             bytes_returned=size,
         )
+    except Exception:
+        if timed_out.is_set():
+            from .executor_errors import ExecutorOperationError
+            raise ExecutorOperationError('timeout', diagnostic={'timeout_origin':'system'}) from None
+        raise
     finally:
         timer.cancel()
         con.close()

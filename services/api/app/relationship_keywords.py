@@ -120,6 +120,7 @@ class KeywordDiscovery(OrganizationMixin, Discovery):
         self.pending = {}
         self.evidence_pending = {}
         self.started_stages = set()
+        self.max_model_calls = int(os.getenv('RELATIONSHIP_MAX_MODEL_CALLS', '2000'))
 
     def log_request(self,event,context,**values):
         logging.getLogger('semora.model').info(json.dumps({'event':event,**context,**values},ensure_ascii=False,default=str))
@@ -205,7 +206,7 @@ class KeywordDiscovery(OrganizationMixin, Discovery):
             try:
                 for attempt in range(attempts):
                     attempt_number=attempt+1
-                    if self.metrics['calls']+self.metrics.get('research_calls',0)>=int(os.getenv('RELATIONSHIP_MAX_MODEL_CALLS','2000')):
+                    if self.metrics['calls']+self.metrics.get('research_calls',0)>=self.max_model_calls:
                         raise DiscoveryIncomplete('model_call_budget_exhausted')
                     self.metrics['calls'] += 1
                     self.metrics[kind+'_calls'] = self.metrics.get(kind+'_calls',0)+1

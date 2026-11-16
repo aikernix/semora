@@ -164,6 +164,7 @@ def run(cfg, operation, *, execution_id=None, timeout_ms=None, validating=False,
                 if result.get("error_class") in {"ClassNotFoundException","NoClassDefFoundError","UnsupportedClassVersionError","AbstractMethodError","NoSuchMethodError"}:
                     raise HTTPException(409,detail={"error_type":"unknown","message":"JDBC 驱动类、配套依赖或 Java 版本不兼容","driver_error_class":result["error_class"]})
                 exc = Exception(result.get("code"))
+                exc.is_sql_timeout = result.get('error_class') == 'SQLTimeoutException'
                 exc.sql_message = result.get("sql_message")
                 exc.sqlstate = result.get("sqlstate")
                 if result.get("code") in {1017,1031,18456,229,230,900,903,907,933,936,102,156,904,942,207,208,1045,1044,1142,1143,1227,1064,1054,1146}:
@@ -194,10 +195,11 @@ def run(cfg, operation, *, execution_id=None, timeout_ms=None, validating=False,
             return value
         except subprocess.TimeoutExpired:
             process.kill();process.communicate()
-            raise HTTPException(504, detail={"error_type": "timeout", "message": "JDBC 操作超时，Worker 已终止"}) from None
+            raise HTTPException(504, detail={"error_type": "timeout", "message": "JDBC 操作超时，Worker 已终止",
+                                           "diagnostic": {"timeout_origin": "system"}}) from None
         finally:
             with LOCK:
-                if execution_id:
+                if execution_id and ACTIVE.get(execution_id) is process:
                     ACTIVE.pop(execution_id, None)
                     PROGRESS.pop(execution_id, None)
             if process.poll() is None: process.kill(); process.wait()

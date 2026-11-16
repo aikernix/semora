@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-VERSION = "query-relationship-research-v21-semantic-inference"
+VERSION = "query-relationship-research-v23-bidirectional-coverage80"
 
 
 def factual_evidence(evidence):
@@ -58,7 +58,9 @@ REVIEW_SYSTEM = """【角色】独立数据关系复核员。
 【输出】逐条给出结论及一句独立依据；需要补证时列出具体缺口，明确不相关则排除。不重复结构和统计，不输出思考过程。
 """ + CONTRACT
 
-DATA_GUIDANCE = """\n【数据核查要求】对已提供匹配统计的候选，区分抽到的行数、不同键数量和验证范围；值重合不能单独证明直接引用。低基数或不完整覆盖不等于结构引用不存在：若字段定义和目标表职责明确支持完整直接引用，说明这个依据，并区分关系本身与缺失、历史或未同步数据。不要凭覆盖率猜编号体系相同，也不要为共享主体或缺少复合键条件的映射找理由。完全无匹配且存在多种编号含义时不能凭同源、同名确定。target_context只统计已命中目标记录在注释声明的枚举字段中的分布，用于核对记录类别及引用角色；unlisted表示未落在声明枚举内，不提供原始属性值。类别差异需结合字段用途判断，不能机械排除；实际证据存在冲突时不能仅凭ID命中批准。"""
+DATA_GUIDANCE = """\n【数据核查要求】结合结构、注释、约束及实际数据，判断两端字段的编号体系、引用角色、完整映射和必要条件；依据记录粒度解释多条匹配。
+forward和reverse分别是两端独立随机抽取完整键后的双向匹配统计，均包含附加条件。区分抽样与全量；status=unavailable表示未取得证据。
+target_context为已命中目标记录的声明枚举分布，unlisted表示未列出的值。只为影响语义或条件判断的具体疑点列出缺口。"""
 
 
 from .relationship_output_schema import RESEARCH_SCHEMA, DATA_RESEARCH_SCHEMA, MARKER, output_format

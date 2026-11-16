@@ -41,10 +41,13 @@ def validate_logical_refs(plan, materials: dict[str, Any]) -> list[str]:
     for ref in plan.subject_refs:
         if ref not in objects:
             errors.append(f"未知对象引用：{ref}")
-    field_refs = [*plan.output_refs, *plan.dimension_refs]
+    metric_ids={metric.id for metric in plan.metrics}
+    # Output may refer to an explicitly declared calculation. Its source
+    # fields are still checked below; this is not an arbitrary unknown alias.
+    field_refs = [*[ref for ref in plan.output_refs if ref not in metric_ids], *plan.dimension_refs]
     for metric in plan.metrics:
         field_refs.extend(metric.field_refs)
-    for item in plan.filters:
+    for item in [*plan.filters,*plan.join_filters]:
         field_refs.extend(item.field_refs)
         if item.relation_ref and item.relation_ref not in relations:
             errors.append(f"未知关系引用：{item.relation_ref}")

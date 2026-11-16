@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import type { QueryRun, QueryConfigurationGap } from '../../api'
 import { analysisOutcomes } from '../../analysisTimeline'
+import { sqlFailure } from '../../queryPresentation'
 
 const props = defineProps<{ visible: boolean; run: QueryRun; gaps: QueryConfigurationGap[]; formatText?: (value:string)=>string }>()
 const emit = defineEmits<{ 'update:visible': [value: boolean] }>()
@@ -19,7 +20,9 @@ const sqlSteps = computed<Array<{ name: string; purpose: string; sql: string; ar
 })
 const evidence = computed(() => [...new Map((props.run.evidence || []).map((e: any) => [JSON.stringify([e.knowledge_base_id, e.document_id, e.chunk_id, e.revision, e.locator]), e])).values()])
 const labels = computed(() => props.run.plan?.sql_program?.steps?.at(-1)?.output_labels || {})
+const failure = computed(() => sqlFailure(props.run))
 function stepStatus(name: string, artifact: any) {
+  if (failure.value && props.run.plan?.sql_program?.steps?.[failure.value.step_index - 1]?.name === name) return `执行失败 · ${failure.value.message}`
   const event = [...props.run.events].reverse().find(e => ['source.step.completed', 'source.step.skipped'].includes(e.event) && e.data.step === name)
   if (event) return event.event === 'source.step.skipped' ? '已跳过 · 前置集合为空' : `已执行 · 返回 ${event.data.row_count ?? 0} 条`
   if (props.run.result && sqlSteps.value.at(-1)?.name === name) return `已执行 · 返回 ${props.run.result.row_count} 条`

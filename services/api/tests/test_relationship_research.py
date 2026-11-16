@@ -39,6 +39,12 @@ def verdict(identifier):
             "query_role": "entity reference", "additional_predicates": []}
 
 
+async def verified_profile(*args):
+    direction={'source_nonnull_distinct_keys':100,'matched_keys':100,'directional_coverage':1}
+    return {'kind':'value_profile','statistics':{'method':'bidirectional_random_membership_v4',
+            **direction,'forward':dict(direction),'reverse':dict(direction)}}
+
+
 def test_all_candidates_are_researched_and_foreign_keys_never_reenter_model_or_tools():
     import json
     values = [candidate(str(i)) for i in range(130)]
@@ -83,14 +89,14 @@ def test_all_candidates_are_researched_and_foreign_keys_never_reenter_model_or_t
     assert len(calls) == previous  # completed batches resume without another request
 
 
-def test_documented_reference_can_confirm_without_fabricating_samples():
+def test_documented_reference_still_requires_sample_coverage():
     c = candidate("documented")
     c["evidence"] = [{"kind": "explicit_field_reference"},
                      {"kind": "model_semantic_review", **verdict("documented")},
                      {"kind": "independent_review", **verdict("documented")}]
     finalize_relationships([c])
-    assert c["status"] == "accepted"
-    assert c["evidence"][-1]["proof_path"] == "documented_reference"
+    assert c["status"] == "unresolved"
+    assert 'value_verification_missing' in c['evidence'][-1]['reasons']
     c["evidence"].append({"kind": "value_profile", "statistics": {
         "source_nonnull_distinct_keys": 100, "directional_coverage": 0}})
     finalize_relationships([c])
@@ -103,8 +109,7 @@ def test_restored_structural_acceptance_is_audited_before_publication():
     c['evidence'].extend([{'kind': 'entity_key_name'},
         {'kind': 'model_semantic_review', **verdict(c['id'])},
         {'kind': 'review_policy', 'required': False}])
-    finalize_relationships([c])
-    assert c['status'] == 'accepted'
+    c['status'] = 'accepted'  # Historical published record, before revalidation.
     foreign = {**candidate('foreign'), 'status': 'accepted', 'evidence_grade': 'foreign_key'}
     calls = []
     async def fetch(value, kind):
@@ -147,8 +152,8 @@ def test_declared_unique_entity_reference_with_independent_semantic_evidence():
         {"kind": "model_semantic_review", **verdict("structured")},
         {"kind": "independent_review", **verdict("structured")}])
     finalize_relationships([c])
-    assert c["status"] == "accepted"
-    assert c["evidence"][-1]["proof_path"] == "structural_semantic"
+    assert c["status"] == "unresolved"
+    assert 'value_verification_missing' in c['evidence'][-1]['reasons']
     c["evidence"].append({"kind": "value_profile", "statistics": {
         "source_nonnull_distinct_keys": 100, "directional_coverage": .2}})
     finalize_relationships([c])
@@ -235,7 +240,7 @@ def test_complete_small_source_can_validate_many_rows_to_one_entity():
     assert c["evidence"][-1]["proof_path"] == "verified_values"
 
 
-def test_clear_structural_reference_skips_profile_and_independent_review():
+def test_clear_structural_reference_requires_profile_but_not_redundant_review():
     c=candidate('clear')
     fetched=[];calls=[]
     class Model:
@@ -243,12 +248,13 @@ def test_clear_structural_reference_skips_profile_and_independent_review():
             calls.append(system)
             return {'decisions':[{**verdict('clear'),'structure_sufficient':True,'reason':'表用途与所属实体编号一致，目标为唯一标识'}]}
     async def fetch(c,kind):
-        fetched.append(kind);raise AssertionError('clear reference should not sample')
+        fetched.append(kind)
+        return await verified_profile()
     async def persist(entries):finalize_relationships(entries)
     async def progress(done,total):pass
     asyncio.run(research([c],lambda c:{'candidate_id':c['id'],'evidence':c['evidence']},fetch,Model(),persist,progress))
     assert c['status']=='accepted'
-    assert fetched==[] and len(calls)==1
+    assert fetched==['profile'] and len(calls)==1
     assert c['review_required'] is False
 
 
@@ -256,6 +262,8 @@ def test_structural_shortcut_rejects_ambiguity_incomplete_conditions_and_conflic
     from app.relationship_review_policy import structure_is_sufficient
     c=candidate('clear')
     d={**verdict('clear'),'structure_sufficient':True,'reason':'引用用途一致'}
+    assert not structure_is_sufficient(c,d)
+    c['evidence'].append(asyncio.run(verified_profile()))
     assert structure_is_sufficient(c,d)
     assert not structure_is_sufficient(c,{**d,'alternative_unresolved':True})
     assert not structure_is_sufficient(c,{**d,'key_domain':'unknown'})
@@ -273,7 +281,7 @@ def test_evidence_review_three_attempts_preserve_candidate_input_and_add_repair_
             calls.append((system,user))
             if len(calls)<3:return {'decisions':[]}
             return {'decisions':[{**verdict('retry_contract'),'structure_sufficient':True}]}
-    async def fetch(*args):raise AssertionError('no sampling for clear reference')
+    async def fetch(*args):return await verified_profile()
     async def persist(entries):finalize_relationships(entries)
     async def progress(*args):pass
     asyncio.run(research([c],lambda c:{'candidate_id':c['id'],'evidence':c['evidence']},fetch,Model(),persist,progress))
@@ -291,7 +299,7 @@ def test_last_review_retry_keeps_valid_decisions_and_marks_only_bad_candidate_pe
             if len(calls)<=2:return {'decisions':[]}
             return {'decisions':[{**verdict('good_decision'),'structure_sufficient':True},
                                  {'candidate_id':'bad_decision'}]}
-    async def fetch(*args):raise AssertionError('no sampling for clear reference')
+    async def fetch(*args):return await verified_profile()
     async def persist(entries):finalize_relationships(entries)
     async def progress(*args):pass
     asyncio.run(research([good,bad],lambda c:{'candidate_id':c['id'],'evidence':c['evidence']},fetch,Model(),persist,progress))
@@ -309,7 +317,7 @@ def test_second_review_retry_keeps_valid_decisions_and_marks_only_bad_candidate_
             return {'decisions':[{'candidate_id':'second_good','outcome':'usable',
                                   'kind':'entity_reference','reason':'引用明确'},
                                  {'candidate_id':'second_bad'}]}
-    async def fetch(*args):raise AssertionError('no sampling for clear reference')
+    async def fetch(*args):return await verified_profile()
     async def persist(entries):finalize_relationships(entries)
     async def progress(*args):pass
     asyncio.run(research([good,bad],lambda c:{'candidate_id':c['id'],'evidence':c['evidence']},fetch,Model(),persist,progress))
@@ -336,7 +344,7 @@ def test_third_review_retry_targets_only_invalid_candidate_and_can_recover_it():
                     {'candidate_id':'repair_bad'}] if 'repair_bad' in ids else [])}
             return {'decisions':[{'candidate_id':'repair_bad','outcome':'usable',
                                   'kind':'direct_record_reference','reason':'目标主键与字段用途一致'}]}
-    async def fetch(*args):raise AssertionError('no sampling for clear reference')
+    async def fetch(*args):return await verified_profile()
     async def persist(entries):finalize_relationships(entries)
     async def progress(*args):pass
     asyncio.run(research([good,bad],lambda c:{'candidate_id':c['id'],'evidence':c['evidence']},fetch,Model(),persist,progress))
@@ -393,38 +401,17 @@ def test_profile_timeout_is_technical_pending_not_zero_match_or_exclusion():
     assert not any(e.get('kind')=='value_profile' and e.get('statistics',{}).get('matched_keys')==0 for e in c['evidence'])
 
 
-def test_structural_acceptance_survives_profile_timeout_but_keeps_diagnostic():
+def test_previous_publication_is_preserved_on_profile_outage_without_new_approval():
     from app.relationship_research_loop import audit_structural_acceptances
-    c=candidate('structural_profile_timeout')
+    c=candidate('historical_profile_timeout')
+    c['status']='accepted'
     c['evidence'].extend([{'kind':'model_semantic_review',**verdict(c['id'])},
-                          {'kind':'review_policy','required':False},
-                          {'kind':'structural_acceptance','reason':'目标主键与引用定义明确'}])
-    finalize_relationships([c])
-    assert c['status']=='accepted'
+                         {'kind':'review_policy','required':False}])
     async def fetch(*args):raise TimeoutError('database statement timeout')
     async def persist(entries):finalize_relationships(entries)
-    rechecks=asyncio.run(audit_structural_acceptances([c],fetch,persist))
-    assert rechecks==[]
-    issue=next(e for e in c['evidence'] if e.get('kind')=='profile_audit_unavailable')
-    assert issue['tool']=='profile' and issue['reason']=='TimeoutError'
-    assert c['status']=='accepted' and c['research_pending'] is False
-
-
-def test_structural_acceptance_survives_profile_timeout_but_keeps_diagnostic():
-    from app.relationship_research_loop import audit_structural_acceptances
-    c=candidate('structural_profile_timeout')
-    c['evidence'].extend([{'kind':'model_semantic_review',**verdict(c['id'])},
-                          {'kind':'review_policy','required':False},
-                          {'kind':'structural_acceptance','reason':'目标主键与引用定义明确'}])
-    finalize_relationships([c])
-    assert c['status']=='accepted'
-    async def fetch(*args):raise TimeoutError('database statement timeout')
-    async def persist(entries):finalize_relationships(entries)
-    rechecks=asyncio.run(audit_structural_acceptances([c],fetch,persist))
-    assert rechecks==[]
-    issue=next(e for e in c['evidence'] if e.get('kind')=='profile_audit_unavailable')
-    assert issue['tool']=='profile' and issue['reason']=='TimeoutError'
-    assert c['status']=='accepted' and c['research_pending'] is False
+    assert asyncio.run(audit_structural_acceptances([c],fetch,persist))==[]
+    assert c['status']=='accepted' and c['research_pending'] is True
+    assert any(e.get('kind')=='tool_unavailable' for e in c['evidence'])
 
 
 def test_technical_research_gap_is_pending_not_a_semantic_rejection():

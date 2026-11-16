@@ -14,11 +14,16 @@ class ExecutorOperationError(RuntimeError):
         self.kind=kind if kind in KINDS else 'unknown'
         self.code=code if isinstance(code,(int,str)) and len(str(code))<=12 else None
         self.diagnostic={k:str(v)[:4000] for k,v in (diagnostic or {}).items()
-                         if k in {'message','column','table','position','datatype','position_line','sql_tokens','sqlstate'}}
+                         if k in {'message','column','table','position','datatype','position_line','sql_tokens','sqlstate','timeout_origin','timeout_seconds'}}
         self.retryable=self.kind in {'connect','transient','timeout'}
         super().__init__(MESSAGES[self.kind]+(f'（错误码 {self.code}）' if self.code is not None else ''))
 
-    def public(self):return {'error_type':self.kind,'db_error_code':self.code,'retryable':self.retryable}
+    def public(self):
+        value={'error_type':self.kind,'db_error_code':self.code,'retryable':self.retryable}
+        if self.kind=='timeout':
+            value['timeout_origin']=self.diagnostic.get('timeout_origin', 'database' if self.code is not None else 'system')
+            if 'timeout_seconds' in self.diagnostic:value['timeout_seconds']=self.diagnostic['timeout_seconds']
+        return value
 
 
 def check_response(response,operation):
@@ -32,11 +37,15 @@ def check_response(response,operation):
     kind=detail.get('error_type','unknown')
     if kind=='capability' and (operation!='estimate' or detail.get('operation')!='estimate'):
         kind='unknown'
-    raise ExecutorOperationError(kind,detail.get('db_error_code'),detail.get('diagnostic'))
+    diagnostic=detail.get('diagnostic')
+    diagnostic=dict(diagnostic) if isinstance(diagnostic,dict) else {}
+    if kind=='timeout':diagnostic.setdefault('timeout_origin','database')
+    raise ExecutorOperationError(kind,detail.get('db_error_code'),diagnostic)
 
 
 def transport_error(exc):
-    return ExecutorOperationError('timeout' if isinstance(exc,httpx.TimeoutException) else 'connect')
+    return ExecutorOperationError('timeout' if isinstance(exc,httpx.TimeoutException) else 'connect',
+                                  diagnostic={'timeout_origin':'system'})
 
 
 async def request_executor(client,url,*,operation,**kwargs):

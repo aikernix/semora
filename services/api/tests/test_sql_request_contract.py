@@ -50,7 +50,10 @@ def test_repair_reuses_author_contract_and_user_supplements(monkeypatch):
     assert repair["request"] == author["request"]
     assert repair["original_request"] == author["original_request"]
     assert repair["confirmed_answers"] == author["confirmed_answers"]
-    assert run.agent_memory["sql_request_context"][-1]["requirement_contract"] == author["request"]
+    from app.sql_input_compaction import compact_sql_input
+    saved=run.agent_memory["sql_request_context"][-1]["requirement_contract"]
+    assert compact_sql_input({'request':saved})['request']==author['request']
+    assert 'analysis_steps' in saved and 'analysis_steps' not in author['request']
 
 
 def test_user_free_text_and_selected_option_meaning_are_in_sql_contract_context(monkeypatch):
@@ -86,7 +89,9 @@ def test_understanding_rules_reach_author_and_survive_persistence(monkeypatch):
     restored = restore_run(run_payload(run))
     assert restored.requirement.aggregation_rules == rules["aggregation_rules"]
     assert restored.requirement.sequence == rules["sequence"]
-    assert restored.agent_memory["sql_request_context"][-1]["requirement_contract"] == author["request"]
+    from app.sql_input_compaction import compact_sql_input
+    saved=restored.agent_memory["sql_request_context"][-1]["requirement_contract"]
+    assert compact_sql_input({'request':saved})['request']==author['request']
 
 
 def test_legacy_or_null_business_rules_do_not_break_old_understanding():

@@ -146,8 +146,8 @@ def test_missing_full_join_predicate_never_publishes():
     assert 'join_predicates_unresolved' in c['evidence'][-1]['reasons']
 
 
-@pytest.mark.parametrize('view, population, expected', [(False,20,1),(True,20,1),(True,0,0)])
-def test_full_pipeline_publishes_cross_named_reference_and_persists_review_candidates(monkeypatch, tmp_path, view, population, expected):
+@pytest.mark.parametrize('view, population, expected, duplicates', [(False,20,1,0),(True,20,1,0),(True,0,0,0),(True,20,1,3)])
+def test_full_pipeline_publishes_cross_named_reference_and_persists_review_candidates(monkeypatch, tmp_path, view, population, expected, duplicates):
     from types import SimpleNamespace
     from semora_agent.model import structured_model
     from app.datasource_modeling import ModelingService
@@ -184,9 +184,10 @@ def test_full_pipeline_publishes_cross_named_reference_and_persists_review_candi
             assert kwargs['json']['timeout_ms']==10000
             sql=kwargs['json']['sql']
             assert 'LIMIT 1' in sql
-            return {'rows':[[0 if 'duplicates' in sql else population]]}
+            return {'rows':[[duplicates if 'duplicates' in sql else population]]}
         assert path=='datasources/profile-relationship'
-        return {'source_nonnull_distinct_keys':10,'source_exhausted':True,'directional_coverage':1.,'matched_keys':10}
+        return {'source_nonnull_distinct_keys':10,'source_exhausted':True,
+                'directional_coverage':1. if population else 0.,'matched_keys':10 if population else 0}
     monkeypatch.setattr(structured_model,'complete_json',model)
     monkeypatch.setenv('RELATIONSHIP_CHECKPOINT_DIR',str(tmp_path))
     repo=ModelingRepository(dsn='')
@@ -198,6 +199,8 @@ def test_full_pipeline_publishes_cross_named_reference_and_persists_review_candi
     assert package['relation_count']==expected
     if expected:
         assert package['payload']['relationshipRecords'][0]['key_pairs']==[{'source':'STU_ID','target':'ID'}]
+        if duplicates:
+            assert package['payload']['relationshipRecords'][0]['cardinality']=='N:N'
     assert len(repo.memory_candidates)==1
     persisted=next(iter(repo.memory_candidates.values()))
     assert persisted['source_datasource_id']=='ds'

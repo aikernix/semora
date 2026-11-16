@@ -399,10 +399,12 @@ class Workflow:
         except Exception as exc:
             from .executor_errors import ExecutorOperationError
 
-            if isinstance(exc, ExecutorOperationError):
+            if isinstance(exc, ExecutorOperationError) and not run.agent_memory.get('execution_failure'):
                 run.agent_memory["execution_failure"] = [exc.public()]
             run.result = None
-            run.error = f"查询执行未完成：{exc}"
+            failure = (run.agent_memory.get('execution_failure') or [{}])[-1]
+            run.error = ('查询失败，' + failure['message'] if failure.get('error_type') == 'timeout'
+                         else f"查询执行未完成：{exc}")
             self.emit(run, "run.failed", RunStatus.FAILED, {"error": run.error}, "executor")
         return {}
 

@@ -2,13 +2,14 @@
 import json
 from copy import deepcopy
 
-FORMAT = "query-material-tables-v1"
+FORMAT = "query-material-tables-v2"
 GUIDE = (
     "data是完整查询资料。$columns列出列定义；$rows每行首项是列定义索引，"
     "后续值依次对应列定义；$literal表示原始字典。"
     "字段的scan是该物理列的扫描信息；scan_shared列出的扫描属性与本体属性相同。"
     "schemas.columns的property_scan_ref引用本体字段，order保留物理列顺序。"
     "shared_labels列出[对象序号,字段序号]，这些字段的label与description相同。"
+    "properties中的shared_properties_ref引用shared_properties中完全相同的字段定义，各表归属独立保留。"
     "这些是格式引用；字段名、类型、注释、枚举及约束仍具有原含义。"
 )
 
@@ -82,16 +83,33 @@ def encode_material(packet):
             if isinstance(prop.get("label"), str) and prop["label"] == prop.get("description"):
                 prop.pop("label")
                 shared_labels.append([object_index, prop_index])
+    repeated={}
+    for item in data.get('objects',[]):
+        props=item['object'].get('properties')
+        if not isinstance(props,list):continue
+        signature=json.dumps(props,ensure_ascii=False,sort_keys=True,separators=(',',':'),default=str)
+        if len(signature.encode())>512:repeated.setdefault(signature,[]).append(item['object'])
+    shared_properties={}
+    for signature,objects_with_props in repeated.items():
+        if len(objects_with_props)<2:continue
+        name='fields_'+str(len(shared_properties)+1)
+        shared_properties[name]=_pack(objects_with_props[0]['properties'])
+        for obj in objects_with_props:obj['properties']={'shared_properties_ref':name}
     return {
         "format": FORMAT, "guide": GUIDE, "shared_labels": shared_labels,
         "merged_schemas": merged_schemas, "data": _pack(data),
+        **({'shared_properties':shared_properties} if shared_properties else {}),
     }
 
 
 def decode_material(wire):
-    if wire.get("format") != FORMAT:
+    if wire.get("format") not in {FORMAT,'query-material-tables-v1'}:
         raise ValueError("unknown_query_material_format")
     data = _unpack(wire["data"])
+    for item in data.get('objects',[]):
+        props=item['object'].get('properties')
+        if isinstance(props,dict) and set(props)=={'shared_properties_ref'}:
+            item['object']['properties']=deepcopy(_unpack(wire['shared_properties'][props['shared_properties_ref']]))
     objects = {o["object"].get("name", o["object"].get("table")): o["object"] for o in data.get("objects", [])}
     for schema_index in wire["merged_schemas"]:
         table = data["schemas"][schema_index]["tables"][0]

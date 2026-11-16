@@ -46,6 +46,10 @@ export function analysisOutcomes(events: RunEvent[]): AnalysisOutcome[] {
     }
     if (e.event === 'knowledge.prepared' && d.knowledge_pages > 0) {
       add(e, '取得辅助定义', `取得 ${d.knowledge_pages} 个相关知识页面，已用于选择本体对象`)
+    } else if (e.event === 'query.relations.published') {
+      add(e, '自动补齐对应关系', text(d.summary))
+    } else if (e.event === 'query.relations.finished' && d.status !== 'published') {
+      add(e, '保留关联配置缺口', text(d.summary))
     } else if (e.event === 'query.repair.completed') {
       add(e, '已修正查询方案', d.summary || '候选修订已通过程序检查', (d.changed_paths || []).map((path: string) => `调整 ${path}`))
     } else if (e.event === 'sql.repaired' || e.event === 'sql.semantic.corrected') {
@@ -72,6 +76,8 @@ export function analysisOutcomes(events: RunEvent[]): AnalysisOutcome[] {
       if (questions.length) add(e, '需要你补充', questions.join('；'), (req.clarifications || []).map((q: any) => q.reason).filter(Boolean))
     } else if (e.event === 'result.summary.completed') {
       add(e, d.mode === 'model' ? '形成业务结论' : '整理基本结果说明', text(d.summary))
+    } else if (e.event === 'source.step.retry') {
+      add(e, '重试超时查询', text(d.summary))
     } else if (e.event === 'source.step.completed') {
       add(e, '完成数据查询', `${text(d.summary) || '已取得所需信息'}${d.row_count !== undefined ? `，找到 ${d.row_count} 条记录` : ''}`)
     } else if (e.event === 'plan.revision.stalled') {

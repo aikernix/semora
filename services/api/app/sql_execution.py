@@ -13,6 +13,24 @@ class SQLExecution:
     def __init__(self, workflow, run, ontology, settings):
         self.w, self.run, self.ontology, self.settings = workflow, run, ontology, settings
 
+    def failed_step(self, step, exc, stage, *, attempts=1):
+        artifact = self.run.source_artifacts.get(step.name)
+        seconds = float(self.settings.get('query_timeout_seconds', 30))
+        data = {**issue_data(exc, stage), 'message': str(exc), 'step': step.name,
+                'step_index': self.run.plan.sql_program.steps.index(step) + 1,
+                'purpose': step.purpose, 'engine': step.engine,
+                'data_source_id': step.data_source_id,
+                'data_source_label': artifact.compilation.get('data_source_label', '') if artifact else '',
+                'sql': artifact.physical_sql if artifact else step.sql,
+                'dialect': artifact.dialect if artifact else step.dialect}
+        if data.get('error_type') == 'timeout':
+            message = ('单条SQL执行超过' + format(seconds, 'g') + '秒'
+                       if data.get('timeout_origin') == 'system' else 'SQL执行超时')
+            data.update(message=message, timeout_seconds=seconds, retryable=False,
+                        attempts=attempts, max_attempts=2 if stage=='execution' else 1, retries_remaining=0)
+        self.run.agent_memory['execution_failure'] = [data]
+        self.w.emit(self.run, 'source.step.failed', self.run.status, data, 'executor')
+
     def remember_rejection(self, step, artifact, error, stage):
         from .sql_feedback import record_sql_rejection
         try:
@@ -145,6 +163,7 @@ class SQLExecution:
                 "executor",
             )
             revalidate = False
+            timeout_retries = 0
             while True:
                 error_stage = "baseline_validation"
                 try:
@@ -196,7 +215,7 @@ class SQLExecution:
                                 if exc.kind != "capability":
                                     raise
                         error_stage = "execution"
-                        result = await self.w.execute(
+                        result = await asyncio.wait_for(self.w.execute(
                             artifact.physical_sql,
                             artifact.parameters,
                             [],
@@ -205,7 +224,7 @@ class SQLExecution:
                                 "data_source_id": step.data_source_id,
                                 "execution_id": self.run.id,
                             },
-                        )
+                        ), timeout=float(self.settings.get('query_timeout_seconds', 30)))
                     if result.columns != step.output_columns:
                         raise SQLIssue(
                             "实际输出列与步骤契约不一致：实际"
@@ -222,8 +241,22 @@ class SQLExecution:
                         )
                     break
                 except Exception as exc:
+                    if isinstance(exc, TimeoutError):
+                        exc = ExecutorOperationError('timeout', diagnostic={'timeout_origin': 'system'})
+                    if (error_stage == 'execution' and isinstance(exc, ExecutorOperationError)
+                            and exc.kind == 'timeout' and timeout_retries < 1):
+                        timeout_retries += 1
+                        revalidate = False
+                        self.w.emit(self.run, 'source.step.retry', RunStatus.EXECUTING, {
+                            **exc.public(), 'step': step.name, 'attempt': 2, 'max_attempts': 2,
+                            'retryable': True, 'retries_remaining': 1,
+                            'timeout_seconds': float(self.settings.get('query_timeout_seconds', 30)),
+                            'summary': '本条SQL执行超时，正在重试（第2次，共2次）',
+                        }, 'executor')
+                        continue
                     if not repairable(exc):
-                        raise
+                        self.failed_step(step, exc, error_stage, attempts=timeout_retries + 1)
+                        raise exc
                     if step.name in self.run.source_artifacts:
                         self.remember_rejection(step, self.run.source_artifacts[step.name], exc, error_stage)
                     if step.name in self.run.source_artifacts:
@@ -233,7 +266,11 @@ class SQLExecution:
                         }
                     from .sql_authoring import repair_step
 
-                    await repair_step(self.w, self.run, step.name, issue_data(exc, error_stage))
+                    try:
+                        await repair_step(self.w, self.run, step.name, issue_data(exc, error_stage))
+                    except Exception as final:
+                        self.failed_step(step, final, error_stage, attempts=timeout_retries + 1)
+                        raise
                     revalidate = True
                     # The next iteration revalidates and executes the repaired
                     # statement. Earlier successful source queries are not replayed.

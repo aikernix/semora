@@ -25,8 +25,8 @@ def test_mysql_metadata_scan_uses_sixty_seconds_for_socket_and_statement(monkeyp
     assert ('SET SESSION MAX_EXECUTION_TIME = %s',(60000,)) in calls
 
 
-@pytest.mark.parametrize('requested,expected',[(None,15000),(30000,15000),(1000,1000)])
-def test_business_queries_enforce_fifteen_second_ceiling(monkeypatch,requested,expected):
+@pytest.mark.parametrize('requested,expected',[(None,30000),(30000,30000),(1000,1000)])
+def test_business_queries_enforce_thirty_second_ceiling(monkeypatch,requested,expected):
     monkeypatch.delenv('QUERY_TIMEOUT_MS', raising=False)
     captured=[]
     monkeypatch.setattr(executor.adapter_registry,'dialect',lambda body:'oracle')

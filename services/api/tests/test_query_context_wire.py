@@ -59,6 +59,32 @@ def test_tiny_material_does_not_grow():
     assert model_material(raw)==raw
 
 
+def test_identical_definitions_are_shared_without_merging_table_identities():
+    raw=packet()
+    second=deepcopy(raw['objects'][0]);second['object'].update(name='second',dataSourceId='other')
+    raw['objects'].append(second)
+    # Keep matching native scan metadata on both objects.
+    schema=deepcopy(raw['schemas'][0]);schema['object']='second';raw['schemas'].append(schema)
+    before=deepcopy(raw);wire=encode_material(raw)
+    assert raw==before and len(wire['shared_properties'])==1
+    restored=decode_material(wire)
+    assert restored==raw
+    restored['objects'][0]['object']['properties'][0]['column']='changed'
+    assert restored['objects'][1]['object']['properties'][0]['column']=='COLUMN_0'
+
+
+def test_different_field_constraints_do_not_share_definitions():
+    raw=packet();second=deepcopy(raw['objects'][0]);second['object']['name']='second'
+    second['object']['properties'][0]['nullable']=True
+    raw['objects'].append(second)
+    assert 'shared_properties' not in encode_material(raw)
+
+
+def test_previous_wire_version_still_decodes():
+    raw=packet();wire=encode_material(raw);wire['format']='query-material-tables-v1'
+    assert decode_material(wire)==raw
+
+
 def test_supplement_tool_compacts_inner_packet_and_keeps_checkpoint_raw(monkeypatch):
     import asyncio
     from types import SimpleNamespace

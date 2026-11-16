@@ -7,4 +7,4 @@ def scan_timeout_ms():
 
 
 def query_timeout_ms():
-    return max(100, int(os.getenv('QUERY_TIMEOUT_MS', '15000')))
+    return max(100, int(os.getenv('QUERY_TIMEOUT_MS', '30000')))

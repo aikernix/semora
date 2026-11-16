@@ -11,7 +11,7 @@ export function mergeRunEvent(run: QueryRun, sequence: number, event: RunEvent) 
 }
 
 export function publicStatus(run: QueryRun) {
-  if (run.status === 'failed') return run.delivery?.kind === 'cancelled' ? '查询已取消' : '查询未完成'
+  if (run.status === 'failed') return run.delivery?.kind === 'cancelled' ? '查询已取消' : '查询失败'
   if (run.status === 'clarifying') return run.requirement_draft?.technical_gaps?.length && !run.requirement_draft.clarifications.length ? '等待配置更新' : '等待您确认'
   if (run.status === 'completed') return run.result ? '查询已完成' : '查询语句已生成'
   return ({ received: '已收到您的需求', retrieving: '正在查阅业务资料', understanding: '正在理解您的需求', aligning: '正在整理业务口径', aligned: '正在准备查询', planning: '正在准备查询', compiling: '正在检查查询', executing: '正在获取所需数据', explaining: '正在整理查询结果' } as Record<string, string>)[run.status] || '正在处理本次查询'
@@ -50,7 +50,26 @@ export function resultDescription(run: QueryRun) {
 export function businessFailure(run: QueryRun) {
   const raw = run.error || ''
   if (run.delivery?.kind === 'cancelled') return '本次查询已取消，您的需求和已确认口径仍然保留。'
+  const failure = sqlFailure(run)
+  if (failure?.error_type === 'timeout') return `查询失败，${failure.message}`
   if (/连接|超时|timeout|network|502|503|1045|authentication|access denied/i.test(raw))
     return '查询所需的服务暂时未能完成响应。您的需求和已确认口径已保留，可以重试本次查询。'
   return '本次查询暂未完成。您的需求和已确认口径已保留，可重试；具体原因可在执行记录中查看。'
+}
+
+export function sqlFailure(run: QueryRun): Record<string, any> | undefined {
+  if (run.status !== 'failed' || run.delivery?.kind === 'cancelled') return
+  const failure = [...run.events].reverse().find(e => e.event === 'source.step.failed')
+  if (failure) return failure.data
+  // Older tasks have no explicit failed-step event. Only infer an execution
+  // failure when a started step has no completion receipt.
+  const started = [...run.events].reverse().find(e => e.event === 'source.step.started')
+  if (!started || run.events.some(e => e.event === 'source.step.completed' && e.data.step === started.data.step)) return
+  const steps = run.plan?.sql_program?.steps || []
+  const index = steps.findIndex((s: any) => s.name === started.data.step)
+  const step = steps[index]
+  const artifact = run.source_artifacts?.[started.data.step]
+  if (index < 0 || !artifact) return
+  return { step_index: index + 1, purpose: step.purpose, sql: artifact.physical_sql,
+    data_source_label: artifact.compilation?.data_source_label, message: run.error }
 }

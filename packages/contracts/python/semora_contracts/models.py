@@ -215,7 +215,7 @@ class LogicalFilter(BaseModel):
     relation_ref: str | None = None
     operator: Literal[
         "eq", "neq", "gt", "gte", "lt", "lte", "in", "not_in", "between",
-        "like", "is_null", "is_not_null", "exists", "not_exists",
+        "like", "is_null", "is_not_null", "exists", "not_exists", "null_safe_eq", "null_safe_neq",
     ]
     value: Any = None
     description: str = Field(min_length=1, max_length=300)
@@ -237,6 +237,8 @@ class LogicalQueryPlan(BaseModel):
     dimension_refs: list[str] = Field(default_factory=list, max_length=16)
     metrics: list[LogicalMetric] = Field(default_factory=list, max_length=16)
     filters: list[LogicalFilter] = Field(default_factory=list, max_length=24)
+    join_filters: list[LogicalFilter] = Field(default_factory=list, max_length=24,
+        description="本次查询要求的完整关联比较与附加限定；两字段比较时field_refs按左右顺序填写，常量条件用单字段与value；不得只引用已有关系而遗漏用户确认的其他匹配条件。")
     relation_refs: list[str] = Field(default_factory=list, max_length=16)
     sort: list[LogicalSort] = Field(default_factory=list, max_length=8)
     limit: int | None = Field(default=None, ge=1, le=100000)
@@ -349,6 +351,14 @@ class SQLInputBinding(BaseModel):
     source_step: str
     source_columns: list[str] = Field(min_length=1, max_length=8)
     parameter: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    null_safe_columns: list[str] = Field(default_factory=list, max_length=8,
+        description="source_columns中按需求或已确认条件允许空值与空值匹配的来源输出列；默认空值不匹配。不得仅因字段可空就启用。")
+
+    @model_validator(mode="after")
+    def validate_null_columns(self):
+        if not set(self.null_safe_columns) <= set(self.source_columns):
+            raise ValueError("null_safe_columns必须属于source_columns")
+        return self
 
 
 class SQLProgramStep(BaseModel):
@@ -364,13 +374,13 @@ class SQLProgramStep(BaseModel):
     sql: str = Field(
         min_length=1,
         max_length=100000,
-        description="使用本步骤执行目标方言的完整SQL。标量参数:name；动态键集合IN (:name)，复合键(a,b) IN (:name)。local步骤用先前步骤name作为表名。",
+        description="使用本步骤执行目标方言的完整SQL。标量参数:name；键集条件用SEMORA_KEYS_MATCH(:name,目标列...)绑定占位，由程序按目标方言展开；目标列顺序与inputs.source_columns一致。local仅读前序结果表。",
     )
     parameters: dict[str, Any] = Field(default_factory=dict)
     inputs: list[SQLInputBinding] = Field(
         default_factory=list,
         max_length=4,
-        description="仅source步骤使用：将前置输出键绑定进本步IN参数。local步骤必须为空，直接用先前步骤name写SQL关联。",
+        description="仅source步骤使用：将前置输出完整键元组绑定到本步键集占位；按已确定的比较语义声明null_safe_columns。local步骤必须为空，直接读取前序结果表。",
     )
     output_columns: list[str] = Field(min_length=1, max_length=1000)
     result_grain: list[str] = Field(default_factory=list, description="结果粒度对应的输出列，复合粒度保留全部列；标注粒度不能替代SQL聚合。")
@@ -453,7 +463,7 @@ class SQLArtifact(BaseModel):
 class SystemSettings(BaseModel):
     """Bounded query runtime settings; no retired approval/reviewer switches."""
 
-    query_timeout_seconds: int = Field(default=15, ge=1, le=30)
+    query_timeout_seconds: int = Field(default=30, ge=1, le=30)
     max_result_rows: int = Field(default=1000, ge=1, le=1000)
     max_result_mb: int = Field(default=10, ge=1, le=10)
     preview_rows: int = Field(default=100, ge=1, le=1000)

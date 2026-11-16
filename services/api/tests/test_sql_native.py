@@ -53,7 +53,7 @@ def test_composite_bindings_preserve_tuples_nulls_and_empty_set(sources):
     data={'q0':result(['a','b'],[[1,2],[1,2],[2,1],[None,3]])}
     artifact=compile_step(query,sources,data)
     assert list(artifact.parameters.values())==[1,2,2,1]
-    assert ' IN ((' in artifact.physical_sql and ' AND ' not in artifact.physical_sql
+    assert ' AND ' in artifact.physical_sql and ' OR ' in artifact.physical_sql
     empty=compile_step(query,sources,{'q0':result(['a','b'],[])})
     assert 'FALSE' in empty.physical_sql and empty.parameters=={}
     data['q0'].truncated=True
@@ -352,8 +352,51 @@ def test_initial_preview_counter_is_migrated_on_reload():
     assert run.agent_memory['sql_repair_count']==[{'attempts':2}]
 
 
+@pytest.mark.parametrize('origin,code,expected',[
+    ('database',3024,'查询失败，SQL执行超时'),
+    ('system',None,'查询失败，单条SQL执行超过30秒'),
+])
+def test_execution_timeout_retries_once_without_model_repair_and_preserves_failed_sql(monkeypatch,origin,code,expected):
+    from app.sql_errors import repairable
+    error=ExecutorOperationError('timeout',code,{'timeout_origin':origin})
+    assert not repairable(error)
+    w,session,execute,_,model,_=native_harness(monkeypatch)
+    execute.side_effect=error
+    run=asyncio.run(w.start(session.id,'List items',domain='test'))
+    assert run.status==RunStatus.FAILED and run.error==expected
+    assert execute.await_count==2 and len(query_model_calls(model))==1
+    assert not run.agent_memory.get('sql_repair_count') and run.result is None
+    failure=run.agent_memory['execution_failure'][-1]
+    assert failure['step']=='q' and failure['step_index']==1
+    assert failure['timeout_origin']==origin and failure['timeout_seconds']==30
+    assert 'FROM items' in failure['sql']
+    assert any(e.event=='source.step.failed' and e.data['sql']==failure['sql'] for e in run.events)
+    assert sum(e.event=='source.step.retry' for e in run.events)==1
+    assert failure['retryable'] is False and failure['retries_remaining']==0
+    retry=next(e.data for e in run.events if e.event=='source.step.retry')
+    assert retry['retryable'] is True and retry['retries_remaining']==1
+
+
+@pytest.mark.parametrize('origin,code',[('database',3024),('system',None)])
+def test_timeout_retry_succeeds_with_identical_sql_and_no_extra_model_call(monkeypatch,origin,code):
+    w,session,execute,_,model,_=native_harness(monkeypatch)
+    success=execute.side_effect
+    attempts=[]
+    async def transient_timeout(*args,**kwargs):
+        attempts.append(args)
+        if len(attempts)==1:raise ExecutorOperationError('timeout',code,{'timeout_origin':origin})
+        return await success(*args,**kwargs)
+    execute.side_effect=transient_timeout
+    run=asyncio.run(w.start(session.id,'List items',domain='test'))
+    assert run.status==RunStatus.COMPLETED and run.result.rows==[[1],[2]]
+    assert attempts[0]==attempts[1] and len(attempts)==2
+    assert len(query_model_calls(model))==1 and not run.agent_memory.get('sql_repair_count')
+    assert not run.agent_memory.get('execution_failure')
+
+
 @pytest.mark.parametrize('events',[[[1]],[]])
-def test_cross_source_full_graph_transfers_actual_keys_and_joins_with_sql(monkeypatch,events):
+@pytest.mark.parametrize('legacy',[False,True])
+def test_cross_source_full_graph_transfers_actual_keys_and_joins_with_sql(monkeypatch,events,legacy):
     import re
     import sqlite3
     import sqlglot
@@ -361,7 +404,7 @@ def test_cross_source_full_graph_transfers_actual_keys_and_joins_with_sql(monkey
         {'name':'roots','purpose':'Select entities','data_source_id':'source',
          'sql':'SELECT id FROM items ORDER BY id DESC','output_columns':['id']},
         {'name':'matches','purpose':'Find matching events','data_source_id':'other',
-         'sql':'SELECT item_id FROM events WHERE item_id IN (:keys)',
+         'sql':'SELECT item_id FROM events WHERE '+('item_id IN (:keys)' if legacy else 'SEMORA_KEYS_MATCH(:keys,item_id)'),
          'inputs':[{'source_step':'roots','source_columns':['id'],'parameter':'keys'}],
          'output_columns':['item_id']},
         {'name':'final','engine':'local','purpose':'Return counts including unmatched entities',

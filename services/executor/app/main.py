@@ -390,7 +390,8 @@ def execute_query(body: QueryInput, x_semora_internal_token: str | None = Header
     finally:
         if body.execution_id:
             with ACTIVE_QUERIES_LOCK:
-                ACTIVE_QUERIES.pop(body.execution_id, None)
+                if ACTIVE_QUERIES.get(body.execution_id) is connection:
+                    ACTIVE_QUERIES.pop(body.execution_id, None)
     duration_ms = int((time.perf_counter() - started) * 1000)
     return {
         "columns": columns,
@@ -544,14 +545,11 @@ class ProfileInput(BaseModel):
     target_context_enums: dict[str, list[int]] = Field(default_factory=dict)
 
 
-@app.post("/internal/v1/datasources/profile-relationship")
-def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None = Header(default=None)):
+def _directional_relationship_profile(body: ProfileInput, x_semora_internal_token=None):
     require_internal_token(x_semora_internal_token)
     if len(body.source_columns)!=len(body.target_columns):raise HTTPException(422,"复合键字段数不一致")
     if len(body.target_context_enums)>8 or any(not 2 <= len(v) <= 16 for v in body.target_context_enums.values()):
         raise HTTPException(422, 'Enumeration context exceeds the auxiliary statistics budget')
-    if not body.allow_bounded_unindexed and (not body.source_index_confirmed or not body.target_unique_index_confirmed):
-        raise HTTPException(422,"自动关系验证只允许使用已确认的来源索引和目标唯一索引")
 
     def table_expr(table):
         parts=table.split(".")
@@ -561,7 +559,7 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
             db=exp.to_identifier(parts[-2],quoted=True) if len(parts)>1 else None,
             catalog=exp.to_identifier(parts[-3],quoted=True) if len(parts)>2 else None)
 
-    def run_sample(datasource, table, columns, descending=False):
+    def run_sample(datasource, table, columns):
         dialect=adapter_registry.dialect(datasource)
         tree=exp.select(*(exp.column(c,quoted=True) for c in columns)).from_(table_expr(table))
         tree=tree.where(exp.and_(*(exp.column(c,quoted=True).is_(exp.null()).not_() for c in columns)))
@@ -571,9 +569,15 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
                 name = f"source_guard_{index}"
                 parameters[name] = guard.value
                 tree = tree.where(exp.EQ(this=exp.column(guard.field, quoted=True), expression=exp.Placeholder(this=name)))
-        if body.source_index_confirmed:
-            tree=tree.distinct()
-            tree=tree.order_by(*(exp.Ordered(this=exp.column(c,quoted=True),desc=descending) for c in columns))
+        # Randomize DISTINCT complete keys, not rows: repeated values must not
+        # dominate a sample. SQL Server RAND() is constant per statement.
+        random_order = {'mysql': exp.Rand(), 'postgres': exp.func('RANDOM'),
+                        'tsql': exp.func('NEWID'),
+                        'oracle': exp.Dot(this=exp.to_identifier('DBMS_RANDOM'), expression=exp.to_identifier('VALUE'))}
+        if dialect not in random_order:
+            raise HTTPException(422,'当前数据库没有可用的随机采样方言')
+        tree=exp.select(*(exp.column(c,quoted=True) for c in columns)).from_(tree.distinct().subquery('sample_keys'))
+        tree=tree.order_by(random_order[dialect])
         tree=tree.limit(min(body.sample_rows + 1, 1000))
         from semora_contracts.sql_compat import apply_pagination
         pagination="baseline"
@@ -588,21 +592,14 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
         return [tuple(json.dumps(v,sort_keys=True,default=str) for v in row)
                 for row in result["rows"] if all(v is not None for v in row)]
 
-    # Two index-ordered windows reduce first-page bias without random sorts or OFFSET.
-    observed=[]
-    source_exhausted = False
-    for descending in ([False, True] if body.source_index_confirmed else [False]):
-        window = run_sample(body.datasource,body.source_table,body.source_columns,descending)
-        source_exhausted = source_exhausted or len(window) <= body.sample_rows
-        observed.extend(window)
-    # Interleave both ends so the ascending window cannot consume the budget.
-    middle=len(observed)//2
-    interleaved=[value for pair in zip(observed[:middle],observed[middle:]) for value in pair]
-    keys=list(dict.fromkeys(interleaved+observed))[:body.sample_rows]
+    window = run_sample(body.datasource,body.source_table,body.source_columns)
+    source_exhausted = len(window) <= body.sample_rows
+    keys=list(dict.fromkeys(window))[:body.sample_rows]
     target=body.target_datasource or body.datasource
     matched=set()
     context_counts = {}
     context_errors = []
+    multiplicities = []
     dialect=adapter_registry.dialect(target)
     batch_size=100 if len(body.target_columns)>1 else 200
     for start in range(0,len(keys),batch_size):
@@ -614,7 +611,8 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
                 name=f"k_{row_index}_{column_index}";parameters[name]=json.loads(value)
                 conjunction.append(exp.EQ(this=exp.column(column,quoted=True),expression=exp.Placeholder(this=name)))
             disjunction.append(exp.and_(*conjunction))
-        tree=exp.select(*(exp.column(c,quoted=True) for c in body.target_columns)).distinct().from_(table_expr(body.target_table))
+        tree=exp.select(*(exp.column(c,quoted=True) for c in body.target_columns), exp.Count(this=exp.Star()).as_('matching_rows')).from_(table_expr(body.target_table))
+        tree=tree.group_by(*(exp.column(c,quoted=True) for c in body.target_columns))
         tree=tree.where(exp.or_(*disjunction)).limit(len(batch))
         for index, guard in enumerate(body.guards):
             if guard.side == "target":
@@ -625,7 +623,8 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
         for name in sorted(parameters, key=len, reverse=True):sql=sql.replace(f":{name}",f"%({name})s")
         result=execute_query(QueryInput(sql=sql,parameters=parameters,datasource=target,
             timeout_ms=10000,max_rows=max(1,len(batch)),max_bytes=1024*1024),x_semora_internal_token)
-        matched.update(tuple(json.dumps(v,sort_keys=True,default=str) for v in row) for row in result["rows"])
+        matched.update(tuple(json.dumps(v,sort_keys=True,default=str) for v in row[:len(body.target_columns)]) for row in result["rows"])
+        multiplicities.extend(int(row[len(body.target_columns)]) if len(row)>len(body.target_columns) else 1 for row in result['rows'])
         if result['rows']:
             for field, values in body.target_context_enums.items():
                 # Project only codes already declared in schema comments, never arbitrary attribute values.
@@ -648,17 +647,56 @@ def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None
                     context_errors.append({'field': field, 'error_type': type(exc).__name__})
     secret=os.getenv("RELATIONSHIP_PROFILE_HMAC_KEY",os.getenv("INTERNAL_TOKEN","semora-dev-internal")).encode()
     signatures=sorted(hmac.new(secret,"\x1f".join(row).encode(),hashlib.sha256).hexdigest()[:24] for row in keys)[:64]
-    return {"method":"indexed_directional_membership_v3_context","sample_budget":body.sample_rows,
-            "sampling_unit":"distinct_keys" if body.source_index_confirmed else "bounded_rows",
+    return {"method":"random_directional_membership_v4","sample_budget":body.sample_rows,
+            "sampling_unit":"distinct_keys", "sampling_method":"database_random_distinct_keys",
             "target_context": context_counts, "target_context_errors": context_errors,
             "source_exhausted":source_exhausted,
             "guards_applied":[g.model_dump() for g in body.guards],
             "source_nonnull_distinct_keys":len(keys),"matched_keys":len(set(keys)&matched),
             "directional_coverage":round(len(set(keys)&matched)/len(keys),6) if keys else 0,
+            "matched_row_count":sum(multiplicities), "max_matches_per_key":max(multiplicities,default=0),
+            "duplicate_matched_keys":sum(n>1 for n in multiplicities),
             "target_uniqueness":"declared_constraint" if body.target_unique_index_confirmed else "unverified",
             "index_verified_by_metadata":body.source_index_confirmed and body.target_unique_index_confirmed,
             "signature_version":"hmac-sha256-v1","signature":signatures,
             "raw_values_retained":False}
+
+
+@app.post("/internal/v1/datasources/profile-relationship")
+def profile_relationship(body: ProfileInput, x_semora_internal_token: str | None = Header(default=None)):
+    require_internal_token(x_semora_internal_token)
+    reverse_body = body.model_copy(update={
+        'datasource': body.target_datasource or body.datasource, 'target_datasource': body.datasource,
+        'source_table': body.target_table, 'target_table': body.source_table,
+        'source_columns': body.target_columns, 'target_columns': body.source_columns,
+        'source_index_confirmed': body.target_unique_index_confirmed,
+        'target_unique_index_confirmed': False,
+        'guards': [g.model_copy(update={'side':'target' if g.side=='source' else 'source'}) for g in body.guards],
+        'target_context_enums': {}})
+    results=[]
+    for direction, value in [('forward',body),('reverse',reverse_body)]:
+        try:
+            results.append({**_directional_relationship_profile(value,x_semora_internal_token),'status':'available'})
+        except Exception as exc:
+            import logging
+            detail=getattr(exc,'detail',{})
+            code=detail.get('db_error_code') if isinstance(detail,dict) else None
+            logging.getLogger('semora.executor').warning('relationship.profile.direction_unavailable direction=%s source=%s target=%s error_type=%s db_error_code=%s',
+                direction,value.source_table,value.target_table,type(exc).__name__,code)
+            results.append({'status':'unavailable','error_type':type(exc).__name__,'db_error_code':code,
+                'source_nonnull_distinct_keys':0,'matched_keys':0,'directional_coverage':0,'source_exhausted':False})
+    forward,reverse=results
+    if all(r['status']=='unavailable' for r in results):
+        raise HTTPException(503,'双向随机采样均未取得数据证据，请查看验证日志')
+    return {**forward, 'method':'bidirectional_random_membership_v4',
+            'sample_budget':body.sample_rows,'sampling_unit':'distinct_keys',
+            'sampling_method':'independent_database_random_distinct_keys','raw_values_retained':False,
+            'forward':{k:v for k,v in forward.items() if k!='signature'},
+            'reverse':{k:v for k,v in reverse.items() if k!='signature'},
+            'reverse_directional_coverage':reverse['directional_coverage'],
+            'target_nonnull_distinct_keys':reverse['source_nonnull_distinct_keys'],
+            'reverse_matched_keys':reverse['matched_keys'],
+            'target_exhausted':reverse['source_exhausted']}
 
 
 class RelationDefinitionInput(DataSourceInput):

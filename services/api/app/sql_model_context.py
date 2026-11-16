@@ -177,4 +177,6 @@ def sql_model_payload(payload, *, reference_materials=None):
     for key in ('request', 'confirmed_requirement', 'logical_plan', 'deterministic_alignment_findings'):
         if isinstance(result.get(key), (dict, list)):
             result[key] = refs.structured(result[key])
-    return encode_payload(result)
+    from .sql_execution_scope import scoped_payload
+    from .sql_input_compaction import compact_sql_input
+    return encode_payload(compact_sql_input(scoped_payload(result)))

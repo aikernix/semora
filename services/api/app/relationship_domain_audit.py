@@ -15,5 +15,8 @@ def domain_observations(candidates):
         by_target[target][source] = {'source_table': c['source_table_id'],
             'source_definition': context.get('source_description', ''),
             'distinct_keys_checked': profile['source_nonnull_distinct_keys'],
-            'matched_keys': profile.get('matched_keys', 0), 'source_exhausted': profile.get('source_exhausted', False)}
+            'matched_keys': profile.get('matched_keys', 0), 'source_exhausted': profile.get('source_exhausted', False),
+            'reverse_distinct_keys_checked':profile.get('target_nonnull_distinct_keys'),
+            'reverse_matched_keys':profile.get('reverse_matched_keys'),
+            'sampling_method':profile.get('sampling_method')}
     return {k: [v[x] for x in sorted(v)] for k, v in by_target.items()}

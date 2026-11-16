@@ -20,7 +20,12 @@ const elapsed = computed(() => {
   return (units[0] ? units : units.slice(1)).map(v => String(v).padStart(2, '0')).join(':')
 })
 const signalLabel = computed(() => {
-  if (!active.value) return props.run.status === 'clarifying' ? '完成确认后继续处理' : ''
+  if (!active.value) {
+    if (props.run.status !== 'clarifying') return ''
+    const draft = props.run.requirement_draft
+    return draft?.technical_gaps?.length && !draft.clarifications.length
+      ? '配置补齐后可重新检查' : '完成确认后继续处理'
+  }
   if (reconnecting.value) return '连接恢复中 · 正在重新获取本次进度'
   if (props.connection !== 'live') return '正在连接服务'
   const seconds = Math.max(0, Math.floor((now.value - props.lastSignal) / 1000))

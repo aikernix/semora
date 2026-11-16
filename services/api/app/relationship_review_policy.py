@@ -31,7 +31,14 @@ def review_reasons(candidate, decision):
             reasons.append('target_role_context_requires_review')
         if p.get('target_context_errors'):
             reasons.append('target_role_context_unavailable')
-        if p.get('source_nonnull_distinct_keys', 0) and p.get('directional_coverage', 0) < MIN_REFERENCE_COVERAGE:
+        from .relationship_profile import support
+        facts = support(p, candidate.get('scope') == 'cross_source')
+        if p.get('method') == 'bidirectional_random_membership_v4':
+            if not facts['positive_matches']:
+                reasons.append('no_observed_matches')
+            elif not facts['high_coverage']:
+                reasons.append('partial_coverage_requires_explanation')
+        elif p.get('source_nonnull_distinct_keys', 0) and p.get('directional_coverage', 0) < MIN_REFERENCE_COVERAGE:
             reasons.append('data_contradiction')
     contracts = [e for e in candidate['evidence'] if e.get('kind') == 'join_contract']
     if contracts and not contracts[-1].get('valid'):
@@ -40,7 +47,11 @@ def review_reasons(candidate, decision):
 
 
 def structure_is_sufficient(candidate, decision):
-    """Skip data calls for a clear complete reference, never for a model flag alone."""
+    """Semantic clarity is usable only with already verified coverage evidence."""
+    from .relationship_profile import support
+    profile = next((e.get('statistics', {}) for e in reversed(candidate.get('evidence', [])) if e.get('kind') == 'value_profile'), {})
+    if not support(profile, candidate.get('scope') == 'cross_source')['high_coverage']:
+        return False
     if decision.get('query_outcome') != 'usable' or not decision.get('supported'):
         return False
     if not decision.get('structure_sufficient') or not str(decision.get('reason') or '').strip():
@@ -62,5 +73,4 @@ def structure_is_sufficient(candidate, decision):
             candidate.get('target_datasource_id'), candidate.get('target_table_id'), candidate.get('target_columns'))
         if same_source and different_target:
             return False
-    return any(e.get('kind') in {'target_unique_index','verified_target_uniqueness'} and e.get('confirmed') is True
-               or e.get('kind') == 'explicit_field_reference' for e in candidate['evidence'])
+    return True

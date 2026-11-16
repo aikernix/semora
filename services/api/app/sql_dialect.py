@@ -116,7 +116,8 @@ def dependency_keys(binding, results, template):
     keys, seen = [], set()
     for row in result.rows:
         key = tuple(row[i] for i in positions)
-        if any(v is None for v in key):
+        if any(v is None and column not in binding.null_safe_columns
+               for column, v in zip(binding.source_columns, key)):
             continue
         signature = json.dumps(key, ensure_ascii=False, default=str)
         if signature not in seen:
@@ -230,6 +231,20 @@ def compile_step(step, ontology, results=None, *, template=False, row_limit=1000
     used_dynamic, used_static = set(), set()
 
     def transform(node):
+        if isinstance(node, exp.Anonymous) and node.name.upper() == 'SEMORA_KEYS_MATCH':
+            arguments = node.expressions
+            if len(arguments) < 2 or not isinstance(arguments[0], exp.Placeholder):
+                raise SQLIssue('键集条件必须包含一个inputs参数及对应目标列')
+            name = arguments[0].this
+            if name not in dynamic:
+                raise SQLIssue('键集条件未声明对应inputs参数')
+            binding = dynamic[name]
+            fields = arguments[1:]
+            if len(fields) != len(binding.source_columns) or not all(isinstance(f, exp.Column) for f in fields):
+                raise SQLIssue('键集目标列必须与source_columns按顺序完整对应')
+            used_dynamic.add(name)
+            from .sql_key_binding import key_set_predicate
+            return key_set_predicate(fields, dependency_keys(binding, results, template), marker)
         if (
             isinstance(node, exp.In)
             and len(node.expressions) == 1
@@ -243,19 +258,15 @@ def compile_step(step, ontology, results=None, *, template=False, row_limit=1000
                 lhs_width = len(node.this.expressions) if isinstance(node.this, exp.Tuple) else 1
                 if lhs_width != len(binding.source_columns):
                     raise SQLIssue("复合键参数与IN左侧字段数不一致")
-                if not keys:
-                    return exp.false()
-                items = [
-                    exp.Tuple(expressions=[marker(v) for v in key])
-                    if lhs_width > 1
-                    else marker(key[0])
-                    for key in keys
-                ]
-                return exp.In(this=node.this.copy(), expressions=items)
+                # Historical IN collection placeholders use the same lowering
+                # and null policy as the current transport protocol.
+                fields = node.this.expressions if isinstance(node.this, exp.Tuple) else [node.this]
+                from .sql_key_binding import key_set_predicate
+                return key_set_predicate(fields, keys, marker)
         if isinstance(node, exp.Placeholder):
             name = node.this
             if name in dynamic:
-                raise SQLIssue("动态键参数只允许用于IN (:name)")
+                raise SQLIssue("动态键参数必须用于键集条件绑定占位")
             if name not in params:
                 raise SQLIssue("SQL缺少参数：" + str(name))
             if isinstance(params[name], (dict, list)):
@@ -265,6 +276,8 @@ def compile_step(step, ontology, results=None, *, template=False, row_limit=1000
         return node
 
     tree = tree.transform(transform)
+    from .sql_key_binding import lower_null_comparisons
+    tree = lower_null_comparisons(tree, dialect)
     if used_dynamic != set(dynamic) or used_static != set(params):
         raise SQLIssue("存在未在SQL使用的参数或动态绑定")
     # Fetch one overflow row for complete intermediates; the Executor reports

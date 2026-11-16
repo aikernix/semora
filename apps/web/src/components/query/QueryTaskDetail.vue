@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { HistoryIcon, ChevronRightIcon } from 'tdesign-icons-vue-next'
 import type { QueryRun } from '../../api'
 import { visibleQuestions, freeAnswerText } from '../../queryQuestions'
-import { businessFailure, resultDescription, terminalStatus } from '../../queryPresentation'
+import { businessFailure, resultDescription, terminalStatus, sqlFailure } from '../../queryPresentation'
 import { displayValue } from '../../analysisTimeline'
 import TaskStatus from './TaskStatus.vue'
 import ExecutionRecord from './ExecutionRecord.vue'
@@ -59,12 +59,13 @@ const statisticsRules = computed(() => {
 const labels = computed(() => props.run.plan?.sql_program?.steps?.at(-1)?.output_labels || {})
 const explanation = computed(() => resultDescription(props.run))
 const active = computed(() => !terminalStatus(props.run.status))
+const failedSQL = computed(() => sqlFailure(props.run))
 const currentStep = computed(() => {
   if (props.run.status === 'executing') {
-    const started = [...props.run.events].reverse().find(e => e.event === 'source.step.started')
+    const started = [...props.run.events].reverse().find(e => ['source.step.started', 'source.step.retry'].includes(e.event))
     const step = props.run.plan?.sql_program?.steps?.find((s: any) => s.name === started?.data.step)
     const completed = [...props.run.events].reverse().find(e => ['source.step.completed', 'source.step.skipped'].includes(e.event) && e.data.step === started?.data.step)
-    if (step?.purpose && !completed) return step.purpose
+    if (step?.purpose && !completed) return started?.event === 'source.step.retry' ? `本条查询超时，正在重试（第2次，共2次）：${step.purpose}` : step.purpose
   }
   return ({ received: '正在准备本次查询', retrieving: '正在查阅与需求相关的业务资料', understanding: '正在理解需求，核对所需业务信息', aligning: '正在整理需要确认的口径', aligned: '正在将已确认口径落实到查询', planning: '正在准备查询', compiling: '正在检查查询是否可以执行', explaining: '正在整理数据与结果说明' } as Record<string, string>)[props.run.status] || '正在获取本次查询所需信息'
 })
@@ -111,7 +112,7 @@ function openRecord() { recordOpen.value = true }
 
       <section v-else-if="active" class="running-section" aria-live="polite"><div class="running-mark"></div><div><h2>{{ currentStep }}</h2><p>您可以留在当前页面查看进度，也可以稍后从左侧重新打开这条查询。</p></div></section>
 
-      <section v-else-if="run.status === 'failed'" class="failure-section"><div class="failure-symbol">!</div><div><h2>{{ run.delivery?.kind === 'cancelled' ? '本次查询已取消' : '本次查询未完成' }}</h2><p>{{ businessFailure(run) }}</p><div class="failure-actions"><t-button v-if="run.delivery?.kind !== 'cancelled'" theme="primary" :loading="loading" @click="emit('retry')">重试本次查询</t-button><button class="inline-record" @click="openRecord">查看执行记录 <ChevronRightIcon/></button></div></div></section>
+      <section v-else-if="run.status === 'failed'" class="failure-section"><div class="failure-symbol">!</div><div class="failure-content"><h2>{{ run.delivery?.kind === 'cancelled' ? '本次查询已取消' : '查询失败' }}</h2><p>{{ businessFailure(run) }}</p><div v-if="failedSQL" class="failed-sql"><strong>失败 SQL：第 {{ failedSQL.step_index }} 条<span v-if="failedSQL.data_source_label"> · {{ failedSQL.data_source_label }}</span></strong><p>{{ failedSQL.purpose }}</p><pre>{{ failedSQL.sql }}</pre></div><div class="failure-actions"><t-button v-if="run.delivery?.kind !== 'cancelled'" theme="primary" :loading="loading" @click="emit('retry')">重试本次查询</t-button><button class="inline-record" @click="openRecord">查看执行记录 <ChevronRightIcon/></button></div></div></section>
 
       </section>
       <section class="query-results detail-section">
@@ -141,6 +142,7 @@ function openRecord() { recordOpen.value = true }
 
 <style scoped>
 .task-detail{height:100%;display:flex;flex-direction:column;background:var(--semora-page);min-width:0}
+.failure-content{min-width:0;flex:1}.failed-sql{margin:14px 0;padding:12px;background:var(--semora-page);border:1px solid var(--semora-line);border-radius:6px}.failed-sql strong{font-size:12px}.failed-sql pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.7;margin:10px 0 0}
 .task-header{width:100%;max-width:1184px;align-self:center;padding:28px 32px 22px;display:flex;justify-content:space-between;align-items:flex-start;gap:24px;flex-shrink:0}
 .task-heading{min-width:0;flex:1}
 .task-eyebrow{font-size:11px;color:var(--semora-muted);display:flex;gap:9px;align-items:center;letter-spacing:.3px}

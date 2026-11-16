@@ -68,7 +68,7 @@ def test_reference_audit_keeps_source_fields_and_model_search_targets_without_pa
     assert d.validate_response(response, p)['relations']
 
 
-def test_partial_positive_reference_requires_independent_direct_semantics():
+def test_partial_positive_reference_remains_unresolved_despite_independent_semantics():
     from app.relationship_evidence import finalize_relationships
     from test_relationship_research import candidate, verdict
     c = candidate('reference')
@@ -78,8 +78,8 @@ def test_partial_positive_reference_requires_independent_direct_semantics():
                                                'matched_keys': 5, 'directional_coverage': 5/7}},
         {'kind': 'model_semantic_review', **v}, {'kind': 'independent_review', **v}])
     finalize_relationships([c])
-    assert c['status'] == 'accepted'
-    assert c['evidence'][-1]['data_quality'] == 'partial_reference_coverage'
+    assert c['status'] == 'unresolved'
+    assert c['evidence'][-1]['proof_path'] == 'insufficient'
     c['evidence'] = [e for e in c['evidence'] if e['kind'] != 'independent_review']
     finalize_relationships([c])
     assert c['status'] == 'unresolved'
@@ -99,7 +99,7 @@ def test_domain_observations_are_facts_and_do_not_copy_another_models_verdict():
     assert 'supported' not in json.dumps(values)
 
 
-def test_zero_matches_require_explicit_independent_schema_reference_assessment():
+def test_zero_matches_cannot_be_overridden_by_incomplete_data_claim():
     from app.relationship_evidence import finalize_relationships
     from test_relationship_research import candidate, verdict
     c = candidate('defined')
@@ -108,7 +108,7 @@ def test_zero_matches_require_explicit_independent_schema_reference_assessment()
         {'kind': 'value_profile', 'statistics': {'source_nonnull_distinct_keys': 1, 'matched_keys': 0, 'directional_coverage': 0}},
         {'kind': 'model_semantic_review', **v}, {'kind': 'independent_review', **v}])
     finalize_relationships([c])
-    assert c['status'] == 'accepted'
+    assert c['status'] == 'unresolved'
     c['evidence'][-2]['coverage_assessment'] = 'unknown'  # remove independent explanation
     finalize_relationships([c])
     assert c['status'] == 'unresolved'
