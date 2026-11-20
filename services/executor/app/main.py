@@ -15,6 +15,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi import FastAPI, Header, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
+from semora_contracts.query_limits import (
+    EXPLAIN_TIMEOUT_DEFAULT_SECONDS, MIB, RESULT_DEFAULT_MIB, RESULT_DEFAULT_ROWS,
+)
 from sqlglot import exp
 from semora_telemetry import configure_telemetry
 from . import mysql_adapter, jdbc_adapter, adapter_registry, drivers, scan_control
@@ -55,9 +58,9 @@ class QueryInput(BaseModel):
     sql: str = Field(min_length=1, max_length=100_000)
     parameters: dict[str, Any] = Field(default_factory=dict)
     sensitive_columns: list[str] = Field(default_factory=list, max_length=1000)
-    timeout_ms: int | None = Field(default=None, ge=100, le=30_000)
-    max_rows: int | None = Field(default=None, ge=1, le=1_000)
-    max_bytes: int | None = Field(default=None, ge=1_024, le=10 * 1024 * 1024)
+    timeout_ms: int | None = Field(default=None, ge=100)
+    max_rows: int | None = Field(default=None, ge=1)
+    max_bytes: int | None = Field(default=None, ge=1_024)
     execution_id: str | None = Field(default=None, min_length=1, max_length=64)
     datasource: DataSourceInput
 
@@ -65,7 +68,7 @@ class QueryInput(BaseModel):
 class EstimateInput(BaseModel):
     sql: str = Field(min_length=1, max_length=100_000)
     parameters: dict[str, Any] = Field(default_factory=dict)
-    timeout_ms: int = Field(default=5_000, ge=100, le=5_000)
+    timeout_ms: int = Field(default=EXPLAIN_TIMEOUT_DEFAULT_SECONDS * 1000, ge=100)
     datasource: DataSourceInput
 
 
@@ -328,27 +331,20 @@ def scan_datasource(body: DataSourceScanInput, x_semora_internal_token: str | No
 def execute_query(body: QueryInput, x_semora_internal_token: str | None = Header(default=None)) -> dict:
     require_internal_token(x_semora_internal_token)
     assert_readonly(body.sql, adapter_registry.dialect(body.datasource))
+    timeout_ms = body.timeout_ms if body.timeout_ms is not None else query_timeout_ms()
+    max_rows = body.max_rows if body.max_rows is not None else int(os.getenv("MAX_RESULT_ROWS", str(RESULT_DEFAULT_ROWS)))
+    max_bytes = body.max_bytes if body.max_bytes is not None else int(os.getenv("MAX_RESULT_BYTES", str(RESULT_DEFAULT_MIB * MIB)))
     if adapter_registry.is_jdbc(body.datasource.type):
         cfg = jdbc_adapter.settings(body.datasource)
         sql, params = jdbc_adapter.bind_parameters(body.sql, body.parameters)
         result = jdbc_adapter.run(cfg, "query", sql=sql, parameters=params,
             execution_id=body.execution_id,
-            timeout_ms=min(body.timeout_ms or query_timeout_ms(), query_timeout_ms()),
-            max_rows=min(body.max_rows or 1000, int(os.getenv("MAX_RESULT_ROWS", "1000"))),
-            max_bytes=min(body.max_bytes or 10485760, int(os.getenv("MAX_RESULT_BYTES", "10485760"))), datasource_id=body.datasource.datasource_id)
+            timeout_ms=timeout_ms, max_rows=max_rows, max_bytes=max_bytes, datasource_id=body.datasource.datasource_id)
         result["rows"] = [[mask_sensitive(result["columns"][i], v, set(body.sensitive_columns)) for i,v in enumerate(row)] for row in result["rows"]]
         result["bytes_returned"] = len(json.dumps(result["rows"], ensure_ascii=False).encode())
         return result
     dsn = resolve_datasource(body.datasource)
     started = time.perf_counter()
-    # Environment values are hard security ceilings. A versioned system policy
-    # may only make a query stricter, never relax the Executor boundary.
-    hard_max_rows = int(os.getenv("MAX_RESULT_ROWS", "1000"))
-    hard_max_bytes = int(os.getenv("MAX_RESULT_BYTES", str(10 * 1024 * 1024)))
-    hard_timeout_ms = query_timeout_ms()
-    max_rows = min(body.max_rows or hard_max_rows, hard_max_rows)
-    max_bytes = min(body.max_bytes or hard_max_bytes, hard_max_bytes)
-    timeout_ms = min(body.timeout_ms or hard_timeout_ms, hard_timeout_ms)
     connection: psycopg.Connection | None = None
     native_protocol = adapter_registry.protocol(body.datasource.type)
     try:

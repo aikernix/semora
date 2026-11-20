@@ -730,27 +730,34 @@ class ModelingRepository:
                 rows = connection.execute('''SELECT DISTINCT ON
                     (LEAST(datasource_id,peer_datasource_id),GREATEST(datasource_id,peer_datasource_id)) id
                     FROM semora_meta.datasource_onboarding_jobs WHERE domain=%s AND kind='cross_source'
+                    AND details->>'pair_unbound' IS DISTINCT FROM 'true'
                     ORDER BY LEAST(datasource_id,peer_datasource_id),GREATEST(datasource_id,peer_datasource_id),created_at DESC''', (domain,)).fetchall()
             return [self.get_job(row[0]) for row in rows]
         latest = {}
         for job in self.memory_jobs.values():
-            if job.get('domain') != domain or job.get('kind') != 'cross_source':continue
+            if (job.get('domain') != domain or job.get('kind') != 'cross_source'
+                    or job.get('details', {}).get('pair_unbound')):
+                continue
             pair=tuple(sorted((job['datasource_id'],job['peer_datasource_id'])))
             if pair not in latest or job['created_at'] > latest[pair]['created_at']:latest[pair]=job
         return list(latest.values())
 
-    def latest_job(self, datasource_id: str, kind="onboarding"):
+    def latest_job(self, datasource_id: str, kind="onboarding", *, relationships_only=False):
         if self.dsn:
             with self._connect() as connection:
                 row = connection.execute(
-                    "SELECT id FROM semora_meta.datasource_onboarding_jobs WHERE datasource_id=%s AND kind=%s ORDER BY created_at DESC LIMIT 1",
-                    (datasource_id, kind),
+                    """SELECT id FROM semora_meta.datasource_onboarding_jobs
+                    WHERE datasource_id=%s AND kind=%s
+                      AND (NOT %s OR (details->>'metadata_only' IS DISTINCT FROM 'true' AND phase<>'metadata_complete'))
+                    ORDER BY created_at DESC LIMIT 1""",
+                    (datasource_id, kind, relationships_only),
                 ).fetchone()
             return self.get_job(row[0]) if row else None
         values = [
             v
             for v in self.memory_jobs.values()
             if v["datasource_id"] == datasource_id and v["kind"] == kind
+            and (not relationships_only or not (v.get("details", {}).get("metadata_only") or v["phase"] == "metadata_complete"))
         ]
         return sorted(values, key=lambda value: value["created_at"])[-1] if values else None
 
@@ -1109,6 +1116,8 @@ class ModelingService:
         job = self.repository.get_job(job_id)
         if job['datasource_id'] != datasource_id or job.get('kind', 'onboarding') not in {'onboarding','cross_source'}:
             raise KeyError(job_id)
+        if job.get('details', {}).get('pair_unbound'):
+            raise ValueError('该分析所属的库间关联已解除绑定，请重新添加关联')
         current = self.repository.latest_job(datasource_id)
         if current and current['status'] not in TERMINAL:
             raise ValueError('已有分析任务正在运行')

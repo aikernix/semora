@@ -98,3 +98,39 @@ test('polling checks active jobs only and stops after completion',async({page})=
   await page.waitForTimeout(3500)
   expect(calls).toEqual(completed)
 })
+
+test('table scans show terminal outcomes and preserve the relationship task', async ({ page }) => {
+  const relationship = { id: 'analysis', status: 'cancelled', phase: 'cancelled', progress: 44 }
+  let current: Record<string, any> = relationship
+  await page.route('**/api/v1/**', route => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/datasources')) {
+      return route.fulfill({ json: [{ id: 'source', name: '演示数据源', type: 'postgresql', status: 'healthy', objects: 2 }] })
+    }
+    if (url.pathname.endsWith('/rescan')) {
+      current = { id: 'scan', status: 'scanning', phase: 'scanning', progress: 32, details: { metadata_only: true } }
+      return route.fulfill({ json: current })
+    }
+    if (url.pathname.endsWith('/onboarding')) {
+      return route.fulfill({ json: url.searchParams.has('relationships_only') ? relationship : current })
+    }
+    return route.fulfill({ json: url.pathname.endsWith('/connection') ? {} : [] })
+  })
+
+  await page.goto('/datasources')
+  const panel = page.locator('.task-panel')
+  const rescan = panel.getByRole('button', { name: '重新扫描表信息', exact: true })
+  await Promise.all([page.waitForResponse(response => response.url().endsWith('/rescan')), rescan.click()])
+  await expect(rescan).toBeDisabled()
+  await expect(panel).toContainText('停止于 44%')
+  await expect(panel).not.toContainText('32%')
+  await expect(panel.locator('.scan-outcome')).toHaveCount(0)
+  current = { ...current, status: 'completed', phase: 'metadata_complete', progress: 100 }
+  await expect(panel.locator('.scan-outcome')).toHaveText('扫描表信息成功')
+  await page.reload()
+  await expect(panel).toContainText('停止于 44%')
+  await Promise.all([page.waitForResponse(response => response.url().endsWith('/rescan')), rescan.click()])
+  current = { ...current, status: 'failed', phase: 'failed', error: '连接不可用' }
+  await expect(panel.locator('.scan-outcome')).toHaveText('扫描表信息失败：连接不可用')
+  await expect(panel).toContainText('停止于 44%')
+})

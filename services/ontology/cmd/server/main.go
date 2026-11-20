@@ -305,6 +305,12 @@ func main() {
 	mux.HandleFunc("/api/v1/ontology/source-packages", app.internal(app.sourcePackage))
 	mux.HandleFunc("/api/v1/ontology/cross-relations/append", app.internal(app.appendCrossRelations))
 	mux.HandleFunc("/api/v1/ontology/domains", app.internal(app.createDomain))
+	mux.HandleFunc("DELETE /api/v1/ontology/domains/{domain}", app.internal(func(w http.ResponseWriter, r *http.Request) {
+		deleteResource(w, r, app.store.deleteDomain, "domain")
+	}))
+	mux.HandleFunc("DELETE /internal/v1/datasources/{source}", app.internal(func(w http.ResponseWriter, r *http.Request) {
+		deleteResource(w, r, app.store.deleteDatasource, "source")
+	}))
 	mux.HandleFunc("/api/v1/ontology/publish", app.internal(app.publish))
 	mux.HandleFunc("/api/v1/ontology/snapshots/latest", app.internal(app.latest))
 	mux.HandleFunc("/api/v1/ontology/paths", app.internal(app.paths))

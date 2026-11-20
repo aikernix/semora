@@ -40,12 +40,14 @@ class Store:
         try:
             with self._connect() as connection, connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT id, title, created_at, domain, owner_subject, requirement_form FROM semora_meta.sessions ORDER BY created_at"
+                    "SELECT id, title, created_at, domain, owner_subject, requirement_form FROM semora_meta.sessions WHERE deleted_at IS NULL ORDER BY created_at"
                 )
                 for row in cursor.fetchall():
                     self.sessions[row[0]] = Session(row[0], row[1], row[2], row[3], row[4])
                     self.sessions[row[0]].requirement_form = row[5] or {}
-                cursor.execute("SELECT payload FROM semora_meta.runs ORDER BY created_at")
+                cursor.execute("""SELECT r.payload FROM semora_meta.runs r
+                    JOIN semora_meta.sessions s ON s.id=r.session_id
+                    WHERE s.deleted_at IS NULL ORDER BY r.created_at""")
                 for (payload,) in cursor.fetchall():
                     run = restore_run(payload)
                     self.runs[run.id] = run
@@ -93,6 +95,17 @@ class Store:
         self.sessions[session.id] = session
         self._persist_session(session)
         return session
+
+    def archive_session(self, session: Session) -> None:
+        if self._dsn:
+            with self._connect() as connection:
+                connection.execute(
+                    "UPDATE semora_meta.sessions SET deleted_at=now() WHERE id=%s AND deleted_at IS NULL",
+                    (session.id,),
+                )
+        self.sessions.pop(session.id, None)
+        for run_id in session.run_ids:
+            self.runs.pop(run_id, None)
 
     def add_run(self, run: QueryRun) -> None:
         self.runs[run.id] = run

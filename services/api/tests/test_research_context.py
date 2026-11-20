@@ -55,6 +55,69 @@ def test_research_page_is_available_to_sql_role_without_second_search(monkeypatc
     assert run.agent_memory['model_evidence_refs']
 
 
+def test_value_probe_checks_scope_and_reports_incomplete_results(monkeypatch):
+    from app import field_value_probe
+    from semora_contracts import AuthorizationContext, ExecutionResult
+
+    column = {"name": "Status", "sensitivity": "internal"}
+    packet = {
+        "objects": [{"object": {"name": "item", "table": "public.items", "dataSourceId": "source",
+                                "properties": [{"name": "status", "column": "Status"}]}}],
+        "schemas": [{"object": "item", "tables": [{"columns": [column]}]}],
+    }
+    source = SimpleNamespace(scan_result={"capabilities": {"query": "verified"}})
+    monkeypatch.setattr(field_value_probe.datasource_service.repository, "get", lambda _: source)
+    monkeypatch.setattr(field_value_probe, "dialect_for", lambda _: "postgres")
+    execute = AsyncMock(return_value=ExecutionResult(
+        columns=["Status"], rows=[["open"], ["unknown+"], [None], ["x" * 81]],
+        row_count=4, duration_ms=1,
+    ))
+    run = QueryRun(session_id="session", domain="test", question="Which statuses exist?",
+                   authorization=AuthorizationContext(subject="user", username="user",
+                                                      allowed_data_source_ids=["source"]))
+    toolkit = ResearchTools(SimpleNamespace(execute=execute, emit=lambda *args: None), run, {}, {})
+    toolkit.context_state = {"packet": packet}
+
+    async def probe():
+        result = await toolkit.inspect_field_values("item", "status", "Verify the status labels.")
+        duplicate = await toolkit.inspect_field_values("item", "status", "Verify again.")
+        return result, duplicate
+
+    result, duplicate = asyncio.run(probe())
+    assert result == duplicate
+    assert result["values"] == ["open", "unknown+", None]
+    assert result["complete"] is False
+    execute.assert_awaited_once()
+    assert execute.call_args.args[0] == 'SELECT DISTINCT "Status" FROM "public"."items" ORDER BY "Status" LIMIT 129'
+    assert execute.call_args.args[3]["max_result_rows"] == 128
+
+    import pytest
+
+    column["sensitivity"] = "restricted"
+    with pytest.raises(ValueError, match="敏感字段"):
+        asyncio.run(field_value_probe.inspect_values(toolkit.workflow, run, {}, packet, "item", "status"))
+    execute.assert_awaited_once()
+
+
+def test_numeric_grouping_is_confirmed_only_for_an_undefined_observed_dimension():
+    from app.field_value_probe import numeric_grouping_question
+
+    report = SimpleNamespace(questions=[], technical_gaps=[],
+                             logical_plan=SimpleNamespace(grain_refs=["ticket.wait"]),
+                             requirements=SimpleNamespace(dimensions=["等待时长组"]))
+    evidence = {"object": "ticket", "field": "wait", "complete": True,
+                "values": [*map(str, range(40)), "40+"]}
+    packet = {"field_value_observations": [evidence],
+              "objects": [{"object": {"name": "ticket", "properties": [{"name": "wait"}]}}]}
+
+    question = numeric_grouping_question("找人数最多的等待时长组", report, packet)
+    assert question.blocking
+    assert [option.id for option in question.options] == ["individual", "range"]
+    assert numeric_grouping_question("每10分钟一组，找人数最多的等待时长组", report, packet) is None
+    evidence["complete"] = False
+    assert numeric_grouping_question("找人数最多的等待时长组", report, packet) is None
+
+
 def test_context_adds_bridge_without_loading_unrelated_objects(monkeypatch):
     from helpers import harness
     w,session,_,_=harness(monkeypatch)

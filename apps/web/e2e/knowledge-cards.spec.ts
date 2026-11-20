@@ -50,7 +50,6 @@ test('bindings are separate cards and updating one preserves the others',async({
   await expect(page.locator('.binding-card')).toHaveCount(3)
   await expect(page.locator('.knowledge-page')).not.toContainText('kb-a')
   await expect(page.locator('.retrieval-test:visible')).toHaveCount(0)
-  await page.screenshot({path:'/tmp/semora-knowledge-bindings.png',fullPage:true,animations:'disabled'})
 })
 
 test('new cards save independently in the same domain without losing bindings',async({page})=>{
@@ -78,7 +77,6 @@ test('retrieval uses a multiline drawer and the clicked binding only',async({pag
   await expect(drawer.locator('.knowledge-points')).toContainText('编号规则')
   await expect(drawer.locator('.knowledge-points')).toContainText('按记录编号识别对应实体。')
   expect(research).toEqual([{query:'查询记录编号\n补充业务背景',knowledge_base_ids:['kb-a']}])
-  await page.screenshot({path:'/tmp/semora-knowledge-retrieval.png',fullPage:true,animations:'disabled'})
   await page.keyboard.press('Escape')
   await expect(drawer).toHaveCount(0)
   await page.locator('.binding-card').nth(1).getByRole('button',{name:'知识检索测试',exact:true}).click()

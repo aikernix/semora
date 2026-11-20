@@ -345,7 +345,10 @@ func (s *Store) migrateReferenceDefinitions(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT payload FROM ontology_core.drafts ORDER BY domain FOR UPDATE`)
+	if _, err := tx.ExecContext(ctx, `LOCK TABLE ontology_core.drafts IN ROW EXCLUSIVE MODE`); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE deleted_at IS NULL ORDER BY domain FOR UPDATE`)
 	if err != nil {
 		return err
 	}
@@ -402,7 +405,8 @@ func (s *Store) updateSourcePackage(ctx context.Context, input sourcePackageUpda
 	}
 	defer tx.Rollback()
 	var sid string
-	if err = tx.QueryRowContext(ctx, `SELECT id FROM semora_meta.datasources WHERE id=$1 FOR UPDATE`, input.DataSourceID).Scan(&sid); err != nil {
+	if err = tx.QueryRowContext(ctx, `SELECT id FROM semora_meta.datasources d WHERE id=$1 AND
+		to_jsonb(d)->>'status' IS DISTINCT FROM 'deleted' FOR UPDATE`, input.DataSourceID).Scan(&sid); err != nil {
 		return err
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT table_id,content_hash FROM semora_meta.datasource_tables WHERE datasource_id=$1`, sid)
@@ -436,7 +440,10 @@ func (s *Store) updateSourcePackage(ctx context.Context, input sourcePackageUpda
 			return err
 		}
 	}
-	domainRows, err := tx.QueryContext(ctx, `SELECT domain,payload FROM ontology_core.drafts ORDER BY domain FOR UPDATE`)
+	if _, err := tx.ExecContext(ctx, `LOCK TABLE ontology_core.drafts IN ROW EXCLUSIVE MODE`); err != nil {
+		return err
+	}
+	domainRows, err := tx.QueryContext(ctx, `SELECT domain,payload FROM ontology_core.drafts WHERE deleted_at IS NULL ORDER BY domain FOR UPDATE`)
 	if err != nil {
 		return err
 	}

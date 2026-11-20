@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 import httpx
 from fastapi.exceptions import RequestValidationError
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Path, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -28,6 +28,7 @@ from semora_contracts import (
     CandidateExtractionResult,
     OntologyCandidate,
     QueryRun,
+    RunStatus,
     SystemSettings,
 )
 
@@ -347,6 +348,24 @@ async def create_session(body: SessionCreate, request: Request) -> dict:
     }
 
 
+@app.delete("/api/v1/sessions/{session_id}")
+async def delete_query_session(session_id: str, request: Request) -> dict[str, bool]:
+    session = require_session_access(session_id, request)
+    principal = request_principal(request)
+    if principal is not None and session.owner_subject is None and "admin" not in principal.roles:
+        raise HTTPException(403, "只有管理员可以删除没有归属人的查询。")
+    inactive = {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CLARIFYING, RunStatus.AWAITING_APPROVAL}
+    if any(
+        run_id in store.runs and (
+            store.runs[run_id].status not in inactive or workflow.is_running(run_id)
+        )
+        for run_id in session.run_ids
+    ):
+        raise HTTPException(409, "该查询仍在运行，请等待完成或取消后再删除。")
+    store.archive_session(session)
+    return {"deleted": True}
+
+
 @app.get("/api/v1/sessions/{session_id}/runs", response_model=list[QueryRun])
 def list_session_runs(
     session_id: str,
@@ -389,6 +408,11 @@ async def send_message(session_id: str, body: MessageCreate, request: Request) -
 @app.get("/api/v1/settings", response_model=SystemSettings)
 def get_settings() -> SystemSettings:
     return settings_service.get()
+
+
+@app.get("/api/v1/settings/limits")
+def get_settings_limits() -> dict[str, int]:
+    return {}
 
 
 @app.put("/api/v1/settings", response_model=SystemSettings)
@@ -664,6 +688,14 @@ async def create_ontology_domain(body: DomainCreate):
         raise_ontology_error(exc)
 
 
+@app.delete("/api/v1/ontology/domains/{domain}")
+async def delete_ontology_domain(domain: str = Path(pattern=r"^[a-z][a-z0-9_]{1,99}$")) -> dict[str, bool]:
+    try:
+        return await ontology_service.delete_domain(domain)
+    except OntologyCoreError as exc:
+        raise_ontology_error(exc)
+
+
 @app.get("/api/v1/ontology/configurations")
 async def ontology_configurations():
     try:
@@ -825,6 +857,18 @@ async def create_datasource(body: DataSourceCreate) -> dict:
         return {**item.public(),"onboarding_job_id":job["id"]}
     except RuntimeError as exc:
         raise HTTPException(502, str(exc)) from exc
+
+
+@app.delete("/api/v1/datasources/{datasource_id}")
+async def delete_datasource(datasource_id: str = Path(pattern=r"^[a-zA-Z0-9_-]{1,64}$")) -> dict[str, bool]:
+    try:
+        result = await ontology_service.delete_datasource(datasource_id)
+    except OntologyCoreError as exc:
+        if exc.status_code == 404:
+            datasource_service.repository.evict(datasource_id)
+        raise_ontology_error(exc)
+    datasource_service.repository.evict(datasource_id)
+    return result
 
 
 @app.get("/api/v1/datasources/{datasource_id}/connection")

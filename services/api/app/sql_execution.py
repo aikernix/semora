@@ -3,6 +3,7 @@
 import asyncio
 import re
 from semora_contracts import ExecutionResult, RunStatus
+from semora_contracts.query_limits import EXECUTOR_HTTP_GRACE_SECONDS, EXPLAIN_TIMEOUT_DEFAULT_SECONDS
 from .executor_errors import ExecutorOperationError
 from .sql_errors import SQLIssue, issue_data, repairable
 from .sql_dialect import compile_step, parse_query
@@ -15,7 +16,8 @@ class SQLExecution:
 
     def failed_step(self, step, exc, stage, *, attempts=1):
         artifact = self.run.source_artifacts.get(step.name)
-        seconds = float(self.settings.get('query_timeout_seconds', 30))
+        seconds = (self.settings.get('explain_timeout_seconds', EXPLAIN_TIMEOUT_DEFAULT_SECONDS) if stage == 'explain'
+                   else self.settings.get('query_timeout_seconds', 30))
         data = {**issue_data(exc, stage), 'message': str(exc), 'step': step.name,
                 'step_index': self.run.plan.sql_program.steps.index(step) + 1,
                 'purpose': step.purpose, 'engine': step.engine,
@@ -26,6 +28,8 @@ class SQLExecution:
         if data.get('error_type') == 'timeout':
             message = ('单条SQL执行超过' + format(seconds, 'g') + '秒'
                        if data.get('timeout_origin') == 'system' else 'SQL执行超时')
+            if stage == 'explain':
+                message = f'数据库执行计划预检超时（{seconds:g} 秒）'
             data.update(message=message, timeout_seconds=seconds, retryable=False,
                         attempts=attempts, max_attempts=2 if stage=='execution' else 1, retries_remaining=0)
         self.run.agent_memory['execution_failure'] = [data]
@@ -109,7 +113,8 @@ class SQLExecution:
                     self.run.source_artifacts[step.name] = artifact
                     error_stage = "explain"
                     response = await self.w.estimate(
-                        artifact.physical_sql, artifact.parameters, artifact.data_source_id
+                        artifact.physical_sql, artifact.parameters, artifact.data_source_id,
+                        self.settings.get("explain_timeout_seconds", EXPLAIN_TIMEOUT_DEFAULT_SECONDS),
                     )
                     if response.get("source") == "unavailable":
                         raise ExecutorOperationError("capability")
@@ -209,7 +214,8 @@ class SQLExecution:
                             error_stage = "explain"
                             try:
                                 await self.w.estimate(
-                                    artifact.physical_sql, artifact.parameters, step.data_source_id
+                                    artifact.physical_sql, artifact.parameters, step.data_source_id,
+                                    self.settings.get("explain_timeout_seconds", EXPLAIN_TIMEOUT_DEFAULT_SECONDS),
                                 )
                             except ExecutorOperationError as exc:
                                 if exc.kind != "capability":
@@ -224,7 +230,7 @@ class SQLExecution:
                                 "data_source_id": step.data_source_id,
                                 "execution_id": self.run.id,
                             },
-                        ), timeout=float(self.settings.get('query_timeout_seconds', 30)))
+                        ), timeout=float(self.settings.get('query_timeout_seconds', 30)) + EXECUTOR_HTTP_GRACE_SECONDS)
                     if result.columns != step.output_columns:
                         raise SQLIssue(
                             "实际输出列与步骤契约不一致：实际"

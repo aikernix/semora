@@ -4,6 +4,14 @@ from fastapi import HTTPException
 from app.auth import Principal, enforce_roles, required_roles
 
 
+def test_only_admin_can_delete_resources_but_stewards_can_unbind():
+    assert required_roles("DELETE", "/api/v1/datasources/source") == frozenset({"admin"})
+    assert required_roles("DELETE", "/api/v1/ontology/domains/domain") == frozenset({"admin"})
+    assert "data_steward" in required_roles(
+        "DELETE", "/api/v1/ontology/configurations/domain/sources/source"
+    )
+
+
 def principal(*roles: str) -> Principal:
     return Principal(subject="u-1", username="user", roles=frozenset(roles), claims={})
 

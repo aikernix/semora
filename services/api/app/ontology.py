@@ -69,6 +69,12 @@ class OntologyCoreClient:
     async def create_domain(self, domain: str, name: str) -> dict[str, Any]:
         return await self._request("POST", "/api/v1/ontology/domains", json={"domain": domain, "name": name})
 
+    async def delete_domain(self, domain: str) -> dict[str, bool]:
+        return await self._request("DELETE", f"/api/v1/ontology/domains/{domain}")
+
+    async def delete_datasource(self, source_id: str) -> dict[str, bool]:
+        return await self._request("DELETE", f"/internal/v1/datasources/{source_id}")
+
     async def get_configuration(self, domain: str) -> dict[str, Any]:
         from .relation_output import clean_relations
         return clean_relations(self._normalize_collections(await self._request("GET", f"/api/v1/ontology/configurations/{domain}")))

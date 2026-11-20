@@ -85,8 +85,11 @@ func (s *Store) saveEffective(ctx context.Context, input Ontology) (Ontology, er
 	return value, nil
 }
 func (s *Store) saveEffectiveTx(ctx context.Context, tx *sql.Tx, input Ontology) (Ontology, error) {
+	if _, err := tx.ExecContext(ctx, `LOCK TABLE ontology_core.drafts IN ROW EXCLUSIVE MODE`); err != nil {
+		return Ontology{}, err
+	}
 	var encoded []byte
-	if err := tx.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1 FOR UPDATE`, input.Domain).Scan(&encoded); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1 AND deleted_at IS NULL FOR UPDATE`, input.Domain).Scan(&encoded); err != nil {
 		return Ontology{}, err
 	}
 	var previous Ontology
@@ -95,6 +98,9 @@ func (s *Store) saveEffectiveTx(ctx context.Context, tx *sql.Tx, input Ontology)
 	}
 	value, err := effectiveOntology(input, previous)
 	if err != nil {
+		return Ontology{}, err
+	}
+	if err = ensureDatasourceBindings(ctx, tx, value); err != nil {
 		return Ontology{}, err
 	}
 	packages, err := readPackages(ctx, tx, value.SourcePackageRefs)
@@ -132,8 +138,11 @@ func (s *Store) bindEffectiveKnowledgeBases(ctx context.Context, domain string, 
 		return err
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `LOCK TABLE ontology_core.drafts IN ROW EXCLUSIVE MODE`); err != nil {
+		return err
+	}
 	var encoded []byte
-	if err = tx.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1 FOR UPDATE`, domain).Scan(&encoded); err != nil {
+	if err = tx.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1 AND deleted_at IS NULL FOR UPDATE`, domain).Scan(&encoded); err != nil {
 		return err
 	}
 	var value Ontology

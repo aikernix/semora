@@ -32,5 +32,4 @@ test('historical SQL-only records remain readable without legacy controls', asyn
   await expect(page.locator('.composer')).toHaveCount(0)
   await expect(page.getByText('查看分析自评', { exact: false })).toHaveCount(0)
   await expect(page.getByText('技术诊断', { exact: false })).toHaveCount(0)
-  await page.screenshot({ path: 'test-results/sql-generation.png', fullPage: true })
 })

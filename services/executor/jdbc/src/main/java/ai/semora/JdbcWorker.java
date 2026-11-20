@@ -27,7 +27,7 @@ public final class JdbcWorker {
             return rows;
         }
     }
-    static void readonly(Connection c, String strategy, int timeout) throws SQLException {
+    static void readonly(Connection c, String strategy, long timeout) throws SQLException {
         c.setAutoCommit(false);
         try { c.setReadOnly(true); } catch (SQLException ignored) {} // Only the explicit boundary below is authoritative.
         String sql=switch(strategy) {
@@ -37,7 +37,7 @@ public final class JdbcWorker {
             case "sqlserver_permissions" -> "SELECT permission_name FROM fn_my_permissions(NULL, 'DATABASE') WHERE permission_name IN ('CONTROL','ALTER','INSERT','UPDATE','DELETE','EXECUTE','CREATE TABLE','CREATE PROCEDURE','IMPERSONATE ANY USER','TAKE OWNERSHIP') UNION ALL SELECT permission_name FROM fn_my_permissions(NULL, 'SERVER') WHERE permission_name IN ('CONTROL SERVER','ALTER ANY LOGIN','IMPERSONATE ANY LOGIN') UNION ALL SELECT p.permission_name FROM sys.objects o CROSS APPLY fn_my_permissions(QUOTENAME(SCHEMA_NAME(o.schema_id))+'.'+QUOTENAME(o.name),'OBJECT') p WHERE o.is_ms_shipped=0 AND p.permission_name IN ('CONTROL','ALTER','INSERT','UPDATE','DELETE','EXECUTE','TAKE OWNERSHIP')";
             default -> throw new SQLException("scan-only source; configure database-enforced read-only strategy","0A000");
         };
-        try(Statement s=c.createStatement()) { s.setQueryTimeout(Math.max(1,timeout/1000));
+        try(Statement s=c.createStatement()) { s.setQueryTimeout(jdbcTimeoutSeconds(timeout));
             if(strategy.equals("sqlserver_permissions")) { try(ResultSet r=s.executeQuery(sql)) {
                 if(r.next()) throw new SQLException("read-only account required","42501");
             }} else s.execute(sql);
@@ -321,11 +321,18 @@ public final class JdbcWorker {
         if(v instanceof Blob||v instanceof Clob||v instanceof SQLXML||v instanceof Array)throw new SQLException("unsupported result type","0A000");
         return v.toString();
     }
+    static int jdbcTimeoutSeconds(long timeoutMs) throws SQLException {
+        long seconds = Math.max(1, (timeoutMs - 1) / 1000 + 1);
+        if (seconds > Integer.MAX_VALUE) throw new SQLException("timeout exceeds JDBC range", "22003");
+        return (int) seconds;
+    }
     static Map<String,Object> query(Connection c,JsonNode q) throws SQLException,IOException {
-        long started=System.nanoTime();int max=q.path("max_rows").asInt(1000),timeout=q.path("timeout_ms").asInt(30000);
+        long started=System.nanoTime(),max=q.path("max_rows").asLong(1000),timeout=q.path("timeout_ms").asLong(30000);
         readonly(c,text(q,"strategy"),timeout);
         try(PreparedStatement s=c.prepareStatement(text(q,"sql"))) {
-            s.setQueryTimeout(Math.max(1,(timeout+999)/1000));s.setMaxRows(max+1);int index=1;
+            s.setQueryTimeout(jdbcTimeoutSeconds(timeout));
+            if(max < Integer.MAX_VALUE) s.setMaxRows((int) max+1);
+            int index=1;
             for(JsonNode p:q.path("parameters")) {
                 if(p.isNull())s.setObject(index,null);
                 else if(p.isBoolean())s.setBoolean(index,p.asBoolean());
@@ -341,12 +348,12 @@ public final class JdbcWorker {
                     if(dtype.equals("VARCHAR")&&!Set.of(Types.VARCHAR,Types.CHAR,Types.NVARCHAR,Types.NCHAR,Types.LONGVARCHAR,Types.LONGNVARCHAR).contains(code))
                         warnings.add(map("column",m.getColumnLabel(i),"source_type",m.getColumnTypeName(i),"result_type","VARCHAR","reason","exact_text_transport_without_local_numeric_or_temporal_semantics"));
                 }
-                int bytes=0;boolean truncated=false;
+                long bytes=0,maxBytes=q.path("max_bytes").asLong(10485760);boolean truncated=false;
                 while(r.next()) {
                     if(rows.size()==max){truncated=true;break;}
                     List<Object> row=new ArrayList<>();for(int i=1;i<=m.getColumnCount();i++)row.add(scalar(r,i));
                     bytes+=JSON.writeValueAsBytes(row).length;
-                    if(bytes>q.path("max_bytes").asInt(10485760))throw new SQLException("result byte budget exceeded","54000"); rows.add(row);
+                    if(bytes>maxBytes)throw new SQLException("result byte budget exceeded","54000"); rows.add(row);
                 }
                 return map("columns",columns,"column_types",types,"rows",rows,"row_count",rows.size(),"truncated",truncated,"duration_ms",(System.nanoTime()-started)/1000000,
                     "summary",map("transaction","read_only","row_limit",max,"timeout_ms",timeout,"type_warnings",warnings));

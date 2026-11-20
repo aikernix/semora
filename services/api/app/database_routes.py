@@ -437,9 +437,9 @@ async def ontology_candidate(identifier: str,candidate_id: str,body: OntologyRel
 
 
 @router.get("/datasources/{identifier}/onboarding")
-def onboarding_status(identifier: str):
+def onboarding_status(identifier: str, relationships_only: bool = False):
     source(identifier)
-    job=modeling_service.repository.latest_job(identifier)
+    job=modeling_service.repository.latest_job(identifier, relationships_only=relationships_only)
     if not job:raise HTTPException(404,"数据源尚未开始自动建模")
     return {**job, "details": {key: value for key, value in job.get("details", {}).items()
                                if key not in {"query_table_roles", "pending"}}}
@@ -594,6 +594,10 @@ async def unbind_source_package(domain:str,identifier:str):
            for j in modeling_service.repository.interrupted_jobs()):
         raise HTTPException(409,'当前数据源正在进行跨源分析，请完成或取消后再解除绑定')
     result=await ontology_service.unbind_source(domain,identifier)
+    for job in modeling_service.repository.memory_jobs.values():
+        if (job.get('kind') == 'cross_source' and job.get('domain') == domain
+                and identifier in {job['datasource_id'], job['peer_datasource_id']}):
+            job.setdefault('details', {})['pair_unbound'] = True
     modeling_service.repository.memory_candidates={key:value for key,value in modeling_service.repository.memory_candidates.items()
         if not (value.get('scope')=='cross_source' and value.get('domain')==domain
                 and identifier in {value.get('source_datasource_id'),value.get('target_datasource_id')})}
@@ -651,6 +655,7 @@ async def decide_domain_relationship(domain:str,identifier:str,body:Relationship
 class CrossSourceInput(BaseModel):
     left_source_id: str=Field(min_length=1,max_length=64)
     right_source_id: str=Field(min_length=1,max_length=64)
+    mode: Literal["create", "reanalyze"] = "create"
 
 
 @router.get('/ontology/configurations/{domain}/cross-source-analysis')
@@ -671,6 +676,26 @@ async def start_cross_source(domain: str,body: CrossSourceInput):
     bound.update(obj.get("dataSourceId") or configuration.get("dataSourceId") for obj in configuration.get("objects",[]))
     if body.left_source_id not in bound or body.right_source_id not in bound:
         raise HTTPException(422,"两个数据源必须先绑定到当前业务域")
+    source_pair = {body.left_source_id, body.right_source_id}
+    if len(source_pair) != 2:
+        raise HTTPException(422, "请选择两个不同的数据源")
+    from .domain_relationships import objects_by_name, review_rows
+
+    pair_exists = any(
+        {job["datasource_id"], job["peer_datasource_id"]} == source_pair
+        for job in modeling_service.repository.domain_cross_jobs(domain)
+    )
+    if not pair_exists:
+        objects = objects_by_name(configuration)
+        pair_exists = any(
+            {objects.get(row["relation"].get(side), {}).get("dataSourceId") for side in ("from", "to")}
+            == source_pair
+            for row in review_rows(configuration, domain, modeling_service)
+        )
+    if pair_exists and body.mode == "create":
+        raise HTTPException(409, "这两个数据源已添加关联，请在已有卡片中重新分析。")
+    if not pair_exists and body.mode == "reanalyze":
+        raise HTTPException(409, "这两个数据源尚未添加关联，请先新增关联。")
     try:return modeling_service.start_cross_source(domain,body.left_source_id,body.right_source_id)
     except (KeyError,ValueError) as exc:raise HTTPException(409,str(exc)) from exc
 

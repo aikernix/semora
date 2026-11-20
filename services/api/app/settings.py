@@ -73,8 +73,8 @@ class SettingsRepository:
         if value.preview_rows > value.max_result_rows:
             raise ValueError("页面预览行数不能大于最大返回行数")
         value.policy_version = _policy_version(value)
+        self._persist(value)
         self._settings = value.model_copy(deep=True)
-        self._persist(self._settings)
         return self.get()
 
 

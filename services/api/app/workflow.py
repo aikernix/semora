@@ -57,9 +57,15 @@ class Workflow:
                 return await execute(sql, parameters, sensitive_columns)
 
             self.execute = execute_adapter
-        self.estimate = estimate or (
-            executor_client.static_estimate if execute is not None else executor_client.estimate
-        )
+        if estimate is not None or execute is not None:
+            injected_estimate = estimate or executor_client.static_estimate
+
+            async def estimate_adapter(sql, parameters, data_source_id, _timeout_seconds):
+                return await injected_estimate(sql, parameters, data_source_id)
+
+            self.estimate = estimate_adapter
+        else:
+            self.estimate = executor_client.estimate
         self.snapshot_loader = snapshot_loader or ontology_service.latest_snapshot_bundle
         self.model = model or structured_model
         self._tasks: dict[str, asyncio.Task] = {}
@@ -626,6 +632,10 @@ class Workflow:
 
             task.add_done_callback(completed)
         return run
+
+    def is_running(self, run_id: str) -> bool:
+        task = self._tasks.get(run_id)
+        return task is not None and not task.done()
 
     async def cancel(self, run_id: str) -> dict:
         run = self.store.runs[run_id]

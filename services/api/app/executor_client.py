@@ -4,6 +4,7 @@ import os
 import asyncio
 import httpx
 from semora_contracts import ExecutionResult
+from semora_contracts.query_limits import EXECUTOR_HTTP_GRACE_SECONDS, EXPLAIN_TIMEOUT_DEFAULT_SECONDS
 from .datasources import datasource_service
 
 
@@ -27,7 +28,8 @@ class ExecutorClient:
         from .executor_errors import request_executor
 
         url = os.getenv("EXECUTOR_URL", "http://localhost:8002")
-        async with httpx.AsyncClient(timeout=35) as client:
+        timeout = int(settings["query_timeout_seconds"])
+        async with httpx.AsyncClient(timeout=timeout + EXECUTOR_HTTP_GRACE_SECONDS) as client:
             try:
                 response = await request_executor(
                     client,
@@ -37,7 +39,7 @@ class ExecutorClient:
                         "sql": sql,
                         "parameters": parameters,
                         "sensitive_columns": sensitive_columns,
-                        "timeout_ms": int(settings["query_timeout_seconds"]) * 1000,
+                        "timeout_ms": timeout * 1000,
                         "max_rows": int(settings["max_result_rows"]),
                         "max_bytes": int(settings["max_result_mb"]) * 1024 * 1024,
                         "execution_id": settings.get("execution_id"),
@@ -64,11 +66,11 @@ class ExecutorClient:
 
             return ExecutionResult.model_validate(response.json())
 
-    async def estimate(self, sql: str, parameters: dict, data_source_id: str) -> dict:
+    async def estimate(self, sql: str, parameters: dict, data_source_id: str, timeout_seconds: int = EXPLAIN_TIMEOUT_DEFAULT_SECONDS) -> dict:
         from .executor_errors import request_executor, ExecutorOperationError
 
         url = os.getenv("EXECUTOR_URL", "http://localhost:8002")
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=timeout_seconds + EXECUTOR_HTTP_GRACE_SECONDS) as client:
             response = await request_executor(
                 client,
                 f"{url}/internal/v1/estimate",
@@ -76,7 +78,7 @@ class ExecutorClient:
                 json={
                     "sql": sql,
                     "parameters": parameters,
-                    "timeout_ms": 5_000,
+                    "timeout_ms": timeout_seconds * 1000,
                     "datasource": self.datasource_payload(data_source_id),
                 },
                 headers={

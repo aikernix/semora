@@ -117,6 +117,7 @@ export interface QuerySession {
 
 export interface SystemSettings {
   query_timeout_seconds: number
+  explain_timeout_seconds: number
   max_result_rows: number
   max_result_mb: number
   preview_rows: number

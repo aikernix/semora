@@ -60,8 +60,11 @@ func (s *Store) unbindSource(ctx context.Context, domain, sourceID string) (Onto
 		return Ontology{}, err
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `LOCK TABLE ontology_core.drafts IN ROW EXCLUSIVE MODE`); err != nil {
+		return Ontology{}, err
+	}
 	var raw []byte
-	if err = tx.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1 FOR UPDATE`, domain).Scan(&raw); err != nil {
+	if err = tx.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1 AND deleted_at IS NULL FOR UPDATE`, domain).Scan(&raw); err != nil {
 		return Ontology{}, err
 	}
 	var previous Ontology
@@ -101,6 +104,18 @@ func (s *Store) unbindSource(ctx context.Context, domain, sourceID string) (Onto
 	}
 	if hasQueue {
 		if _, err = tx.ExecContext(ctx, `DELETE FROM semora_meta.relationship_candidates WHERE domain=$1 AND scope='cross_source' AND (source_datasource_id=$2 OR target_datasource_id=$2)`, domain, sourceID); err != nil {
+			return Ontology{}, err
+		}
+	}
+	var hasJobs bool
+	if err = tx.QueryRowContext(ctx, `SELECT to_regclass('semora_meta.datasource_onboarding_jobs') IS NOT NULL`).Scan(&hasJobs); err != nil {
+		return Ontology{}, err
+	}
+	if hasJobs {
+		_, err = tx.ExecContext(ctx, `UPDATE semora_meta.datasource_onboarding_jobs
+			SET details=jsonb_set(details, '{pair_unbound}', 'true'::jsonb, true)
+			WHERE domain=$1 AND kind='cross_source' AND (datasource_id=$2 OR peer_datasource_id=$2)`, domain, sourceID)
+		if err != nil {
 			return Ontology{}, err
 		}
 	}

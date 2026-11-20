@@ -155,10 +155,10 @@ def run(cfg, operation, *, execution_id=None, timeout_ms=None, validating=False,
             if process.returncode:
                 raise HTTPException(502, detail={"error_type": "connect", "message": "JDBC Worker 异常退出或已取消"})
             size = output.tell()
-            if size > 32 * 1024**2:
+            if operation != "query" and size > 32 * 1024**2:
                 raise HTTPException(413, "JDBC 输出超过 32MB 预算，请缩小扫描范围")
             output.seek(0)
-            try: result = json.loads(output.read().splitlines()[-1])
+            try: result = json.load(output) if operation == "query" else json.loads(output.read().splitlines()[-1])
             except (ValueError, UnicodeError): raise HTTPException(502, "JDBC Worker 协议错误") from None
             if not result.get("ok"):
                 if result.get("error_class") in {"ClassNotFoundException","NoClassDefFoundError","UnsupportedClassVersionError","AbstractMethodError","NoSuchMethodError"}:

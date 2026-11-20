@@ -62,6 +62,12 @@ ALL_APPLICATION_ROLES = {
 def required_roles(method: str, path: str) -> frozenset[str]:
     """Return the least-privilege realm roles for a versioned API operation."""
     method = method.upper()
+    segments = path.rstrip("/").split("/")
+    if method == "DELETE" and (
+        len(segments) == 5 and segments[:4] == ["", "api", "v1", "datasources"]
+        or len(segments) == 6 and segments[:5] == ["", "api", "v1", "ontology", "domains"]
+    ):
+        return frozenset({"admin"})
     if path.startswith("/api/v1/settings"):
         return frozenset({"admin"} if method != "GET" else ALL_APPLICATION_ROLES)
     if path.startswith("/api/v1/domains"):

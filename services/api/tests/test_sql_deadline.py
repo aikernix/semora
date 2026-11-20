@@ -9,12 +9,14 @@ from app.executor_errors import ExecutorOperationError
 
 
 def test_second_statement_has_its_own_deadline_and_keeps_first_result(monkeypatch):
+    monkeypatch.setattr('app.sql_execution.EXECUTOR_HTTP_GRACE_SECONDS', 0)
+
     async def scenario():
         cancelled=[]
         async def execute(sql,*args):
             if sql=='SELECT 1 AS id':
                 return ExecutionResult(columns=['id'],rows=[[1]],row_count=1,duration_ms=0)
-            try:await asyncio.sleep(1)
+            try:await asyncio.Event().wait()
             finally:cancelled.append(True)
         program=SQLProgram(summary='Read both sources',steps=[
             {'name':'first','purpose':'Read first source','data_source_id':'a','sql':'SELECT 1 AS id','output_columns':['id']},

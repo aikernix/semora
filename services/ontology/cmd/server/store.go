@@ -53,13 +53,17 @@ func migrateStore(ctx context.Context, dsn string, seedDemo bool) error {
 
 func (s *Store) verifySchema(ctx context.Context) error {
 	var drafts, snapshots, candidates, crossRelations sql.NullString
+	var deletionColumn bool
 	if err := s.db.QueryRowContext(ctx, `SELECT to_regclass('ontology_core.drafts')::text,
-		to_regclass('ontology_core.snapshots')::text,to_regclass('ontology_core.candidates')::text,to_regclass('ontology_core.domain_cross_source_relations')::text`).Scan(
-		&drafts, &snapshots, &candidates, &crossRelations,
+		to_regclass('ontology_core.snapshots')::text,to_regclass('ontology_core.candidates')::text,
+		to_regclass('ontology_core.domain_cross_source_relations')::text,
+		EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='ontology_core'
+			AND table_name='drafts' AND column_name='deleted_at')`).Scan(
+		&drafts, &snapshots, &candidates, &crossRelations, &deletionColumn,
 	); err != nil {
 		return err
 	}
-	if !drafts.Valid || !snapshots.Valid || !candidates.Valid || !crossRelations.Valid {
+	if !drafts.Valid || !snapshots.Valid || !candidates.Valid || !crossRelations.Valid || !deletionColumn {
 		return errors.New("ontology schema is not initialized; run /ontology migrate first")
 	}
 	return nil
@@ -71,6 +75,7 @@ func (s *Store) initialize(ctx context.Context, seedDemo bool) error {
 		`CREATE TABLE IF NOT EXISTS ontology_core.drafts (
 			domain TEXT PRIMARY KEY, name TEXT NOT NULL, version TEXT NOT NULL, payload JSONB NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
+		`ALTER TABLE ontology_core.drafts ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`,
 		`CREATE TABLE IF NOT EXISTS ontology_core.snapshots (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(), domain TEXT NOT NULL, version TEXT NOT NULL,
 			content_hash TEXT NOT NULL UNIQUE, artifact_version TEXT NOT NULL, payload JSONB NOT NULL,
@@ -134,7 +139,18 @@ func (s *Store) initialize(ctx context.Context, seedDemo bool) error {
 }
 
 func (s *Store) saveDraft(ctx context.Context, ontology Ontology) error {
-	packages, err := readPackages(ctx, s.db, ontology.SourcePackageRefs)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `LOCK TABLE ontology_core.drafts IN ROW EXCLUSIVE MODE`); err != nil {
+		return err
+	}
+	if err = ensureDatasourceBindings(ctx, tx, ontology); err != nil {
+		return err
+	}
+	packages, err := readPackages(ctx, tx, ontology.SourcePackageRefs)
 	if err != nil {
 		return err
 	}
@@ -147,15 +163,25 @@ func (s *Store) saveDraft(ctx context.Context, ontology Ontology) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO ontology_core.drafts(domain,name,version,payload)
-	VALUES($1,$2,$3,$4::jsonb) ON CONFLICT(domain) DO UPDATE SET name=excluded.name,version=excluded.version,payload=excluded.payload,updated_at=now()`,
+	result, err := tx.ExecContext(ctx, `INSERT INTO ontology_core.drafts(domain,name,version,payload)
+	VALUES($1,$2,$3,$4::jsonb) ON CONFLICT(domain) DO UPDATE SET name=excluded.name,version=excluded.version,payload=excluded.payload,updated_at=now() WHERE ontology_core.drafts.deleted_at IS NULL`,
 		ontology.Domain, ontology.Name, ontology.Version, payload)
-	return err
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return sql.ErrNoRows
+	}
+	return tx.Commit()
 }
 
 func (s *Store) getDraft(ctx context.Context, domain string) (Ontology, error) {
 	var payload []byte
-	if err := s.db.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1`, domain).Scan(&payload); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1 AND deleted_at IS NULL`, domain).Scan(&payload); err != nil {
 		return Ontology{}, err
 	}
 	var ontology Ontology
@@ -166,7 +192,7 @@ func (s *Store) getDraft(ctx context.Context, domain string) (Ontology, error) {
 }
 
 func (s *Store) listDrafts(ctx context.Context) ([]DraftSummary, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT domain,name,version,payload,updated_at FROM ontology_core.drafts ORDER BY updated_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT domain,name,version,payload,updated_at FROM ontology_core.drafts WHERE deleted_at IS NULL ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -202,8 +228,11 @@ func (s *Store) publish(ctx context.Context, domain string) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `LOCK TABLE ontology_core.drafts IN ROW EXCLUSIVE MODE`); err != nil {
+		return Snapshot{}, err
+	}
 	var raw []byte
-	if err = tx.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1 FOR UPDATE`, domain).Scan(&raw); err != nil {
+	if err = tx.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1 AND deleted_at IS NULL FOR UPDATE`, domain).Scan(&raw); err != nil {
 		return Snapshot{}, err
 	}
 	var ontology Ontology
@@ -253,7 +282,7 @@ func (s *Store) latestSnapshot(ctx context.Context, domain string) (Snapshot, er
 	var snapshot Snapshot
 	var payload, artifact []byte
 	err := s.db.QueryRowContext(ctx, `SELECT id::text,domain,version,content_hash,artifact_version,published_at,payload,wren_artifact
-	FROM ontology_core.snapshots WHERE domain=$1 ORDER BY published_at DESC LIMIT 1`, domain).Scan(
+	FROM ontology_core.snapshots AS s WHERE domain=$1 AND EXISTS (SELECT 1 FROM ontology_core.drafts AS d WHERE d.domain=s.domain AND d.deleted_at IS NULL) ORDER BY published_at DESC LIMIT 1`, domain).Scan(
 		&snapshot.ID, &snapshot.Domain, &snapshot.Version, &snapshot.ContentHash, &snapshot.ArtifactVersion, &snapshot.PublishedAt, &payload, &artifact)
 	if err != nil {
 		return Snapshot{}, err
@@ -443,6 +472,9 @@ func (s *Store) decideCandidate(ctx context.Context, id, status, reviewer, note 
 		return Candidate{}, err
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `LOCK TABLE ontology_core.drafts IN ROW EXCLUSIVE MODE`); err != nil {
+		return Candidate{}, err
+	}
 	var candidate Candidate
 	var evidence, patch []byte
 	err = tx.QueryRowContext(ctx, `SELECT id::text,domain,term,source,proposal,kind,patch,status,evidence,created_at,reviewed_at,
@@ -460,7 +492,7 @@ func (s *Store) decideCandidate(ctx context.Context, id, status, reviewer, note 
 	}
 	if status == "accepted" && candidate.Kind != "definition" {
 		var draftPayload []byte
-		if err := tx.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1 FOR UPDATE`, candidate.Domain).Scan(&draftPayload); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1 AND deleted_at IS NULL FOR UPDATE`, candidate.Domain).Scan(&draftPayload); err != nil {
 			return Candidate{}, err
 		}
 		var ontology Ontology

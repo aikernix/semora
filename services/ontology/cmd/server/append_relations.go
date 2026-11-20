@@ -110,7 +110,8 @@ func (s *Store) appendCrossRelations(ctx context.Context, input crossRelationApp
 	sort.Strings(sources)
 	for _, sid := range sources {
 		var id string
-		if err = tx.QueryRowContext(ctx, `SELECT id FROM semora_meta.datasources WHERE id=$1 FOR UPDATE`, sid).Scan(&id); err != nil {
+		if err = tx.QueryRowContext(ctx, `SELECT id FROM semora_meta.datasources d WHERE id=$1 AND
+			to_jsonb(d)->>'status' IS DISTINCT FROM 'deleted' FOR UPDATE`, sid).Scan(&id); err != nil {
 			return err
 		}
 		for table, expected := range input.TableHashes[sid] {
@@ -123,8 +124,11 @@ func (s *Store) appendCrossRelations(ctx context.Context, input crossRelationApp
 			}
 		}
 	}
+	if _, err := tx.ExecContext(ctx, `LOCK TABLE ontology_core.drafts IN ROW EXCLUSIVE MODE`); err != nil {
+		return err
+	}
 	var raw []byte
-	if err = tx.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1 FOR UPDATE`, input.Domain).Scan(&raw); err != nil {
+	if err = tx.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1 AND deleted_at IS NULL FOR UPDATE`, input.Domain).Scan(&raw); err != nil {
 		return err
 	}
 	var value Ontology

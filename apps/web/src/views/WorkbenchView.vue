@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { api, type QueryRun, type QuerySession } from '../api'
-import { AddIcon } from 'tdesign-icons-vue-next'
+import { AddIcon, DeleteIcon } from 'tdesign-icons-vue-next'
 import QueryTaskDetail from '../components/query/QueryTaskDetail.vue'
 import { useRunConnection } from '../composables/useRunConnection'
 
 const sessions = ref<QuerySession[]>([])
 const domains = ref<any[]>([])
+const queryableDomains = computed(() => domains.value.filter(domain => domain.status !== 'unconfigured'))
 const activeSession = ref('')
 const selectedDomain = ref('')
 const requirementForm = reactive({ title: '', objective: '', time_range: '', scope: '', output: '' })
@@ -14,6 +15,13 @@ const modelConfigured = ref(false)
 const initializing = ref(true)
 const pageError = ref('')
 const sessionStatus = ref('all')
+const sessionSearch = ref('')
+const sessionPage = ref(1)
+const sessionPageSize = 10
+const deletingSession = ref<QuerySession | null>(null)
+const deleting = ref(false)
+const deletionError = ref('')
+let sessionListVersion = 0
 const run = ref<QueryRun | null>(null)
 const loading = ref(false)
 let selectionVersion = 0
@@ -29,8 +37,16 @@ function statusLabel(session: QuerySession) {
   return ({ not_started: '未开始', clarifying: '待确认', completed: '已完成', failed: '未完成', processing: '进行中' } as Record<string, string>)[statusGroup(session.latest_status)]
 }
 const filteredSessions = computed(() => sessions.value
-  .filter(item => item.domain === selectedDomain.value && (sessionStatus.value === 'all' || statusGroup(item.latest_status) === sessionStatus.value))
+  .filter(item => item.domain === selectedDomain.value
+    && (sessionStatus.value === 'all' || statusGroup(item.latest_status) === sessionStatus.value)
+    && item.title.toLocaleLowerCase().includes(sessionSearch.value.trim().toLocaleLowerCase()))
   .slice().sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at)))
+const sessionPages = computed(() => Math.max(1, Math.ceil(filteredSessions.value.length / sessionPageSize)))
+const visibleSessions = computed(() => filteredSessions.value.slice(
+  (sessionPage.value - 1) * sessionPageSize, sessionPage.value * sessionPageSize,
+))
+watch([sessionSearch, sessionStatus, selectedDomain], () => { sessionPage.value = 1 })
+watch(sessionPages, pages => { sessionPage.value = Math.min(sessionPage.value, pages) })
 watch(() => run.value?.status, status => {
   const session = sessions.value.find(item => item.id === run.value?.session_id)
   if (session && status) session.latest_status = status
@@ -41,12 +57,36 @@ function resetAlignmentAnswers() {
   alignmentAnswers.value = {}
 }
 async function loadSessions() {
-  sessions.value = (await api.get<QuerySession[]>('/sessions')).data
+  const version = ++sessionListVersion
+  const { data } = await api.get<QuerySession[]>('/sessions')
+  if (version === sessionListVersion) sessions.value = data
+}
+function openDeleteSession(session: QuerySession) {
+  deletionError.value = ''
+  deletingSession.value = session
+}
+async function deleteSession() {
+  const session = deletingSession.value
+  if (!session || deleting.value) return
+  deleting.value = true
+  deletionError.value = ''
+  try {
+    await api.delete(`/sessions/${encodeURIComponent(session.id)}`)
+    sessionListVersion += 1
+    sessions.value = sessions.value.filter(item => item.id !== session.id)
+    deletingSession.value = null
+    if (activeSession.value === session.id) createSession()
+  } catch (error: any) {
+    deletionError.value = error.response?.data?.detail || '删除查询失败，请稍后重试。'
+  } finally {
+    deleting.value = false
+  }
 }
 async function switchDomain(value: unknown) {
-  if (typeof value !== 'string') return
+  if (typeof value !== 'string' || !queryableDomains.value.some(domain => domain.domain === value)) return
   selectedDomain.value = value
   sessionStatus.value = 'all'
+  sessionSearch.value = ''
   createSession()
   const latest = sessions.value.find(item => item.domain === value)
   if (latest) await selectSession(latest)
@@ -171,7 +211,9 @@ onMounted(async () => {
       api.get('/model/status').then(({ data }) => { modelConfigured.value = data.configured }),
     ])
     if (version !== selectionVersion) return
-    if (!domains.value.some(item => item.domain === selectedDomain.value) && domains.value.length) selectedDomain.value = domains.value[0].domain
+    if (!queryableDomains.value.some(item => item.domain === selectedDomain.value)) {
+      selectedDomain.value = queryableDomains.value[0]?.domain || ''
+    }
     initializing.value = false
     const current = sessions.value.find(item => item.domain === selectedDomain.value)
     if (current) await selectSession(current)
@@ -187,23 +229,43 @@ onMounted(async () => {
       <div class="session-head"><strong>查询工作台</strong></div>
       <div class="domain-context">
         <span class="domain-caption">当前业务域</span>
-        <t-select v-model="selectedDomain" class="domain-picker" placeholder="选择业务域" @change="switchDomain">
-          <t-option v-for="domain in domains" :key="domain.domain" :value="domain.domain" :label="domain.name" />
+        <t-select v-model="selectedDomain" class="domain-picker" :placeholder="!initializing && !queryableDomains.length ? '暂无已绑定数据源的业务域' : '选择业务域'" @change="switchDomain">
+          <t-option v-for="domain in queryableDomains" :key="domain.domain" :value="domain.domain" :label="domain.name" />
         </t-select>
       </div>
       <button class="new-query" :disabled="!selectedDomain" @click="createSession"><AddIcon /><span>新建查询</span></button>
-      <div class="session-group"><span>查询记录 · {{ filteredSessions.length }}</span><select v-model="sessionStatus" aria-label="筛选任务状态"><option value="all">全部状态</option><option value="processing">进行中</option><option value="clarifying">待确认</option><option value="completed">已完成</option><option value="failed">未完成</option><option value="not_started">未开始</option></select></div>
+      <div class="session-group"><span>查询记录 · {{ filteredSessions.length }}</span><select v-model="sessionStatus" aria-label="筛选任务状态"><option value="all">全部状态</option><option value="processing">进行中</option><option value="clarifying">待确认</option><option value="completed">已完成</option><option value="failed">未完成</option></select></div>
+      <div class="session-search"><t-input v-model="sessionSearch" clearable aria-label="按查询名称搜索" placeholder="搜索查询名称" /></div>
       <div class="session-records">
-        <button v-for="session in filteredSessions" :key="session.id" class="session-item" :class="{ active: activeSession === session.id }" @click="selectSession(session)">
-          <span>{{ session.title }}</span><small><time :datetime="session.created_at">{{ sessionDate(session.created_at) }}</time><span class="session-status" :class="statusGroup(session.latest_status)">{{ statusLabel(session) }}</span></small>
-        </button>
-        <div v-if="!filteredSessions.length && !initializing" class="session-empty">
-          <strong>{{ sessionStatus !== 'all' ? '暂无该状态的查询' : '还没有查询记录' }}</strong>
-          <p>{{ sessionStatus !== 'all' ? '可切换状态查看其他查询。' : '点击“新建查询”，开始这个业务域的第一次查询。' }}</p>
+        <div v-for="session in visibleSessions" :key="session.id" class="session-row">
+          <button class="session-item" :class="{ active: activeSession === session.id }" :title="session.title" @click="selectSession(session)">
+            <span>{{ session.title }}</span><small><time :datetime="session.created_at">{{ sessionDate(session.created_at) }}</time><span class="session-status" :class="statusGroup(session.latest_status)">{{ statusLabel(session) }}</span></small>
+          </button>
+          <button type="button" class="session-delete" :aria-label="`删除查询 ${session.title}`"
+                  :title="statusGroup(session.latest_status) === 'processing' ? '请先等待查询完成或取消查询' : '删除查询'"
+                  :disabled="statusGroup(session.latest_status) === 'processing'" @click="openDeleteSession(session)"><DeleteIcon /></button>
         </div>
+        <div v-if="!filteredSessions.length && !initializing" class="session-empty">
+          <strong>{{ sessionSearch.trim() ? '没有匹配的查询' : sessionStatus !== 'all' ? '暂无该状态的查询' : '还没有查询记录' }}</strong>
+          <p>{{ sessionSearch.trim() ? '试试其他名称关键词。' : sessionStatus !== 'all' ? '可切换状态查看其他查询。' : '点击“新建查询”，开始这个业务域的第一次查询。' }}</p>
+        </div>
+      </div>
+      <div v-if="sessionPages > 1" class="session-pagination" aria-label="查询记录分页">
+        <t-button size="small" variant="text" :disabled="sessionPage === 1" @click="sessionPage--">上一页</t-button>
+        <span aria-live="polite">{{ sessionPage }} / {{ sessionPages }}</span>
+        <t-button size="small" variant="text" :disabled="sessionPage === sessionPages" @click="sessionPage++">下一页</t-button>
       </div>
       <div class="session-tip"><span class="context-indicator"></span><span>仅显示当前业务域的查询</span></div>
     </aside>
+
+    <t-dialog :visible="!!deletingSession" header="删除查询"
+              :confirm-btn="{ content: '确认删除', theme: 'danger', loading: deleting, disabled: deleting }"
+              :cancel-btn="{ disabled: deleting }" :close-btn="!deleting" :close-on-overlay-click="false"
+              :close-on-esc-keydown="!deleting" @confirm="deleteSession"
+              @cancel="deletingSession = null" @close="deletingSession = null">
+      <p>确定删除「{{ deletingSession?.title }}」？该查询及其分析记录将从工作台移除。</p>
+      <t-alert v-if="deletionError" theme="error" :message="deletionError" />
+    </t-dialog>
 
     <section class="query-space">
       <QueryTaskDetail v-if="run" :run="run" :title="activeSessionInfo?.title || '本次查询'" :domain-name="activeDomainName" :original-request="activeSessionInfo?.requirement_form?.objective" :loading="loading" :connection="connectionState" :last-signal="lastSignal" v-model:answers="alignmentAnswers" @confirm="confirmAlignment" @retry="retryCurrent" @cancel="cancelRun"/>
@@ -237,6 +299,13 @@ onMounted(async () => {
 .new-query:disabled{opacity:.45;cursor:not-allowed}
 .session-group{display:flex;align-items:center;justify-content:space-between;margin:22px 10px 10px;font-size:11px;color:var(--semora-muted)}
 .session-records{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:3px;padding:0 2px 12px;scrollbar-width:thin}
+.session-search{margin:0 2px 9px}
+.session-row{display:flex;align-items:center;gap:2px;flex-shrink:0}
+.session-row .session-item{flex:1;min-width:0}
+.session-delete{display:grid;place-items:center;width:28px;height:28px;flex:none;border:0;border-radius:6px;background:transparent;color:var(--semora-muted);cursor:pointer}
+.session-delete:hover:not(:disabled){color:var(--td-error-color);background:var(--semora-green-soft)}
+.session-delete:disabled{opacity:.35;cursor:not-allowed}
+.session-pagination{display:flex;align-items:center;justify-content:space-between;color:var(--semora-muted);font-size:12px;padding:6px 2px}
 .session-item{border:0;background:transparent;text-align:left;color:var(--semora-ink);cursor:pointer;width:100%;flex-shrink:0;padding:12px 11px;border-radius:8px;transition:background .15s}
 .session-item:hover{background:var(--semora-green-soft)}
 .session-item span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;line-height:1.5;font-weight:500}

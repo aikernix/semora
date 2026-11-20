@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { RelationIcon } from 'tdesign-icons-vue-next'
 import { api } from '../api'
+import { hasRole } from '../auth'
+import DeleteResourceDialog from '../components/DeleteResourceDialog.vue'
 import { ontologyNames } from '../ontologyNames'
 import { fieldPairs, mappingCondition, type FieldPair } from '../relationshipCondition'
+import DatabaseIcon from '../components/DatabaseIcon.vue'
 import RelationshipCard from '../components/RelationshipCard.vue'
 
 const domains = ref<any[]>([])
@@ -32,7 +34,14 @@ const sourcePairs=computed(()=>boundSources.value.flatMap((left,index)=>boundSou
   const key=pairKey(left.id,right.id)
   const rows=domainRelationRows.value.filter(row=>pairKey(sourceOf(row.relation.from),sourceOf(row.relation.to))===key)
   return {key,left,right,rows,job:crossJobs.value[key],counts:Object.fromEntries(['accepted','pending','disabled'].map(status=>[status,rows.filter(row=>row.status===status).length]))}
-})))
+})).filter(pair=>pair.job || pair.rows.length))
+const registeredPairs = computed(() => new Set(sourcePairs.value.map(pair => pair.key)))
+const availablePairPartners = (sourceId: string) => crossSources.value.filter(
+  source => source.id !== sourceId && !registeredPairs.value.has(pairKey(sourceId, source.id)),
+)
+const pairLeftOptions = computed(() => crossSources.value.filter(source => availablePairPartners(source.id).length > 0))
+const pairRightOptions = computed(() => availablePairPartners(crossLeft.value))
+const canAddPair = computed(() => !!crossLeft.value && pairRightOptions.value.some(source => source.id === crossRight.value))
 const selectedPair=computed(()=>sourcePairs.value.find(pair=>pair.key===selectedPairKey.value))
 const pairRows=computed(()=>selectedPair.value?.rows||[])
 const pairCounts=computed(()=>selectedPair.value?.counts||{})
@@ -68,6 +77,33 @@ const createVisible = ref(false)
 const creating = ref(false)
 const createError = ref('')
 const newDomain = ref({ name: '', domain: '' })
+const deletingDomain = ref<{ domain: string; name: string } | null>(null)
+const deletionBusy = ref(false)
+const deletionError = ref('')
+function openDeleteDomain() {
+  if (!ontology.value) return
+  deletionError.value = ''
+  deletingDomain.value = { domain: ontology.value.domain, name: ontology.value.name }
+}
+async function deleteDomain() {
+  const item = deletingDomain.value
+  if (!item || deletionBusy.value || !hasRole('admin')) return
+  deletionBusy.value = true
+  deletionError.value = ''
+  try {
+    await api.delete(`/ontology/domains/${encodeURIComponent(item.domain)}`)
+  } catch (cause: any) {
+    deletionError.value = cause.response?.data?.detail || '删除业务域失败'
+    return
+  } finally { deletionBusy.value = false }
+  deletingDomain.value = null
+  if (selectedDomain.value === item.domain) {
+    selectedDomain.value = ''
+    ontology.value = null
+  }
+  await load()
+  message.value = `已删除业务域「${item.name}」。`
+}
 let loadVersion = 0
 
 function mapped(value: any) {
@@ -95,13 +131,18 @@ const boundSourceIds = computed(() => new Set([
   ...(ontology.value?.sourcePackageRefs || []).map((item: any) => item.dataSourceId),
   ...(ontology.value?.objects || []).map((item: any) => item.dataSourceId || ontology.value?.dataSourceId),
 ].filter(Boolean)))
-const crossSources = computed(() => dataSources.value.filter(source => boundSourceIds.value.has(source.id) && ['ready','ready_with_pending'].includes(sourcePackages.value[source.id]?.status)))
+function isModeledSource(sourceId: string) {
+  return ['ready', 'ready_with_pending'].includes(sourcePackages.value[sourceId]?.status)
+}
+const crossSources = computed(() => dataSources.value.filter(source => boundSourceIds.value.has(source.id) && isModeledSource(source.id)))
 const boundSources = computed(() => dataSources.value.filter(source => boundSourceIds.value.has(source.id)))
-const availableSources = computed(() => dataSources.value.filter(source => !boundSourceIds.value.has(source.id)))
+const availableSources = computed(() => dataSources.value.filter(source => !boundSourceIds.value.has(source.id) && isModeledSource(source.id)))
+const canBindSource = computed(() => availableSources.value.some(source => source.id === sourceToAdd.value))
 watch([relationFilter,selectedPairKey],()=>relationPage.value=1)
 watch(()=>visibleRelations.value.length,total=>relationPage.value=Math.min(relationPage.value,Math.max(1,Math.ceil(total/20))))
 function openSourcePicker() { sourceToAdd.value = ''; sourcePickerVisible.value = true }
 async function bindSource(sourceId: string) {
+  if (saving.value || !availableSources.value.some(source => source.id === sourceId)) return
   saving.value = true; error.value = ''
   try { ontology.value = mapped((await api.post(`/ontology/configurations/${selectedDomain.value}/sources/${sourceId}`)).data); await loadDomainRelations(); sourcePickerVisible.value = false; sourceToAdd.value = ''; message.value = '数据源已添加到当前业务域。' }
   catch (reason: any) { error.value = reason.response?.data?.detail || '绑定数据源失败' }
@@ -122,6 +163,8 @@ async function unbindSource() {
     if(crossRight.value===source.id)crossRight.value=''
     unbindingSource.value=null
     await loadDomainRelations()
+    crossJobs.value = Object.fromEntries(Object.entries(crossJobs.value).filter(([, job]) =>
+      job.datasource_id !== source.id && job.peer_datasource_id !== source.id))
     if(!selectedPair.value)pairDrawerVisible.value=false
     message.value='已解除当前业务域的绑定，相关跨库关系已移除。数据源本身保留。'
   } catch(reason:any){error.value=reason.response?.data?.detail||'解除绑定失败'}
@@ -143,7 +186,7 @@ function editReviewRelation(row:any) {
   editingDomainRelationId.value=row.id
 }
 function openPair(pair:any){selectedPairKey.value=pair.key;relationFilter.value='all';pairDrawerVisible.value=true}
-function openPairPicker(){crossLeft.value='';crossRight.value='';pairPickerVisible.value=true}
+function openPairPicker(){error.value='';crossLeft.value='';crossRight.value='';pairPickerVisible.value=true}
 function canAnalyze(pair:any){return !saving.value&&!startingPair.value&&terminalJob(pair.job)&&[pair.left.id,pair.right.id].every(id=>crossSources.value.some(s=>s.id===id))}
 function requestAnalysis(pair:any){if(canAnalyze(pair)){error.value='';analysisConfirmation.value=pair}}
 async function resumeCrossAnalysis(pair:any){
@@ -194,15 +237,17 @@ async function pollCross() {
   if(Object.values(crossJobs.value).some(job=>!terminalJob(job)))crossTimer=setTimeout(()=>void pollCross(),1500)
 }
 async function analyzeCrossSource(left=crossLeft.value,right=crossRight.value) {
-  if(!left||!right||left===right)return
+  if(!left||!right||left===right||startingPair.value)return
+  const reanalyze = !!analysisConfirmation.value
+  if(!reanalyze && !canAddPair.value)return
   const domain=selectedDomain.value,version=loadVersion,key=pairKey(left,right)
   startingPair.value=key;error.value=''
   try{
-    const job=(await api.post(`/ontology/configurations/${domain}/cross-source-analysis`,{left_source_id:left,right_source_id:right})).data
+    const job=(await api.post(`/ontology/configurations/${domain}/cross-source-analysis`,{left_source_id:left,right_source_id:right,...(reanalyze ? { mode: 'reanalyze' } : {})})).data
     if(domain!==selectedDomain.value||version!==loadVersion)return
     crossJobs.value[key]=job;pairPickerVisible.value=false;analysisConfirmation.value=null;message.value='已开始分析所选两个数据源的关联。';void pollCross()
   }catch(reason:any){if(domain===selectedDomain.value)error.value=reason.response?.data?.detail||'无法启动跨源分析'}
-  finally{if(domain===selectedDomain.value)startingPair.value=''}
+  finally{if(domain===selectedDomain.value&&version===loadVersion)startingPair.value=''}
 }
 function crossMessage(job: any) {
   const details = job.details || {}
@@ -213,6 +258,12 @@ function crossMessage(job: any) {
   if (details.research_pending) parts.push(`待复核 ${details.research_pending} 项`)
   return parts.join(' · ')
 }
+function selectDomain(domain: string) {
+  if (selectedDomain.value === domain) return
+  selectedDomain.value = domain
+  void loadDomain()
+}
+
 async function loadDomain() {
   const domain = selectedDomain.value
   const version = ++loadVersion
@@ -354,82 +405,119 @@ onUnmounted(() => { if (crossTimer) clearTimeout(crossTimer) })
 </script>
 
 <template>
-  <div class="page">
+  <div class="page management-page ontology-page">
     <div class="page-header">
-      <div><h1>本体工作室</h1><p>查看和维护表之间的关联关系，保存后供新查询使用。</p></div>
+      <h1>本体工作室</h1>
       <div class="header-actions">
-        <t-select v-model="selectedDomain" :disabled="saving" style="width:240px" @change="loadDomain"><t-option v-for="item in domains" :key="item.domain" :value="item.domain" :label="item.name" /></t-select>
-        <t-button variant="outline" :disabled="saving" @click="openCreate">新建业务域</t-button>
+        <t-button theme="primary" :disabled="saving" @click="openCreate">新建业务域</t-button>
       </div>
     </div>
     <t-alert v-if="error" theme="error" :message="error" style="margin-bottom:16px" />
     <t-alert v-if="message" theme="success" :message="message" closable @close="message = ''" style="margin-bottom:16px" />
+    <div v-if="domains.length" class="domain-bar">
+      <nav aria-label="业务域" class="domain-switcher">
+        <button v-for="item in domains" :key="item.domain" type="button"
+                :aria-current="item.domain === selectedDomain ? 'true' : undefined" :disabled="saving"
+                @click="selectDomain(item.domain)">{{ item.name }}</button>
+      </nav>
+      <t-button v-if="hasRole('admin') && ontology" theme="danger" variant="text" :disabled="saving" @click="openDeleteDomain">删除业务域</t-button>
+    </div>
     <template v-if="ontology">
-      <section class="domain-summary panel">
-        <div class="domain-heading"><div><strong>{{ ontology.name }}</strong><small>{{ ontology.domain }}</small></div><t-tag variant="light" :theme="ontology.objects.length ? 'success' : 'default'">{{ ontology.objects.length ? '已配置' : '待配置' }}</t-tag></div>
+      <section class="domain-summary">
+        <div class="domain-heading"><span>当前业务域 <strong>{{ ontology.name }}</strong></span><t-tag variant="light" :theme="ontology.objects.length ? 'success' : 'default'">{{ ontology.objects.length ? '已配置' : '待配置' }}</t-tag></div>
         <div class="ontology-stats"><span>表映射 <b>{{ ontology.objects.length }}</b></span><span>已生效跨库关系 <b>{{ reviewCounts.accepted || 0 }}</b></span></div>
       </section>
-      <section class="panel source-package-panel">
-        <div class="section-heading"><div class="panel-title">数据源本体包</div><t-button variant="outline" :disabled="saving" @click="openSourcePicker">＋ 添加数据源</t-button></div>
-        <div class="package-list">
-          <article v-for="source in boundSources" :key="source.id" class="package-row">
-            <div><strong>{{ source.name }}</strong><small>{{ source.type }} · {{ sourcePackages[source.id]?.object_count || 0 }} 个对象 · {{ sourcePackages[source.id]?.relation_count || 0 }} 条关系</small></div>
-            <t-tag variant="light" :theme="sourcePackages[source.id] ? 'success' : 'default'">{{ ['ready', 'ready_with_pending'].includes(sourcePackages[source.id]?.status) ? '已完成' : sourcePackages[source.id]?.status === 'stale' ? '需更新' : '尚未完成建模' }}</t-tag>
-            <t-button size="small" variant="text" theme="danger" :disabled="saving" @click="unbindingSource=source">解除绑定</t-button>
-          </article>
-          <div v-if="!boundSources.length" class="empty-hint">尚未添加数据源，点击“＋ 添加数据源”选择。</div>
+      <section class="source-package-panel">
+        <div class="section-heading"><h2 class="panel-title">已绑定数据源</h2><t-button variant="outline" :disabled="saving" @click="openSourcePicker">＋ 添加数据源</t-button></div>
+        <div v-if="boundSources.length" class="ontology-table-wrap">
+          <table class="ontology-table source-table" aria-label="已绑定数据源">
+            <thead><tr><th scope="col">数据源</th><th scope="col">对象数</th><th scope="col">关系数</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead>
+            <tbody>
+              <tr v-for="source in boundSources" :key="source.id" class="package-row">
+                <th scope="row"><div class="package-source"><DatabaseIcon :type="source.type" /><strong>{{ source.name }}</strong></div></th>
+                <td>{{ sourcePackages[source.id]?.object_count || 0 }}</td>
+                <td>{{ sourcePackages[source.id]?.relation_count || 0 }}</td>
+                <td><span class="table-status" :class="{ ready: ['ready', 'ready_with_pending'].includes(sourcePackages[source.id]?.status) }">{{ ['ready', 'ready_with_pending'].includes(sourcePackages[source.id]?.status) ? '已完成' : sourcePackages[source.id]?.status === 'stale' ? '需更新' : '尚未完成建模' }}</span></td>
+                <td><t-button size="small" variant="text" theme="danger" :disabled="saving" @click="unbindingSource=source">解除绑定</t-button></td>
+              </tr>
+            </tbody>
+          </table>
         </div>
+        <div v-else class="empty-hint">尚未添加数据源，点击“＋ 添加数据源”选择。</div>
       </section>
-      <section class="panel model-panel">
-        <div class="section-heading"><div><div class="panel-title">库与库之间的关联</div><small class="pair-description">按两个数据源管理，查看和维护它们之间的表关联。</small></div><t-button theme="primary" :disabled="crossSources.length<2 || saving || !!startingPair" @click="openPairPicker">新增关联</t-button></div>
-        <div v-if="sourcePairs.length" class="source-pair-grid">
-          <article v-for="pair in sourcePairs" :key="pair.key" class="source-pair-card">
-            <div class="pair-card-heading"><RelationIcon/><t-tag variant="light" :theme="!terminalJob(pair.job)?'primary':pair.job?.status==='failed'?'danger':pair.counts.pending?'warning':pair.rows.length?'success':'default'">{{pairState(pair)}}</t-tag></div>
-            <h3>{{pair.left.name}} <span>↔</span> {{pair.right.name}}</h3>
-            <div class="pair-counts"><span>已生效 <b>{{pair.counts.accepted}}</b></span><span>待审核 <b>{{pair.counts.pending}}</b></span><span>已停用 <b>{{pair.counts.disabled}}</b></span></div>
-            <div v-if="!terminalJob(pair.job)" class="pair-progress"><t-progress :percentage="pair.job.progress||0" size="small"/><small>{{crossMessage(pair.job)}}</small></div>
-            <p v-else-if="pair.job?.details?.technical_incomplete" class="pair-error">部分范围未完成，原生效关系保留。</p><p v-else-if="pair.job?.error" class="pair-error">{{names.text(pair.job.error)}}</p>
-            <p v-else class="pair-description">{{pair.job?.completed_at?`最近分析：${new Date(pair.job.completed_at).toLocaleString()}`:pair.rows.length?'查看关联详情或重新分析。':'尚未分析，可选择分析或手动添加表间关系。'}}</p>
-            <div class="pair-card-actions"><t-button variant="outline" @click="openPair(pair)">查看关联关系</t-button><t-button v-if="pair.job?.details?.checkpoint_ref && (pair.job?.status==='failed' || (pair.job?.status==='completed_with_pending' && pair.job?.details?.technical_incomplete)) && terminalJob(pair.job)" variant="outline" :loading="startingPair===pair.key" :disabled="!canAnalyze(pair)" @click="resumeCrossAnalysis(pair)">继续上次分析</t-button><t-button v-if="terminalJob(pair.job)" theme="primary" :loading="startingPair===pair.key" :disabled="!canAnalyze(pair)" @click="requestAnalysis(pair)">{{pair.job||pair.rows.length?'重新分析关联关系':'分析关联关系'}}</t-button><t-button v-else theme="danger" variant="outline" :loading="cancellingPair===pair.key||pair.job.status==='cancelling'" :disabled="!canCancel(pair)" @click="cancelCrossAnalysis(pair)">{{pair.job.phase==='publishing'?'正在发布结果':pair.job.status==='cancelling'?'正在取消':'取消分析'}}</t-button></div>
-          </article>
+      <section class="model-panel">
+        <div class="section-heading">
+          <div>
+            <h2 class="panel-title">数据源之间的关联</h2>
+            <p class="association-hint">数据源关联用于跨数据源联合查询。未配置关联时，单数据源查询仍可正常使用。</p>
+          </div>
+          <t-button theme="primary" :disabled="!pairLeftOptions.length || saving || !!startingPair" @click="openPairPicker">新增关联</t-button>
         </div>
-        <div v-else class="empty-hint">请先添加至少两个数据源，再建立库与库之间的关联。</div>
+        <div v-if="sourcePairs.length" class="ontology-table-wrap">
+          <table class="ontology-table association-table" aria-label="数据源之间的关联">
+            <thead><tr><th scope="col">关联数据源</th><th scope="col">已生效</th><th scope="col">待审核</th><th scope="col">已停用</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead>
+            <tbody v-for="pair in sourcePairs" :key="pair.key" class="source-pair-card">
+              <tr>
+                <th scope="row">
+                  <span class="pair-endpoints"><strong>{{ pair.left.name }}</strong><span aria-hidden="true">↔</span><strong>{{ pair.right.name }}</strong></span>
+                </th>
+                <td>{{ pair.counts.accepted }}</td>
+                <td>{{ pair.counts.pending }}</td>
+                <td>{{ pair.counts.disabled }}</td>
+                <td><span class="table-status" :class="{ running: !terminalJob(pair.job), failed: pair.job?.status === 'failed', pending: terminalJob(pair.job) && pair.counts.pending && pair.job?.status !== 'failed', ready: terminalJob(pair.job) && !pair.counts.pending && pair.rows.length && pair.job?.status !== 'failed' }">{{ pairState(pair) }}</span></td>
+                <td><t-button theme="primary" variant="text" size="small" @click="openPair(pair)">查看关联关系</t-button></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-else class="empty-hint association-empty">
+          <strong>暂无数据源关联</strong>
+          <p>{{ crossSources.length < 2 ? '绑定至少两个已建模的数据源后，即可新增关联。' : '点击「新增关联」选择两个数据源。' }}</p>
+        </div>
       </section>
     </template>
-    <div v-else class="panel empty-hint">请选择或新建业务域。</div>
-    <t-drawer :visible="pairDrawerVisible && !!selectedPair" :header="`${selectedPair?.left.name||''} ↔ ${selectedPair?.right.name||''} · 关联关系`" :footer="false" size="min(1040px, 96vw)" @close="pairDrawerVisible=false">
-      <div v-if="selectedPair" class="drawer-body">
+    <div v-else class="empty-hint">请选择或新建业务域。</div>
+    <t-drawer :close-btn="true" :visible="pairDrawerVisible && !!selectedPair" :header="`${selectedPair?.left.name||''} ↔ ${selectedPair?.right.name||''} · 关联关系`" :footer="false" size="min(1040px, 96vw)" :close-on-esc-keydown="true" @close="pairDrawerVisible=false">
+      <div v-if="selectedPair" class="drawer-body management-controls">
         <t-alert v-if="error" theme="error" :message="names.text(error)" />
-        <div class="drawer-toolbar"><t-button theme="primary" :disabled="saving||!terminalJob(selectedPair.job)" @click="openRelation()">添加关联关系</t-button><t-button :loading="startingPair===selectedPair.key" :disabled="!canAnalyze(selectedPair)" @click="requestAnalysis(selectedPair)">更新关联关系</t-button><t-button v-if="!terminalJob(selectedPair.job)" theme="danger" :loading="cancellingPair===selectedPair.key||selectedPair.job.status==='cancelling'" :disabled="!canCancel(selectedPair)" @click="cancelCrossAnalysis(selectedPair)">{{selectedPair.job.phase==='publishing'?'正在发布结果':selectedPair.job.status==='cancelling'?'正在取消':'取消任务'}}</t-button></div>
-        <t-alert v-if="selectedPair.job && !terminalJob(selectedPair.job)" theme="info" :message="crossMessage(selectedPair.job)" />
+        <div class="drawer-toolbar"><t-button theme="primary" :disabled="saving||!terminalJob(selectedPair.job)" @click="openRelation()">添加关联关系</t-button><t-button variant="outline" :loading="startingPair===selectedPair.key" :disabled="!canAnalyze(selectedPair)" @click="requestAnalysis(selectedPair)">更新关联关系</t-button><t-button v-if="selectedPair.job?.details?.checkpoint_ref && (selectedPair.job?.status === 'failed' || (selectedPair.job?.status === 'completed_with_pending' && selectedPair.job?.details?.technical_incomplete))" variant="outline" :loading="startingPair===selectedPair.key" :disabled="!canAnalyze(selectedPair)" @click="resumeCrossAnalysis(selectedPair)">继续上次分析</t-button><t-button v-if="!terminalJob(selectedPair.job)" theme="danger" :loading="cancellingPair===selectedPair.key||selectedPair.job.status==='cancelling'" :disabled="!canCancel(selectedPair)" @click="cancelCrossAnalysis(selectedPair)">{{selectedPair.job.phase==='publishing'?'正在发布结果':selectedPair.job.status==='cancelling'?'正在取消':'取消任务'}}</t-button></div>
+        <div v-if="!terminalJob(selectedPair.job)" class="pair-job-info">
+          <t-progress :percentage="selectedPair.job.progress || 0" size="small" />
+          <p>{{ crossMessage(selectedPair.job) }}</p>
+        </div>
+        <t-alert v-else-if="selectedPair.job?.details?.technical_incomplete" theme="warning" message="部分范围未完成，原生效关系保留。" />
+        <t-alert v-else-if="selectedPair.job?.error" theme="error" :message="names.text(selectedPair.job.error)" />
+        <p v-else-if="selectedPair.job?.completed_at" class="pair-job-info">最近分析 <time :datetime="selectedPair.job.completed_at">{{ new Date(selectedPair.job.completed_at).toLocaleString() }}</time></p>
         <t-tabs v-model="relationFilter"><t-tab-panel value="all" :label="`全部 ${pairRows.length}`" /><t-tab-panel value="accepted" :label="`已生效 ${pairCounts.accepted||0}`" /><t-tab-panel value="pending" :label="`待审核 ${pairCounts.pending||0}`" /><t-tab-panel value="disabled" :label="`已停用 ${pairCounts.disabled||0}`" /></t-tabs>
-        <div class="relation-list"><RelationshipCard v-for="{relation,id,status,decision_reason} in pagedRelations" :key="id" :source-table="objectOf(relation.from)?.table||names.display(relation.from)" :target-table="objectOf(relation.to)?.table||names.display(relation.to)" :source-fields="relationColumns(relation,'source')" :target-fields="relationColumns(relation,'target')" :source-label="sourceLabel(relation.from)" :target-label="sourceLabel(relation.to)" :cardinality="relation.cardinality" :status="status" :reason="names.text(decision_reason)" :condition="names.display(relation.condition)" :optional="relation.optional" :busy="saving||!terminalJob(selectedPair.job)" @edit="editReviewRelation({id,status,relation})" @decision="action=>action==='disable'?deletingRelation=relation:reviewRelation({id,status,relation},action)" /><div v-if="!visibleRelations.length" class="empty-list">暂无关联关系</div></div>
-        <t-pagination v-model="relationPage" :total="visibleRelations.length" :page-size="20" />
+        <div class="relation-list"><RelationshipCard v-for="{relation,id,status,decision_reason} in pagedRelations" :key="id" :source-table="objectOf(relation.from)?.table||names.display(relation.from)" :target-table="objectOf(relation.to)?.table||names.display(relation.to)" :source-fields="relationColumns(relation,'source')" :target-fields="relationColumns(relation,'target')" :source-label="sourceLabel(relation.from)" :target-label="sourceLabel(relation.to)" :cardinality="relation.cardinality" :status="status" :reason="names.text(decision_reason)" :condition="names.display(relation.condition)" :optional="relation.optional" :busy="saving||!terminalJob(selectedPair.job)" @edit="editReviewRelation({id,status,relation})" @decision="action=>action==='disable'?deletingRelation=relation:reviewRelation({id,status,relation},action)" /><div v-if="!visibleRelations.length" class="empty-list">{{ pairRows.length ? '当前状态下没有关联关系。' : '暂无表间关联，可点击「添加关联关系」手动添加。' }}</div></div>
+        <t-pagination v-if="visibleRelations.length > 20" v-model="relationPage" :total="visibleRelations.length" :page-size="20" />
       </div>
     </t-drawer>
     <t-dialog :visible="!!analysisConfirmation" header="确认重新分析关联关系" :confirm-btn="{content:'确认分析',loading:!!startingPair}" :cancel-btn="{disabled:!!startingPair}" :close-btn="!startingPair" :close-on-overlay-click="!startingPair" :close-on-esc-keydown="!startingPair" @confirm="analyzeCrossSource(analysisConfirmation.left.id,analysisConfirmation.right.id)" @close="analysisConfirmation=null" @cancel="analysisConfirmation=null">
       <p>将重新分析“{{analysisConfirmation?.left.name}}”与“{{analysisConfirmation?.right.name}}”之间的关联。分析可能需要几分钟并消耗模型额度。</p><p>分析期间可取消；原有已生效关系保持可用，完整分析成功后才更新结果。</p><t-alert v-if="error" theme="error" :message="error" />
     </t-dialog>
     <t-dialog v-model:visible="pairPickerVisible" header="新增库间关联" :footer="false" width="520px" :close-on-overlay-click="!startingPair" :close-btn="!startingPair">
-      <div class="domain-form"><p>选择当前业务域已绑定的两个数据源进行关联分析，结果在对应卡片中查看。</p><t-alert v-if="error" theme="error" :message="error" />
-        <label>数据源 A<t-select v-model="crossLeft" filterable :disabled="!!startingPair" :options="crossSources.map(source=>({value:source.id,label:source.name}))" /></label>
-        <label>数据源 B<t-select v-model="crossRight" filterable :disabled="!!startingPair" :options="crossSources.filter(source=>source.id!==crossLeft).map(source=>({value:source.id,label:source.name}))" /></label>
-        <div class="dialog-actions"><t-button :disabled="!!startingPair" @click="pairPickerVisible=false">取消</t-button><t-button theme="primary" :loading="!!startingPair" :disabled="!crossLeft||!crossRight||crossLeft===crossRight" @click="analyzeCrossSource()">开始分析</t-button></div>
+      <div class="domain-form management-controls"><p>选择当前业务域已绑定的两个数据源进行关联分析，结果在对应卡片中查看。</p><t-alert v-if="error" theme="error" :message="error" />
+        <label>数据源 A<t-select v-model="crossLeft" filterable :disabled="!!startingPair" :options="pairLeftOptions.map(source=>({value:source.id,label:source.name}))" @change="crossRight = ''" /></label>
+        <label>数据源 B<t-select v-model="crossRight" filterable :disabled="!!startingPair || !crossLeft" :options="pairRightOptions.map(source=>({value:source.id,label:source.name}))" /></label>
+        <div class="dialog-actions"><t-button :disabled="!!startingPair" @click="pairPickerVisible=false">取消</t-button><t-button theme="primary" :loading="!!startingPair" :disabled="!canAddPair" @click="analyzeCrossSource()">开始分析</t-button></div>
       </div>
     </t-dialog>
     <t-dialog :visible="!!unbindingSource" header="解除数据源绑定" :confirm-btn="{content:'解除绑定',theme:'danger',loading:saving}" :cancel-btn="{disabled:saving}" :close-btn="!saving" :close-on-overlay-click="!saving" @confirm="unbindSource" @close="unbindingSource=null" @cancel="unbindingSource=null">
       <p>解除“{{unbindingSource?.name}}”与当前业务域的绑定，并移除本域引用它的表和跨库关系。数据源本身及其他业务域的绑定保留。</p><t-alert v-if="error" theme="error" :message="error" />
     </t-dialog>
     <t-dialog v-model:visible="sourcePickerVisible" header="添加数据源" :footer="false" width="520px" :close-on-overlay-click="!saving" :close-btn="!saving" :close-on-esc-keydown="!saving">
-      <div class="domain-form">
+      <div class="domain-form management-controls">
         <t-alert v-if="error" theme="error" :message="error" />
-        <label>选择数据源<t-select v-model="sourceToAdd" filterable :disabled="saving" placeholder="选择要添加的数据源" :options="availableSources.map(source=>({value:source.id,label:`${source.name} · ${source.type}`,disabled:!['ready','ready_with_pending'].includes(sourcePackages[source.id]?.status)}))" /></label>
-        <small>{{ availableSources.length ? '请选择已完成关联分析的数据源，添加后引用其表结构和关联关系。' : '没有可添加的数据源；当前已有的数据源均已绑定，或尚未创建数据源。' }}</small>
-        <div class="dialog-actions"><t-button :disabled="saving" @click="sourcePickerVisible=false">取消</t-button><t-button theme="primary" :loading="saving" :disabled="!sourceToAdd||saving" @click="bindSource(sourceToAdd)">添加到当前业务域</t-button></div>
+        <label v-if="availableSources.length">选择数据源<t-select v-model="sourceToAdd" filterable :disabled="saving" placeholder="选择要添加的数据源" :options="availableSources.map(source=>({value:source.id,label:`${source.name} · ${source.type}`}))" /></label>
+        <small>{{ availableSources.length ? '添加后将引用该数据源的表结构和关联关系。' : '暂无可添加的数据源。请先在数据源页面完成关联分析，再返回添加。' }}</small>
+        <div class="dialog-actions"><t-button :disabled="saving" @click="sourcePickerVisible=false">取消</t-button><t-button theme="primary" :loading="saving" :disabled="!canBindSource||saving" @click="bindSource(sourceToAdd)">添加到当前业务域</t-button></div>
       </div>
     </t-dialog>
+    <DeleteResourceDialog kind="业务域" :name="deletingDomain?.name || ''" :busy="deletionBusy"
+                          :error="deletionError" @confirm="deleteDomain" @cancel="deletingDomain = null" />
     <t-dialog v-model:visible="createVisible" header="新建业务域" :footer="false" width="520px">
-      <div class="domain-form">
+      <div class="domain-form management-controls">
         <label>业务域名称<t-input v-model="newDomain.name" placeholder="填写业务域名称" :maxlength="200" /></label>
         <label>业务域标识<t-input v-model="newDomain.domain" placeholder="例如：operations_analysis" :maxlength="100" /><small>2～100位小写字母、数字或下划线，以字母开头；创建后不可更改。</small></label>
         <t-alert v-if="createError" theme="error" :message="createError" />
@@ -437,7 +525,7 @@ onUnmounted(() => { if (crossTimer) clearTimeout(crossTimer) })
       </div>
     </t-dialog>
     <t-dialog v-model:visible="relationVisible" :header="!editingDomainRelationId && relationIndex < 0 ? '添加关联关系' : '编辑关联关系'" width="min(800px, 94vw)" :footer="false" :close-on-overlay-click="!saving" :close-btn="!saving" :close-on-esc-keydown="!saving">
-      <div class="relation-form">
+      <div class="relation-form management-controls">
         <t-alert v-if="relationError" theme="error" :message="relationError" />
         <div class="form-grid">
           <label>来源表<t-select v-model="relationDraft.from" :disabled="saving" filterable placeholder="选择来源表" @change="resetRelationFields"><t-option v-for="object in pairObjects" :key="object.name" :value="object.name" :label="`${tableLabel(object.name)} · ${sourceLabel(object.name)}`" /></t-select></label>
@@ -464,10 +552,61 @@ onUnmounted(() => { if (crossTimer) clearTimeout(crossTimer) })
 </template>
 
 <style scoped>
-.drawer-body{padding:4px 8px 20px}.drawer-toolbar{display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap}.drawer-body .relation-list{display:flex;flex-direction:column;gap:10px;margin:14px 0 18px;padding:0}.empty-list{text-align:center;color:var(--semora-muted);padding:55px 20px}
+.drawer-body{padding:4px 8px 20px}.drawer-toolbar{display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap}.drawer-body .relation-list{display:flex;flex-direction:column;margin:0 0 18px;padding:0}.empty-list{text-align:center;color:var(--semora-muted);padding:55px 20px}
 .field-mapping-row{display:grid;grid-template-columns:minmax(0,1fr) 20px minmax(0,1fr) auto;align-items:end;gap:12px}.field-mapping-row>span{align-self:center;text-align:center}.generated-condition{padding:12px;border:1px solid var(--semora-line);border-radius:8px;background:var(--semora-page)}.generated-condition small{display:block;margin-bottom:8px}.generated-condition code{font-size:12px;overflow-wrap:anywhere}
-.source-pair-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr));gap:18px;padding:0 18px 18px}.source-pair-card{border:1px solid var(--semora-line);border-radius:12px;padding:20px;display:flex;flex-direction:column;gap:16px;min-width:0;background:var(--semora-surface)}.pair-card-heading{display:flex;align-items:center;justify-content:space-between}.pair-card-heading>svg{font-size:26px;color:var(--semora-green)}.source-pair-card h3{margin:0;font-size:16px;line-height:1.6;overflow-wrap:anywhere}.source-pair-card h3 span{color:var(--semora-muted);padding:0 5px}.pair-counts{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:var(--semora-muted)}.pair-counts b{color:var(--semora-ink);font-size:16px;margin-left:4px}.pair-description{font-size:12px;color:var(--semora-muted);line-height:1.7;margin:0}.pair-error{font-size:12px;color:#c9353f;overflow-wrap:anywhere;margin:0}.pair-card-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:auto}.pair-progress small{display:block;color:var(--semora-muted);margin-top:8px}.pair-drawer-toolbar{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:20px}.pair-drawer-toolbar p{font-size:13px;color:var(--semora-muted)}.pair-drawer-toolbar>div{display:flex;gap:10px}
-.section-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 18px;flex-wrap:wrap}.section-heading .panel-title{padding:0}
-.header-actions{display:flex;gap:10px;align-items:center}.domain-summary{margin-bottom:20px;overflow:hidden}.domain-heading{display:flex;justify-content:space-between;align-items:center;padding:20px 22px}.domain-heading strong{font-size:18px}.domain-heading small{display:block;color:var(--semora-muted);margin-top:6px}.ontology-stats{display:flex;border-top:1px solid var(--semora-line)}.ontology-stats span{flex:1;padding:14px 16px;text-align:center;color:var(--semora-muted)}.ontology-stats b{color:var(--semora-ink);margin-left:8px}.source-package-panel{margin-bottom:20px;overflow:hidden}.package-list{display:grid}.package-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:14px;align-items:center;padding:14px 18px;border-top:1px solid var(--semora-line)}.package-row small,.cross-analysis small,.cross-candidates small{display:block;color:var(--semora-muted);margin-top:5px}.cross-analysis{display:flex;gap:12px;align-items:center;padding:18px;border-top:1px solid var(--semora-line);background:var(--semora-page)}.cross-analysis>div{flex:1}.cross-candidates{display:grid;gap:1px;background:var(--semora-line)}.cross-candidates article{display:flex;align-items:center;gap:8px;padding:12px 18px;background:var(--semora-surface)}.cross-candidates article>div{flex:1}.model-panel{overflow:hidden;margin-bottom:20px}.relation-list{display:grid;gap:16px;padding:18px}.relation-card{border:1px solid var(--semora-line);border-radius:10px;min-width:0;padding:18px}.relation-header{display:flex;justify-content:space-between;align-items:center;gap:12px}.relation-header small{display:block;margin-top:5px;color:var(--semora-muted);overflow-wrap:anywhere}.relation-actions{display:flex;flex:none}.relation-path{display:grid;grid-template-columns:minmax(0,1fr) 120px minmax(0,1fr);align-items:center;gap:16px;margin:18px 0}.table-node{background:var(--semora-page);border:1px solid var(--semora-line);border-radius:8px;padding:14px;overflow-wrap:anywhere}.table-node small{display:block;color:var(--semora-muted);margin-top:8px}.relation-link{display:flex;flex-direction:column;align-items:center;gap:6px;color:var(--semora-green)}.relation-link small{color:var(--semora-muted)}.relation-condition{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;font-size:12px}.relation-condition>span{color:var(--semora-muted)}.relation-condition code{overflow-wrap:anywhere;flex:1;min-width:0}.domain-form,.relation-form{display:flex;flex-direction:column;gap:20px;padding-top:6px}.domain-form label,.relation-form label{display:flex;flex-direction:column;gap:8px;min-width:0}.domain-form small,.relation-form small{color:var(--semora-muted);line-height:1.6}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.dialog-actions{display:flex;justify-content:flex-end;gap:10px}.empty-hint{padding:30px;text-align:center;color:var(--semora-muted)}
-@media(max-width:800px){.header-actions,.cross-analysis{flex-wrap:wrap}.page-header{flex-wrap:wrap;gap:16px}.package-row{grid-template-columns:1fr}.relation-path{grid-template-columns:1fr}.relation-link svg{transform:rotate(90deg)}.form-grid{grid-template-columns:1fr}.relation-header{align-items:flex-start}}
+.pair-drawer-toolbar{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:20px}.pair-drawer-toolbar p{font-size:13px;color:var(--semora-muted)}.pair-drawer-toolbar>div{display:flex;gap:10px}
+.section-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;flex-wrap:wrap}.section-heading .panel-title{padding:0;border:0;font-size:16px}
+.header-actions{display:flex;gap:10px;align-items:center}.domain-summary{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:22px;background:#edf4fb;border-radius:6px;padding:12px 16px}.domain-heading{display:flex;align-items:center;gap:12px}.domain-heading strong{font-size:18px}.domain-heading small{display:block;color:var(--semora-muted);margin-top:6px}.ontology-stats{display:flex;gap:18px;font-size:13px}.ontology-stats span{color:var(--semora-muted)}.ontology-stats b{color:var(--semora-ink);margin-left:8px}.source-package-panel{margin-bottom:20px;overflow:hidden}.package-list{display:grid}.cross-analysis small,.cross-candidates small{display:block;color:var(--semora-muted);margin-top:5px}.cross-analysis{display:flex;gap:12px;align-items:center;padding:18px;border-top:1px solid var(--semora-line);background:var(--semora-page)}.cross-analysis>div{flex:1}.cross-candidates{display:grid;gap:1px;background:var(--semora-line)}.cross-candidates article{display:flex;align-items:center;gap:8px;padding:12px 18px;background:var(--semora-surface)}.cross-candidates article>div{flex:1}.model-panel{overflow:hidden;margin-bottom:20px}.relation-list{display:grid;gap:16px;padding:18px}.relation-header{display:flex;justify-content:space-between;align-items:center;gap:12px}.relation-header small{display:block;margin-top:5px;color:var(--semora-muted);overflow-wrap:anywhere}.relation-actions{display:flex;flex:none}.relation-path{display:grid;grid-template-columns:minmax(0,1fr) 120px minmax(0,1fr);align-items:center;gap:16px;margin:18px 0}.table-node{background:var(--semora-page);border:1px solid var(--semora-line);border-radius:8px;padding:14px;overflow-wrap:anywhere}.table-node small{display:block;color:var(--semora-muted);margin-top:8px}.relation-link{display:flex;flex-direction:column;align-items:center;gap:6px;color:var(--semora-green)}.relation-link small{color:var(--semora-muted)}.relation-condition{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;font-size:12px}.relation-condition>span{color:var(--semora-muted)}.relation-condition code{overflow-wrap:anywhere;flex:1;min-width:0}.domain-form,.relation-form{display:flex;flex-direction:column;gap:20px;padding-top:6px}.domain-form label,.relation-form label{display:flex;flex-direction:column;gap:8px;min-width:0}.domain-form small,.relation-form small{color:var(--semora-muted);line-height:1.6}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.dialog-actions{display:flex;justify-content:flex-end;gap:10px}.empty-hint{padding:30px;text-align:center;color:var(--semora-muted)}
+@media(max-width:800px){.header-actions,.cross-analysis{flex-wrap:wrap}.page-header{flex-wrap:wrap;gap:16px}.relation-path{grid-template-columns:1fr}.relation-link svg{transform:rotate(90deg)}.form-grid{grid-template-columns:1fr}.relation-header{align-items:flex-start}}
+.package-source { display: flex; align-items: center; gap: 10px; min-width: 0; overflow-wrap: anywhere; }
+.ontology-page {
+  max-width: 1540px;
+  padding-inline: clamp(24px, 2.5vw, 40px);
+  font-family: Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --management-blue: #0c52a4;
+}
+.ontology-page > .page-header { margin-bottom: 30px; }
+.ontology-page > .page-header h1 { margin: 0; font-size: 30px; }
+.ontology-page :deep(.t-button) { font-family: inherit; }
+.domain-bar { display: flex; align-items: center; gap: 16px; border-bottom: 1px solid var(--semora-line); margin-bottom: 32px; }
+.domain-switcher { display: flex; flex: 1; gap: 22px; overflow-x: auto; }
+.domain-switcher button { border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--semora-muted); padding: 10px 10px 12px; cursor: pointer; white-space: nowrap; font-size: 16px; }
+.domain-switcher button[aria-current] { border-color: var(--management-blue); color: var(--management-blue); font-weight: 650; }
+.domain-switcher button:hover { color: var(--management-blue); }
+.domain-switcher button:disabled { cursor: not-allowed; }
+.domain-heading { font-size: 15px; color: #415268; overflow-wrap: anywhere; }
+.domain-heading strong { font-size: 16px; color: var(--semora-ink); margin-left: 7px; }
+.domain-summary { background: #e8eef5; justify-content: flex-start; padding: 13px 22px; min-height: 62px; margin-bottom: 27px; flex-wrap: wrap; }
+.ontology-stats { gap: 22px; font-size: 15px; flex-wrap: wrap; }
+.ontology-stats > span { border-inline-start: 1px solid #bac6d4; padding-inline-start: 22px; }
+.section-heading .panel-title { margin: 0; font-size: 22px; }
+.source-package-panel { margin-bottom: 28px; }
+.ontology-table-wrap { overflow-x: auto; border-radius: 6px 6px 0 0; }
+.ontology-table { width: 100%; border-collapse: collapse; font-size: 15px; min-width: 580px; }
+.ontology-table :is(th, td) { padding: 12px 20px; text-align: left; overflow-wrap: anywhere; }
+.ontology-table thead th { background: #e6ebf0; color: #253244; font-size: 15px; font-weight: 650; white-space: nowrap; padding-block: 11px; }
+.ontology-table tbody tr { border-bottom: 1px solid var(--semora-line); }
+.ontology-table tbody tr:hover { background: #f7faff; }
+.ontology-table tbody td { font-variant-numeric: tabular-nums; }
+.ontology-table :is(th, td):last-child { width: 14%; white-space: nowrap; }
+.source-table th:first-child { width: 33%; }
+.source-table th:nth-child(2), .source-table th:nth-child(3) { width: 18%; }
+.ontology-table :deep(.t-button--variant-text) { padding-inline: 0; font-size: 15px; }
+.table-status { display: inline-flex; align-items: center; gap: 8px; }
+.table-status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #8c98a8; flex: none; }
+.table-status.ready::before { background: #2d9c53; }
+.table-status.pending::before { background: #e59427; }
+.table-status.running::before { background: #256bc5; }
+.table-status.failed::before { background: #c9353f; }
+.source-table .database-icon { --database-icon-size: 28px; }
+.association-table th:first-child { width: 27%; }
+.association-table th:nth-child(n+2):nth-child(-n+4) { width: 15%; }
+.pair-endpoints { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; }
+.pair-endpoints > span { color: var(--semora-muted); }
+.pair-job-info { margin: 0 0 12px; color: var(--semora-muted); font-size: 13px; }
+.pair-job-info p { margin: 6px 0 0; }
+.association-empty { border-top: 1px solid var(--semora-line); text-align: left; padding: 18px 0; font-size: 13px; }
+.association-hint { margin: 5px 0 0; color: var(--semora-muted); font-size: 13px; line-height: 1.6; }
+.association-empty strong { color: var(--semora-ink); }
+.association-empty p { margin: 4px 0 0; }
 </style>

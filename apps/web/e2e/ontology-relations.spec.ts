@@ -31,8 +31,10 @@ async function studio(page: Page, openDrawer=true) {
     }
     await route.fulfill({ json: current })
   })
-  await page.route('**/api/v1/datasources', route => route.fulfill({ json: [{ id: 'db', name: '演示库', type: 'mysql' }, { id: 'db2', name: '第二库', type: 'mysql' }, { id: 'extra', name: '可添加库', type: 'postgresql' }] }))
-  await page.route('**/api/v1/datasources/*/source-ontology', route => route.fulfill({ json: { status: 'ready', object_count: 1, relation_count: 0 } }))
+  await page.route('**/api/v1/datasources', route => route.fulfill({ json: [{ id: 'db', name: '演示库', type: 'mysql' }, { id: 'db2', name: '第二库', type: 'mysql' }, { id: 'extra', name: '可添加库', type: 'postgresql' }, { id: 'unmodeled', name: '未建模库', type: 'postgresql' }] }))
+  await page.route('**/api/v1/datasources/*/source-ontology', route => new URL(route.request().url()).pathname.endsWith('/unmodeled/source-ontology')
+    ? route.fulfill({ status: 404, json: { detail: '数据源尚未生成单源本体包' } })
+    : route.fulfill({ json: { status: 'ready', object_count: 1, relation_count: 0 } }))
   await page.route('**/api/v1/ontology/configurations/fixture/cross-source-analysis',route=>route.fulfill({json:{items:[]}}))
   await page.route('**/api/v1/ontology/configurations/fixture/sources/extra', async route => {
     current = { ...current, sourcePackageRefs: [{ dataSourceId: 'db' }, { dataSourceId: 'db2' }, { dataSourceId: 'extra' }] }
@@ -82,16 +84,41 @@ test('studio lists bound sources only and adds sources through the plus dialog',
   await packages.getByRole('button', { name: '＋ 添加数据源' }).click()
   const dialog = page.locator('.t-dialog:visible').filter({ hasText: '添加到当前业务域' })
   await dialog.locator('.t-select').click()
+  await expect(page.getByText('未建模库 · postgresql', { exact: true })).toHaveCount(0)
   await page.getByText('可添加库 · postgresql', { exact: true }).click()
   await dialog.getByRole('button', { name: '添加到当前业务域', exact: true }).click()
   await expect(dialog).not.toBeVisible()
   await expect(packages.locator('.package-row')).toHaveCount(3)
-  await expect(page.locator('.source-pair-card')).toHaveCount(3)
-  await expect(packages.getByText('分析两个数据源的关联',{exact:true})).toHaveCount(0)
-  await expect(page.locator('.relation-card')).toHaveCount(0)
-  await page.locator('.source-pair-card').filter({hasText:'可添加库'}).first().getByRole('button',{name:'查看关联关系',exact:true}).click()
-  await expect(page.locator('.t-drawer:visible')).toContainText('暂无关联关系')
-  await expect(page.locator('.relation-card')).toHaveCount(0)
+  const cards = page.locator('.source-pair-card')
+  await expect(cards).toHaveCount(1)
+  await expect(cards.filter({ hasText: '可添加库' })).toHaveCount(0)
+
+  let jobs:any[] = []
+  await page.route('**/api/v1/ontology/configurations/fixture/cross-source-analysis', async route => {
+    if (route.request().method() === 'POST') {
+      const body = route.request().postDataJSON()
+      expect(body).toEqual({ left_source_id: 'db', right_source_id: 'extra' })
+      const job = { id: 'new-pair', datasource_id: 'db', peer_datasource_id: 'extra', status: 'completed' }
+      jobs = [job]
+      await route.fulfill({ json: job })
+    } else await route.fulfill({ json: { items: jobs } })
+  })
+  const add = page.getByRole('button', { name: '新增关联', exact: true })
+  await add.click()
+  const picker = page.locator('.t-dialog:visible').filter({ hasText: '新增库间关联' })
+  await picker.locator('label').filter({ hasText: '数据源 A' }).locator('.t-select').click()
+  await page.locator('.t-popup:visible').getByText('演示库', { exact: true }).click()
+  const right = picker.locator('label').filter({ hasText: '数据源 B' }).locator('.t-select')
+  await right.click()
+  await expect(page.locator('.t-popup:visible').getByText('第二库', { exact: true })).toHaveCount(0)
+  await page.locator('.t-popup:visible').getByText('可添加库', { exact: true }).click()
+  await picker.getByRole('button', { name: '开始分析', exact: true }).click()
+  await expect(cards).toHaveCount(2)
+  await expect(cards.filter({ hasText: '可添加库' })).toHaveCount(1)
+  await add.click()
+  await picker.locator('label').filter({ hasText: '数据源 A' }).locator('.t-select').click()
+  await expect(page.locator('.t-popup:visible').getByText('演示库', { exact: true })).toHaveCount(0)
+
 })
 
 test('studio shows only table relationships and edits persist without changing mappings or metrics', async ({ page }) => {
@@ -211,15 +238,15 @@ test('pair reanalysis stays scoped and updates its open drawer',async({page})=>{
     else await route.fulfill({json:{items:[{...job,status:'completed',progress:100}]}})
   })
   await page.route('**/api/v1/ontology/configurations/fixture/cross-source-analysis/pair-analysis',route=>route.fulfill({json:{...job,status:complete?'completed':'profiling',progress:complete?100:65}}))
-  await page.locator('.source-pair-card').getByRole('button',{name:'重新分析关联关系',exact:true}).click()
+  await page.getByRole('button',{name:'查看关联关系',exact:true}).click()
+  await page.locator('.t-drawer--open').getByRole('button',{name:'更新关联关系',exact:true}).click()
   expect(body).toBeUndefined()
   await page.locator('.t-dialog:visible').getByRole('button',{name:'取消',exact:true}).click()
   expect(body).toBeUndefined()
-  await page.locator('.source-pair-card').getByRole('button',{name:'重新分析关联关系',exact:true}).click()
+  await page.locator('.t-drawer--open').getByRole('button',{name:'更新关联关系',exact:true}).click()
   await page.locator('.t-dialog:visible').getByRole('button',{name:'确认分析',exact:true}).click()
-  await expect.poll(()=>body).toEqual({left_source_id:'db',right_source_id:'db2'})
+  await expect.poll(()=>body).toEqual({left_source_id:'db',right_source_id:'db2',mode:'reanalyze'})
   await expect(page.locator('.source-pair-card')).toContainText('正在分析')
-  await page.getByRole('button',{name:'查看关联关系',exact:true}).click()
   await expect(page.locator('.t-drawer:visible').getByRole('button',{name:'取消任务',exact:true})).toBeEnabled()
   complete=true
   await expect(page.locator('.source-pair-card')).not.toContainText('正在分析')

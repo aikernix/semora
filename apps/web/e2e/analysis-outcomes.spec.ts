@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { analysisOutcomes, activeAnalysisStatus } from '../src/analysisTimeline'
+import { analysisOutcomes } from '../src/analysisTimeline'
 import type { RunEvent } from '../src/api'
 
 const event = (name: string, data: Record<string, any>): RunEvent => ({ event: name, data, status: 'understanding', created_at: '2026-11-05T13:00:00Z' })
@@ -17,11 +17,9 @@ test('timeline includes outputs only and collapses duplicate lookups', () => {
   expect(rows.map(r => r.title)).toEqual(['取得对象定义', '修订查询方案'])
   expect(rows[1].changes?.[0].before).toBe(10)
   expect(analysisOutcomes(events.slice(0, 3))).toEqual([])
-  expect(activeAnalysisStatus('failed', events)).toBe('')
-  expect(activeAnalysisStatus('understanding', events)).toContain('正在分析需求')
 })
 
-test('workbench shows findings and keeps request diagnostics collapsed', async ({ page }) => {
+test('execution record shows findings and excludes request diagnostics', async ({ page }) => {
   const run = { id: 'outcomes-run', session_id: 'outcomes-session', domain: 'generic', question: '查询记录', status: 'failed', evidence: [], error: '测试结束', events }
   await page.route('**/api/v1/**', route => {
     const path = new URL(route.request().url()).pathname
@@ -33,13 +31,10 @@ test('workbench shows findings and keeps request diagnostics collapsed', async (
     return route.fulfill({ json: {} })
   })
   await page.goto('/workbench')
-  await page.getByRole('button', { name: /分析产出/ }).click()
-  await expect(page.locator('#agent-trace-panel .research-trace article')).toHaveCount(2)
+  await page.getByRole('button', { name: '查看本次查询的执行记录' }).click()
+  await expect(page.locator('.record-timeline > li')).toHaveCount(2)
   await expect(page.getByText('等待 15 秒，推理字符 8000', { exact: true })).not.toBeVisible()
   await page.getByText('查看依据与变化', { exact: true }).last().click()
   await expect(page.getByText('修改前：10', { exact: true })).toBeVisible()
   await expect(page.getByText('修改后：20', { exact: true })).toBeVisible()
-  await page.getByText(/技术诊断（/).click()
-  await expect(page.getByText('等待 15 秒，推理字符 8000', { exact: true })).toBeVisible()
-  await page.screenshot({ path: 'test-results/analysis-outcomes.png', fullPage: true })
 })

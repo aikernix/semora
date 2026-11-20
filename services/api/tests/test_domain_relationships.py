@@ -108,6 +108,28 @@ def test_cross_pair_history_is_unordered_scoped_and_survives_zero_results(studio
     assert jobs[0]['details']['accepted']==0
 
 
+def test_existing_unordered_pair_can_only_be_reanalyzed(studio, monkeypatch):
+    client, configuration, repository = studio
+    endpoint = '/api/v1/ontology/configurations/fixture/cross-source-analysis'
+    body = {'left_source_id': 'b', 'right_source_id': 'a'}
+    started = []
+    monkeypatch.setattr(database_routes.modeling_service, 'start_cross_source',
+                        lambda *args: started.append(args) or {'id': 'analysis'})
+    assert client.post(endpoint, json=body).status_code == 409
+    assert started == []
+    assert client.post(endpoint, json={**body, 'mode': 'reanalyze'}).status_code == 202
+    assert started == [('fixture', 'b', 'a')]
+
+    configuration['relations'] = []
+    repository.memory_candidates.clear()
+    job = repository.create_job('a', kind='cross_source', peer_datasource_id='b', domain='fixture')
+    repository.save_job({**job, 'status': 'completed'})
+    assert client.post(endpoint, json=body).status_code == 409
+    assert client.delete('/api/v1/ontology/configurations/fixture/sources/a').status_code == 200
+    assert repository.domain_cross_jobs('fixture') == []
+    assert client.post(endpoint, json=body).status_code == 202
+
+
 def test_cross_cancel_is_domain_scoped_idempotent_and_protects_publication(studio):
     client,_,repository=studio
     job=repository.create_job('a',kind='cross_source',peer_datasource_id='b',domain='fixture')

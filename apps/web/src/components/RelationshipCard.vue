@@ -15,18 +15,57 @@ const conditionText=computed(()=>props.condition||props.sourceFields.map((field,
   <article class="relation-card relationship-card">
     <div class="relation-expression"><span><strong>{{sourceTable}}</strong><code>{{sourceFields.join(', ')}}</code><small v-if="sourceLabel">{{sourceLabel}}</small></span><b>{{cardinality}}</b><span><strong>{{targetTable}}</strong><code>{{targetFields.join(', ')}}</code><small v-if="targetLabel">{{targetLabel}}</small></span></div>
     <p v-if="reason" class="relation-reason">{{reason}}</p>
-    <details v-if="conditionText" class="relation-condition"><summary>查看完整关联条件</summary><code>{{conditionText}}</code></details>
-    <div class="relation-meta"><t-tag :theme="status==='accepted'?'success':status==='pending'?'warning':'default'" variant="light">{{statusLabel}}</t-tag><t-tag v-if="optional" variant="light">可选关联</t-tag>
+
+    <div class="relation-meta">
+      <details v-if="conditionText" class="relation-condition"><summary>查看完整关联条件</summary><code>{{conditionText}}</code></details>
+      <div class="relation-badges"><t-tag :theme="status==='accepted'?'success':status==='pending'?'warning':'default'" variant="light">{{statusLabel}}</t-tag><t-tag v-if="optional" variant="light">可选关联</t-tag></div>
       <div v-if="canManage" class="relation-actions">
-        <t-button v-if="status==='accepted'||status==='pending'||!known" variant="text" :disabled="busy" @click="emit('edit')">编辑</t-button>
-        <t-button v-if="status==='accepted'" variant="text" theme="danger" :disabled="busy" @click="emit('decision','disable')">停用</t-button>
-        <template v-else-if="status==='pending'"><small v-if="!known">基数未确定，请先编辑</small><t-button variant="text" theme="primary" :loading="busy" :disabled="busy||!known" @click="emit('decision','approve')">同意</t-button><t-button variant="text" theme="danger" :disabled="busy" @click="emit('decision','reject')">拒绝</t-button></template>
-        <t-button v-else variant="text" theme="primary" :loading="busy" :disabled="busy||!known" @click="emit('decision','enable')">启用</t-button>
+        <t-button size="small" v-if="status==='accepted'||status==='pending'||!known" variant="text" :disabled="busy" @click="emit('edit')">编辑</t-button>
+        <t-button size="small" v-if="status==='accepted'" variant="text" theme="danger" :disabled="busy" @click="emit('decision','disable')">停用</t-button>
+        <template v-else-if="status==='pending'"><small v-if="!known">基数未确定，请先编辑</small><t-button size="small" variant="text" theme="primary" :loading="busy" :disabled="busy||!known" @click="emit('decision','approve')">同意</t-button><t-button size="small" variant="text" theme="danger" :disabled="busy" @click="emit('decision','reject')">拒绝</t-button></template>
+        <t-button size="small" v-else variant="text" theme="primary" :loading="busy" :disabled="busy||!known" @click="emit('decision','enable')">启用</t-button>
       </div>
     </div>
   </article>
 </template>
 
 <style scoped>
-.relation-card.relationship-card{border:1px solid var(--semora-line);border-radius:12px;padding:16px;min-width:0}.relation-expression{display:grid;grid-template-columns:minmax(0,1fr) 60px minmax(0,1fr);gap:14px;align-items:center}.relation-expression>span{min-width:0}.relation-expression strong,.relation-expression code,.relation-expression small{display:block;overflow-wrap:anywhere}.relation-expression code{margin-top:6px;color:#526b88}.relation-expression small{margin-top:6px;color:var(--semora-muted);font-size:12px}.relation-expression>b{text-align:center;color:#173b68}.relation-reason{margin:12px 0 0;color:var(--semora-muted);font-size:13px;line-height:1.6;overflow-wrap:anywhere}.relation-condition{margin-top:12px;font-size:12px;color:var(--semora-muted)}.relation-condition summary{cursor:pointer}.relation-condition code{display:block;margin-top:8px;overflow-wrap:anywhere;white-space:pre-wrap}.relation-meta{display:flex;gap:8px;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--semora-line);color:var(--semora-muted);flex-wrap:wrap}.relation-actions{margin-left:auto;display:flex;align-items:center;flex-wrap:wrap}.relation-actions small{font-size:12px}@media(max-width:600px){.relation-expression{grid-template-columns:minmax(0,1fr) 38px minmax(0,1fr);gap:8px}.relation-actions{margin-left:0}}
+.relation-card.relationship-card {
+  border-bottom: 1px solid var(--semora-line);
+  padding: 13px 12px 9px;
+  min-width: 0;
+}
+.relation-card.relationship-card:hover { background: #f8fafd; }
+.relation-expression {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  font-size: 13px;
+}
+.relation-expression > span { min-width: 0; }
+.relation-expression strong, .relation-expression code, .relation-expression small { display: block; overflow-wrap: anywhere; }
+.relation-expression code { margin-top: 4px; color: #3f6187; }
+.relation-expression small { margin-top: 3px; color: var(--semora-muted); font-size: 12px; }
+.relation-expression > b {
+  justify-self: center;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: #edf4fc;
+  color: #234b79;
+  font-size: 12px;
+}
+.relation-reason { margin: 8px 0 0; color: var(--semora-muted); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.relation-meta { display: flex; gap: 6px 14px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+.relation-condition { flex: 1 1 180px; min-width: 0; font-size: 12px; color: var(--semora-muted); }
+.relation-condition summary { cursor: pointer; width: fit-content; padding-block: 4px; }
+.relation-condition code { display: block; margin-top: 6px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.relation-badges, .relation-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.relation-actions { margin-left: auto; }
+.relation-actions small { font-size: 12px; color: var(--semora-muted); }
+@media (max-width: 600px) {
+  .relation-expression { grid-template-columns: minmax(0, 1fr) 38px minmax(0, 1fr); gap: 6px; }
+  .relation-meta { gap: 4px 8px; }
+  .relation-condition { flex-basis: 100%; }
+}
 </style>

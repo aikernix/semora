@@ -1,18 +1,65 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { api } from '../api'
+import { api, type SystemSettings } from '../api'
+import { hasRole } from '../auth'
 
 const modelForm = ref({ base_url: '', model: '', api_key: '' })
-const modelStatus = ref({ configured: false, api_key_configured: false })
+const modelKeyConfigured = ref(false)
 const modelBusy = ref(false)
 const modelMessage = ref('')
 const modelError = ref('')
+const executionFields = [
+  { key: 'query_timeout_seconds', label: '单条 SQL 执行超时', unit: '秒' },
+  { key: 'explain_timeout_seconds', label: 'EXPLAIN 预检超时', unit: '秒' },
+  { key: 'max_result_rows', label: '最大返回行数', unit: '行' },
+  { key: 'max_result_mb', label: '最大返回数据量', unit: 'MiB' },
+] as const
+const execution = ref<SystemSettings>()
+const executionBusy = ref(false)
+const executionMessage = ref('')
+const executionError = ref('')
+
+async function loadExecution() {
+  try {
+    execution.value = (await api.get<SystemSettings>('/settings')).data
+  } catch {
+    executionError.value = '读取查询执行设置失败。'
+  }
+}
+
+async function saveExecution() {
+  const settings = execution.value
+  if (!settings || !hasRole('admin')) return
+  executionMessage.value = ''
+  executionError.value = ''
+  for (const { key, label } of executionFields) {
+    const value = settings[key]
+    if (!Number.isInteger(value) || value < 1) {
+      executionError.value = `${label}须为不小于 1 的整数。`
+      return
+    }
+  }
+  executionBusy.value = true
+  try {
+    const { data } = await api.put<SystemSettings>('/settings', {
+      ...settings,
+      preview_rows: Math.min(settings.preview_rows, settings.max_result_rows),
+    })
+    execution.value = data
+    executionMessage.value = '已保存，新查询将使用这些设置。'
+  } catch (error: any) {
+    const detail = error?.response?.data?.detail
+    executionError.value = typeof detail === 'string' ? detail : '保存查询执行设置失败。'
+  } finally {
+    executionBusy.value = false
+  }
+}
 
 async function loadModel() {
   const { data } = await api.get('/settings/model')
   modelForm.value.base_url = data.base_url
   modelForm.value.model = data.model
-  modelStatus.value = data
+  modelKeyConfigured.value = Boolean(data.api_key_configured)
 }
 async function configureModel(testOnly: boolean) {
   modelBusy.value = true
@@ -22,7 +69,8 @@ async function configureModel(testOnly: boolean) {
       await api.post('/settings/model/test', modelForm.value, { timeout: 60_000 })
       modelMessage.value = '连接成功，模型支持结构化 JSON 输出和 Agent 工具调用。请保存配置以启用。'
     } else {
-      modelStatus.value = (await api.put('/settings/model', modelForm.value)).data
+      const { data } = await api.put('/settings/model', modelForm.value)
+      modelKeyConfigured.value = Boolean(data.api_key_configured)
       modelForm.value.api_key = ''
       modelMessage.value = '模型配置已保存并立即生效。API Key 不会返回浏览器。'
     }
@@ -30,26 +78,31 @@ async function configureModel(testOnly: boolean) {
   finally { modelBusy.value = false }
 }
 
-onMounted(loadModel)
+onMounted(() => {
+  void loadModel()
+  void loadExecution()
+})
 </script>
 
 <template>
-  <div class="page">
+  <div class="page management-page settings-page">
     <div class="page-header">
       <div>
         <h1>系统设置</h1>
-        <p>配置基础模型，用于需求理解、知识辅助分析和 SQL 生成。</p>
+        <p>配置基础模型和查询执行限制。</p>
       </div>
     </div>
 
-    <section id="model" class="panel model-config">
-      <div class="panel-title">基础模型配置 <t-tag :theme="modelStatus.configured ? 'success' : 'warning'" variant="light">{{ modelStatus.configured ? '已配置' : '未配置' }}</t-tag></div>
-      <div class="form">
+    <section id="model" class="settings-section model-config">
+      <div class="settings-intro">
+        <h2>基础模型配置</h2>
         <p class="hint">用于需求理解、逐轮澄清、知识研究和 SQL 说明。请配置支持结构化 JSON 输出的模型。</p>
+      </div>
+      <div class="form">
         <div class="model-fields">
           <label>API 地址（OpenAI 兼容）<t-input v-model="modelForm.base_url" placeholder="https://your-provider.example/v1" /></label>
           <label>模型名称<t-input v-model="modelForm.model" placeholder="填写服务商提供的模型 ID" /></label>
-          <label>API Key<t-input v-model="modelForm.api_key" type="password" autocomplete="new-password" :placeholder="modelStatus.api_key_configured ? '已保存；留空保留原 Key' : '输入 API Key'" /></label>
+          <label>API Key<t-input v-model="modelForm.api_key" type="password" autocomplete="new-password" :placeholder="modelKeyConfigured ? '已保存；留空保留原 Key' : '输入 API Key'" /></label>
         </div>
         <t-alert v-if="modelError" theme="error" :message="modelError" />
         <t-alert v-if="modelMessage" theme="success" :message="modelMessage" />
@@ -57,10 +110,76 @@ onMounted(loadModel)
       </div>
     </section>
 
+    <section id="query-execution" class="settings-section">
+      <div class="settings-intro">
+        <h2>查询执行设置</h2>
+        <p class="hint">超时按单条 SQL 或单次预检计算。超过行数上限时结果会截断，超过数据量上限时查询会报错。</p>
+      </div>
+      <form class="form" @submit.prevent="saveExecution">
+        <div v-if="execution" class="execution-fields">
+          <label v-for="{ key, label, unit } in executionFields" :key="key">
+            {{ label }}
+            <span class="number-field">
+              <input v-model.number="execution[key]" :aria-label="label" :aria-description="unit" type="number"
+                     min="1" step="1" required
+                     :disabled="!hasRole('admin') || executionBusy" />
+              <span aria-hidden="true">{{ unit }}</span>
+            </span>
+          </label>
+        </div>
+        <t-alert v-if="executionError" theme="error" :message="executionError" />
+        <t-alert v-if="executionMessage" theme="success" :message="executionMessage" />
+        <div v-if="hasRole('admin')" class="model-actions">
+          <t-button type="submit" theme="primary" :loading="executionBusy"
+                    :disabled="!execution">保存查询执行设置</t-button>
+        </div>
+      </form>
+    </section>
+
   </div>
 </template>
 
 <style scoped>
-.model-config{margin-bottom:18px;scroll-margin-top:20px}.model-fields{display:grid;grid-template-columns:1.5fr 1fr 1fr;gap:16px}.model-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:14px}.model-config .hint{padding:0;margin-bottom:18px}@media(max-width:1100px){.model-fields{grid-template-columns:1fr}}
-.policy-meta{display:grid;grid-template-columns:2fr .7fr 1.4fr 1fr;margin-bottom:16px}.policy-meta>div{padding:15px 18px;border-right:1px solid var(--semora-line)}.policy-meta>div:last-child{border-right:0}.policy-meta small,.policy-meta strong,.policy-meta code{display:block}.policy-meta small{color:var(--semora-muted);margin-bottom:7px}.policy-meta code{color:var(--semora-green-dark);font-size:12px}.settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.form{padding:20px}.form label{display:block;margin-bottom:19px;color:var(--semora-muted)}.form label>.t-select,.form label>.t-input,.form label>.t-input-number{display:block;margin-top:8px;width:100%}.form.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}.checks{display:flex;flex-direction:column;gap:10px;margin-top:10px}.service-list>div{display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid var(--semora-line)}.switch-row{display:flex!important;justify-content:space-between;align-items:center}.hint{color:var(--semora-muted);font-size:12px;padding:0 20px 16px;margin:0}@media(max-width:1000px){.settings-grid{grid-template-columns:1fr}.policy-meta{grid-template-columns:1fr 1fr}}
+.settings-page {
+  --management-blue: #0c52a4;
+  font-family: Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+  padding-inline: clamp(24px, 2.5vw, 40px);
+}
+.settings-page > .page-header { margin-bottom: 30px; }
+.settings-page :deep(.t-button), .settings-page :deep(.t-input__inner) { font-family: inherit; }
+.settings-section {
+  display: grid;
+  grid-template-columns: minmax(160px, 210px) minmax(0, 720px);
+  gap: 32px;
+  max-width: 980px;
+  padding: 30px 0;
+  border-top: 1px solid var(--semora-line);
+}
+.model-config { border-top: 0; padding-top: 4px; }
+.settings-intro h2 { margin: 0; font-size: 20px; line-height: 1.4; }
+.settings-intro .hint { margin: 8px 0 0; font-size: 13px; line-height: 1.7; color: var(--semora-muted); }
+.model-fields, .execution-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 20px; }
+.model-fields label:first-child { grid-column: 1 / -1; }
+.form label { display: grid; gap: 7px; font-size: 14px; }
+.form .t-alert { margin-top: 12px; }
+.execution-fields input {
+  display: block;
+  width: 100%;
+  height: 36px;
+  padding: 0 62px 0 12px;
+  border: 1px solid var(--td-border-level-2-color);
+  border-radius: var(--td-radius-default);
+  background: var(--td-bg-color-container);
+  color: var(--td-text-color-primary);
+}
+.execution-fields input:focus-visible { outline: 2px solid var(--td-brand-color); outline-offset: 1px; }
+.number-field { position: relative; }
+.number-field > span { position: absolute; inset-inline-end: 12px; top: 50%; transform: translateY(-50%); color: var(--semora-muted); pointer-events: none; font-size: 12px; }
+.model-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+@media (max-width: 760px) {
+  .settings-section { grid-template-columns: 1fr; gap: 18px; }
+}
+@media (max-width: 480px) {
+  .model-fields, .execution-fields { grid-template-columns: 1fr; }
+}
 </style>

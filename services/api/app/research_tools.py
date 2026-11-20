@@ -1,5 +1,6 @@
-"""Tools available to the requirement-understanding Agent, without SQL execution."""
+"""Tools available to the requirement-understanding Agent."""
 
+import asyncio
 from functools import wraps
 import json
 import re
@@ -27,6 +28,8 @@ class ResearchTools:
         self.task_guard = None
         self.phase = ""
         self.phase_id = self.iteration = self.role_iteration = None
+        self.value_probes = {}
+        self.value_probe_lock = asyncio.Lock()
 
     def start_phase(self, label):
         self.phase = label
@@ -153,11 +156,49 @@ class ResearchTools:
             )
 
         functions = [request_context]
+        if self.context_state and self.context_state["packet"].get("schemas"):
+            functions.append(self.inspect_field_values)
         if self.run.evidence:
             functions.append(read_evidence)
         if self.ontology.get("knowledgeBaseIds"):
             functions.extend(self.knowledge_tools())
         return [self._tool(f) for f in functions]
+
+    async def inspect_field_values(
+        self,
+        object_name: str,
+        field: str,
+        reason: Annotated[str, Field(min_length=1, max_length=300)],
+    ) -> dict:
+        """核实已选字段的实际标签、特殊值或空值；用户要求检查某类记录时先用此工具。只返回有限去重值，不接受 SQL。"""
+        from .field_value_probe import inspect_values
+
+        if not reason.strip():
+            raise ValueError("请说明必须核实的取值及其对本次结果的影响")
+        async with self.value_probe_lock:
+            if self.task_guard:
+                self.task_guard()
+            key = (object_name, field)
+            if key in self.value_probes:
+                return self.value_probes[key]
+            if len(self.value_probes) >= 2:
+                return {"available": False, "message": "本阶段字段取值探查预算已用完"}
+            self.value_probes[key] = {"available": False, "message": "此字段探查未完成，不重复执行"}
+            result = await inspect_values(
+                self.workflow, self.run, self.ontology, self.context_state["packet"], object_name, field
+            )
+            if self.task_guard:
+                self.task_guard()
+            self.value_probes[key] = result
+            if result["available"]:
+                observations = self.context_state["packet"].setdefault("field_value_observations", [])
+                observations.append(result)
+                self.event("context.field_values.observed", {
+                    "object": object_name, "field": field,
+                    "value_count": len(result["values"]), "complete": result["complete"],
+                    "summary": "已只读核实字段取值",
+                })
+            return result
 
     def remember_page(self, kb_id, page):
         """Make newly retrieved knowledge available to the following SQL role."""

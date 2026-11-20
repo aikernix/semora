@@ -73,3 +73,28 @@ def test_session_list_includes_latest_status_without_changing_creation_order(mon
     assert [row["id"] for row in rows] == ["newer", "older"]
     assert rows[0]["latest_status"] is None
     assert rows[1]["latest_status"] == "completed"
+
+
+def test_delete_query_only_archives_selected_inactive_session(monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import main
+    from app.store import Store
+
+    monkeypatch.delenv("METADATA_DATABASE_URL", raising=False)
+    monkeypatch.setenv("AUTH_REQUIRED", "true")
+    store = Store()
+    monkeypatch.setattr(main, "store", store)
+    user = principal("alice", "analyst")
+    monkeypatch.setattr(main.oidc_verifier, "verify", lambda _: user)
+    target = store.create_session("Sales", "demo", "alice")
+    other = store.create_session("Other", "demo", "bob")
+    active = QueryRun(session_id=target.id, question="Sales", status="executing")
+    store.add_run(active)
+    client = TestClient(main.app)
+    assert client.delete(f"/api/v1/sessions/{other.id}").status_code == 404
+    assert client.delete(f"/api/v1/sessions/{target.id}").status_code == 409
+    active.status = "completed"
+    assert client.delete(f"/api/v1/sessions/{target.id}").json() == {"deleted": True}
+    assert client.get(f"/api/v1/sessions/{target.id}/runs").status_code == 404
+    assert active.id not in store.runs
+    assert store.sessions[other.id] == other

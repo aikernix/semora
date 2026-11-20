@@ -5,6 +5,8 @@ from typing import Any, Literal
 from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .query_limits import EXPLAIN_TIMEOUT_DEFAULT_SECONDS, QUERY_TIMEOUT_DEFAULT_SECONDS, RESULT_DEFAULT_MIB, RESULT_DEFAULT_ROWS
+
 
 def utc_now():
     return datetime.now(timezone.utc)
@@ -463,9 +465,10 @@ class SQLArtifact(BaseModel):
 class SystemSettings(BaseModel):
     """Bounded query runtime settings; no retired approval/reviewer switches."""
 
-    query_timeout_seconds: int = Field(default=30, ge=1, le=30)
-    max_result_rows: int = Field(default=1000, ge=1, le=1000)
-    max_result_mb: int = Field(default=10, ge=1, le=10)
+    query_timeout_seconds: int = Field(default=QUERY_TIMEOUT_DEFAULT_SECONDS, ge=1)
+    explain_timeout_seconds: int = Field(default=EXPLAIN_TIMEOUT_DEFAULT_SECONDS, ge=1)
+    max_result_rows: int = Field(default=RESULT_DEFAULT_ROWS, ge=1)
+    max_result_mb: int = Field(default=RESULT_DEFAULT_MIB, ge=1)
     preview_rows: int = Field(default=100, ge=1, le=1000)
     version: int = Field(default=1, ge=1)
     policy_version: str = ""

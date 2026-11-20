@@ -395,6 +395,12 @@ async def analyse(workflow, run, question, ontology, scope):
         understood = parse(value)
         run.agent_memory["analyst"] = memory
     report = QueryUnderstanding(**understood.model_dump(mode="json"))
+    if policy["business_allowed"] and not run.user_answers:
+        from .field_value_probe import numeric_grouping_question
+
+        grouping = numeric_grouping_question(question, report, saved["packet"])
+        if grouping:
+            report.questions.append(grouping)
     from .query_relation_repair import supplement
     await supplement(workflow, run, question, ontology, scope, saved, report)
     route_business_definitions(report)

@@ -76,6 +76,7 @@ class DataSourceRepository:
                 o.connection_metadata,o.capabilities,o.probes,o.observations,o.reuse_receipt
                 FROM semora_meta.datasources d
                 LEFT JOIN semora_meta.datasource_capability_observations o ON o.datasource_id=d.id
+                WHERE d.status <> 'deleted'
                 ORDER BY d.created_at""")
             for row in cursor.fetchall():
                 stored_scan = dict(row[8] or {})
@@ -165,11 +166,14 @@ class DataSourceRepository:
                         name=excluded.name,type=excluded.type,secret_ref=excluded.secret_ref,
                         status=excluded.status,access=excluded.access,objects=excluded.objects,
                         last_scan_at=excluded.last_scan_at,scan_result=excluded.scan_result,
-                        capability_profile_id=excluded.capability_profile_id""",
+                        capability_profile_id=excluded.capability_profile_id
+                    WHERE semora_meta.datasources.status <> 'deleted'""",
                     (item.id, item.name, item.type, item.secret_ref, item.status, item.access,
                      item.objects, item.last_scan_at, json.dumps(scan, ensure_ascii=False),
                      item.created_at, item.capability_profile_id),
                 )
+                if cursor.rowcount == 0:
+                    raise KeyError("数据源已删除")
                 write_observations(cursor, item.id, state)
                 if tables is not None and self._table_digests.get(item.id) != table_digest:
                     write_tables(cursor, item.id, tables, item.last_scan_at)
@@ -185,6 +189,10 @@ class DataSourceRepository:
         return self.save(DataSourceRecord(
             id=str(uuid4()), name=name, type=datasource_type, secret_ref=secret_ref,
         ))
+
+    def evict(self, datasource_id: str) -> None:
+        self._items.pop(datasource_id, None)
+        self._table_digests.pop(datasource_id, None)
 
     def list(self) -> list[DataSourceRecord]:
         return sorted(self._items.values(), key=lambda item: item.created_at)
