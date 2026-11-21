@@ -143,6 +143,9 @@ services:
       WEKNORA_AGENT_ID: ${WEKNORA_AGENT_ID:-builtin-wiki-researcher}
       WEKNORA_AGENT_TIMEOUT_SECONDS: ${WEKNORA_AGENT_TIMEOUT_SECONDS:-180}
       ONTOLOGY_URL: http://ontology:8081
+      OFFLINE_MODELING_ENABLED: "${OFFLINE_MODELING_ENABLED:-true}"
+      OFFLINE_MODELING_URL: "${OFFLINE_MODELING_URL:-http://offline-modeling:8015}"
+      OFFLINE_ACCESS_PASSWORD: ${OFFLINE_ACCESS_PASSWORD:-}
       KNOWLEDGE_UPLOAD_MAX_BYTES: ${KNOWLEDGE_UPLOAD_MAX_BYTES:-26214400}
       OIDC_ISSUER: ${OIDC_ISSUER:-}
       OIDC_JWKS_URL: ${OIDC_JWKS_URL:-}
@@ -203,6 +206,7 @@ services:
         VITE_KEYCLOAK_URL: ${VITE_KEYCLOAK_URL:-http://localhost:8088}
         VITE_KEYCLOAK_REALM: semora
         VITE_KEYCLOAK_CLIENT_ID: semora-web
+        VITE_OFFLINE_MODELING_ENABLED: "${OFFLINE_MODELING_ENABLED:-true}"
     depends_on:
       api:
         condition: service_healthy
@@ -210,7 +214,29 @@ services:
     ports:
       - "5173:8080"
 
+  offline-modeling:
+    build: ./extensions/offline-modeling
+    environment:
+      OFFLINE_MODEL_URL: ${OFFLINE_MODEL_URL:-}
+      OFFLINE_MODEL_NAME: ${OFFLINE_MODEL_NAME:-}
+      OFFLINE_MODEL_KEY: ${OFFLINE_MODEL_KEY:-}
+      OFFLINE_ACCESS_PASSWORD: ${OFFLINE_ACCESS_PASSWORD:-}
+      OFFLINE_REQUIRE_ACCESS_PASSWORD: "${AUTH_REQUIRED:-false}"
+      LLM_NO_DELIVERY_SECONDS: "${LLM_NO_DELIVERY_SECONDS:-60}"
+      LLM_STREAM_ENABLED: "${LLM_STREAM_ENABLED:-true}"
+      LLM_STREAM_INCLUDE_USAGE: "${LLM_STREAM_INCLUDE_USAGE:-true}"
+      LLM_TIMEOUT_SECONDS: "${LLM_TIMEOUT_SECONDS:-300}"
+      LLM_REQUEST_RETRIES: "${LLM_REQUEST_RETRIES:-1}"
+      LLM_ENABLE_THINKING: "${LLM_ENABLE_THINKING:-false}"
+      RELATIONSHIP_NO_DELIVERY_SECONDS: "${RELATIONSHIP_NO_DELIVERY_SECONDS:-300}"
+      RELATIONSHIP_MODEL_CONCURRENCY: "${RELATIONSHIP_MODEL_CONCURRENCY:-3}"
+      RELATIONSHIP_RESPONSE_FORMAT: "${RELATIONSHIP_RESPONSE_FORMAT:-json_object}"
+      RELATIONSHIP_THINKING_MODE: "${RELATIONSHIP_THINKING_MODE:-inherit}"
+    volumes:
+      - offline-modeling-data:/data
+
 volumes:
+  offline-modeling-data:
   relationship-checkpoints:
   executor-config:
   semora-postgres:

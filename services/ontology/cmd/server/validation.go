@@ -19,7 +19,7 @@ func validateOntology(ontology Ontology) []ValidationIssue {
 	if strings.TrimSpace(ontology.Version) == "" {
 		issues = append(issues, ValidationIssue{"version", "版本不能为空"})
 	}
-	if strings.TrimSpace(ontology.DataSourceID) == "" {
+	if strings.TrimSpace(ontology.DataSourceID) == "" && (len(ontology.OfflineSourceIDs) == 0 || len(ontology.Objects) > 0) {
 		issues = append(issues, ValidationIssue{"dataSourceId", "必须绑定已登记的数据源"})
 	}
 	if len(ontology.KnowledgeBaseIDs) > 0 {
@@ -29,12 +29,30 @@ func validateOntology(ontology Ontology) []ValidationIssue {
 			}
 		}
 	}
-	if len(ontology.Objects) == 0 && len(ontology.SourcePackageRefs) == 0 {
+	if len(ontology.Objects) == 0 && len(ontology.SourcePackageRefs) == 0 && len(ontology.OfflineSourceIDs) == 0 {
 		issues = append(issues, ValidationIssue{"objects", "至少需要一个对象类"})
+	}
+	offline := map[string]bool{}
+	for i, id := range ontology.OfflineSourceIDs {
+		if len(id) != 32 || strings.Trim(id, "0123456789abcdef") != "" || offline[id] {
+			issues = append(issues, ValidationIssue{fmt.Sprintf("offlineSourceIds[%d]", i), "离线数据源标识无效或重复"})
+		}
+		offline[id] = true
+	}
+	if offline[ontology.DataSourceID] {
+		issues = append(issues, ValidationIssue{"dataSourceId", "离线数据源不能作为执行连接"})
+	}
+	for index, ref := range ontology.SourcePackageRefs {
+		if offline[ref.DataSourceID] {
+			issues = append(issues, ValidationIssue{fmt.Sprintf("sourcePackageRefs[%d]", index), "离线数据源不能作为在线本体包"})
+		}
 	}
 	objects := map[string]ObjectClass{}
 	for index, object := range ontology.Objects {
 		path := fmt.Sprintf("objects[%d]", index)
+		if offline[object.DataSourceID] {
+			issues = append(issues, ValidationIssue{path + ".dataSourceId", "离线数据源不能作为执行连接"})
+		}
 		if object.Name == "" || object.Label == "" || object.Table == "" {
 			issues = append(issues, ValidationIssue{path, "对象名、中文标签和物理表映射必须完整"})
 		}
@@ -147,6 +165,8 @@ func validateOntology(ontology Ontology) []ValidationIssue {
 
 func canonicalOntology(input Ontology) Ontology {
 	result := input
+	result.OfflineSourceIDs = append([]string(nil), input.OfflineSourceIDs...)
+	sort.Strings(result.OfflineSourceIDs)
 	result.Objects = append([]ObjectClass(nil), input.Objects...)
 	result.Relations = append([]RelationClass(nil), input.Relations...)
 	result.Metrics = append([]Metric(nil), input.Metrics...)

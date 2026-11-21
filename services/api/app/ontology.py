@@ -56,7 +56,7 @@ class OntologyCoreClient:
         # Go encodes nil slices as null. Consumers use collection semantics even
         # when a domain has no formal metrics, relations or knowledge bindings.
         ontology = dict(value)
-        for key in ('objects', 'relations', 'metrics', 'knowledgeBaseIds', 'defaultFilters', 'sourcePackageRefs'):
+        for key in ('objects', 'relations', 'metrics', 'knowledgeBaseIds', 'defaultFilters', 'sourcePackageRefs', 'offlineSourceIds'):
             items = ontology.get(key)
             if items is not None and not isinstance(items, list):
                 raise OntologyCoreError(f'本体字段 {key} 必须是数组')
@@ -84,6 +84,9 @@ class OntologyCoreClient:
 
     async def unbind_source(self, domain: str, source_id: str) -> dict[str, Any]:
         return self._normalize_collections(await self._request('DELETE',f'/api/v1/ontology/configurations/{domain}/sources/{source_id}'))
+
+    async def bind_offline_source(self, domain: str, source_id: str) -> dict[str, Any]:
+        return self._normalize_collections(await self._request('POST',f'/api/v1/ontology/configurations/{domain}/offline-sources/{source_id}'))
 
     async def update_source_package(self, value: dict[str, Any]) -> dict[str, Any]:
         return await self._request('PUT','/api/v1/ontology/source-packages',json=value)

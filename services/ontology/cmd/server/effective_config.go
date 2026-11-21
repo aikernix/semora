@@ -40,6 +40,9 @@ func (s *Store) createDomain(ctx context.Context, domain, name string) (Ontology
 func effectiveOntology(input, previous Ontology) (Ontology, error) {
 	// Knowledge bindings have their own endpoint; an ontology editor cannot overwrite them.
 	input.KnowledgeBaseIDs = previous.KnowledgeBaseIDs
+	if input.OfflineSourceIDs == nil {
+		input.OfflineSourceIDs = previous.OfflineSourceIDs
+	}
 	input.Version = bumpPatchVersion(previous.Version)
 	input.Objects = append([]ObjectClass(nil), input.Objects...)
 	for i := range input.Objects {
@@ -55,6 +58,39 @@ func effectiveOntology(input, previous Ontology) (Ontology, error) {
 		input.DataSourceID = input.Objects[0].DataSourceID
 	}
 	return input, nil
+}
+
+func (s *Store) bindOfflineSource(ctx context.Context, domain, id string) (Ontology, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Ontology{}, err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `LOCK TABLE ontology_core.drafts IN ROW EXCLUSIVE MODE`); err != nil {
+		return Ontology{}, err
+	}
+	var raw []byte
+	if err = tx.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1 AND deleted_at IS NULL FOR UPDATE`, domain).Scan(&raw); err != nil {
+		return Ontology{}, err
+	}
+	var draft Ontology
+	if err = json.Unmarshal(raw, &draft); err != nil {
+		return Ontology{}, err
+	}
+	for _, existing := range draft.OfflineSourceIDs {
+		if existing == id {
+			return s.resolveReferences(ctx, tx, draft)
+		}
+	}
+	draft.OfflineSourceIDs = append(draft.OfflineSourceIDs, id)
+	value, err := s.saveEffectiveTx(ctx, tx, draft, true)
+	if err != nil {
+		return Ontology{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return Ontology{}, err
+	}
+	return value, nil
 }
 
 func insertEffectiveSnapshot(ctx context.Context, tx *sql.Tx, snapshot *Snapshot) error {
@@ -75,7 +111,7 @@ func (s *Store) saveEffective(ctx context.Context, input Ontology) (Ontology, er
 		return Ontology{}, err
 	}
 	defer tx.Rollback()
-	value, err := s.saveEffectiveTx(ctx, tx, input)
+	value, err := s.saveEffectiveTx(ctx, tx, input, false)
 	if err != nil {
 		return Ontology{}, err
 	}
@@ -84,7 +120,7 @@ func (s *Store) saveEffective(ctx context.Context, input Ontology) (Ontology, er
 	}
 	return value, nil
 }
-func (s *Store) saveEffectiveTx(ctx context.Context, tx *sql.Tx, input Ontology) (Ontology, error) {
+func (s *Store) saveEffectiveTx(ctx context.Context, tx *sql.Tx, input Ontology, editOfflineBindings bool) (Ontology, error) {
 	if _, err := tx.ExecContext(ctx, `LOCK TABLE ontology_core.drafts IN ROW EXCLUSIVE MODE`); err != nil {
 		return Ontology{}, err
 	}
@@ -96,8 +132,14 @@ func (s *Store) saveEffectiveTx(ctx context.Context, tx *sql.Tx, input Ontology)
 	if err := json.Unmarshal(encoded, &previous); err != nil {
 		return Ontology{}, err
 	}
+	if !editOfflineBindings {
+		input.OfflineSourceIDs = previous.OfflineSourceIDs
+	}
 	value, err := effectiveOntology(input, previous)
 	if err != nil {
+		return Ontology{}, err
+	}
+	if err = checkSourceBindingChange(previous, value); err != nil {
 		return Ontology{}, err
 	}
 	if err = ensureDatasourceBindings(ctx, tx, value); err != nil {
@@ -132,6 +174,49 @@ func (s *Store) saveEffectiveTx(ctx context.Context, tx *sql.Tx, input Ontology)
 	return snapshot.Ontology, nil
 }
 
+func onlineSourceIDs(value Ontology) map[string]bool {
+	ids := map[string]bool{}
+	if value.DataSourceID != "" {
+		ids[value.DataSourceID] = true
+	}
+	for _, ref := range value.SourcePackageRefs {
+		if ref.DataSourceID != "" {
+			ids[ref.DataSourceID] = true
+		}
+	}
+	for _, obj := range value.Objects {
+		if obj.DataSourceID != "" {
+			ids[obj.DataSourceID] = true
+		}
+	}
+	return ids
+}
+
+func checkSourceBindingChange(previous, value Ontology) error {
+	online := onlineSourceIDs(value)
+	if len(value.OfflineSourceIDs) == 0 || len(value.OfflineSourceIDs) == 1 && len(online) == 0 {
+		return nil
+	}
+	conflict := &validationError{issues: []ValidationIssue{{"offlineSourceIds", "业务域可绑定一个离线数据源，或绑定在线数据源。请先解除不兼容的绑定。"}}}
+	priorOnline := onlineSourceIDs(previous)
+	for id := range online {
+		if !priorOnline[id] {
+			return conflict
+		}
+	}
+	priorOffline := map[string]bool{}
+	for _, id := range previous.OfflineSourceIDs {
+		priorOffline[id] = true
+	}
+	for _, id := range value.OfflineSourceIDs {
+		if !priorOffline[id] {
+			return conflict
+		}
+	}
+	// Allow resolving legacy mixed bindings without removing them on upgrade.
+	return nil
+}
+
 func (s *Store) bindEffectiveKnowledgeBases(ctx context.Context, domain string, ids []string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -156,7 +241,7 @@ func (s *Store) bindEffectiveKnowledgeBases(ctx context.Context, domain string, 
 	if err != nil {
 		return err
 	}
-	if len(effective.Objects) > 0 || len(effective.SourcePackageRefs) > 0 {
+	if len(effective.Objects) > 0 || len(effective.SourcePackageRefs) > 0 || len(effective.OfflineSourceIDs) > 0 {
 		snapshot, err := preparePublication(effective)
 		if err != nil {
 			return err

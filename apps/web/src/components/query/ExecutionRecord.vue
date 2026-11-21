@@ -22,6 +22,7 @@ const evidence = computed(() => [...new Map((props.run.evidence || []).map((e: a
 const labels = computed(() => props.run.plan?.sql_program?.steps?.at(-1)?.output_labels || {})
 const failure = computed(() => sqlFailure(props.run))
 function stepStatus(name: string, artifact: any) {
+  if (artifact?.compilation?.validation?.method === 'offline_schema') return 'SQL 已生成 · 离线数据源，未执行'
   if (failure.value && props.run.plan?.sql_program?.steps?.[failure.value.step_index - 1]?.name === name) return `执行失败 · ${failure.value.message}`
   const event = [...props.run.events].reverse().find(e => ['source.step.completed', 'source.step.skipped'].includes(e.event) && e.data.step === name)
   if (event) return event.event === 'source.step.skipped' ? '已跳过 · 前置集合为空' : `已执行 · 返回 ${event.data.row_count ?? 0} 条`

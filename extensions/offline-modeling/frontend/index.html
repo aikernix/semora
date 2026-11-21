@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Semora · 离线数据源</title><link rel="stylesheet" href="./assets/style.css"><script type="module" src="./assets/app.js"></script></head>
+<body>
+<header><div><h1>离线数据源</h1><p>从 DDL 建立表目录，结合技术资料管理表间关联。</p></div><button id="new">导入离线数据源</button></header>
+<main><aside><h2>数据源</h2><nav id="sources"></nav></aside><section id="detail" aria-live="polite"><p>选择数据源查看表结构和关系。</p></section></main>
+<p id="notice" role="status"></p>
+<dialog id="import-dialog"><form id="import-form">
+<h2>导入离线数据源</h2>
+<label>名称<input name="name" required maxlength="120"></label>
+<div class="row"><label>数据库<select name="product" aria-label="数据库" required></select></label><label id="mode-label">兼容模式<select name="compatibility_mode" aria-label="兼容模式" required></select></label><label>版本（可选）<input name="version" placeholder="例如 8.0.36"></label></div>
+<label>DDL 文件<input type="file" name="ddl" accept=".sql,.ddl" required></label>
+<label>资料文件（可选）<input type="file" name="documents" accept=".xlsx,.docx,.txt,.sql" multiple></label>
+<p>确认导入后，文件与表结构固定。关联关系可继续维护。</p>
+<p class="warning" role="alert"></p>
+<div class="actions"><button class="secondary" type="button" data-close>取消</button><button type="submit">确定</button></div>
+</form></dialog>
+<dialog id="relation-dialog"><form id="relation-form">
+<h2>编辑关联关系</h2><div class="row"><label>来源表<select name="source"></select></label><label>目标表<select name="target"></select></label></div>
+<div id="pairs"></div><button id="add-pair" type="button" class="secondary">添加字段对</button>
+<label>基数<select name="cardinality"><option>unknown</option><option>N:1</option><option>1:N</option><option>1:1</option><option>N:N</option></select></label>
+<label>附加条件（可选）<input name="condition" placeholder="source.字段 = 常量"></label>
+<p class="warning" role="alert"></p>
+<div class="actions"><button class="secondary" type="button" data-close>取消</button><button type="submit">保存生效</button></div>
+</form></dialog>
+</body></html>

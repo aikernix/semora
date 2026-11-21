@@ -46,6 +46,8 @@ export function analysisOutcomes(events: RunEvent[]): AnalysisOutcome[] {
     }
     if (e.event === 'knowledge.prepared' && d.knowledge_pages > 0) {
       add(e, '取得辅助定义', `取得 ${d.knowledge_pages} 个相关知识页面，已用于选择本体对象`)
+    } else if (e.event === 'knowledge.prepared' && d.knowledge_bases > 0) {
+      add(e, '检索业务资料', '本次未引用知识库页面')
     } else if (e.event === 'query.relations.published') {
       add(e, '自动补齐对应关系', text(d.summary))
     } else if (e.event === 'query.relations.finished' && d.status !== 'published') {
@@ -76,6 +78,8 @@ export function analysisOutcomes(events: RunEvent[]): AnalysisOutcome[] {
       if (questions.length) add(e, '需要你补充', questions.join('；'), (req.clarifications || []).map((q: any) => q.reason).filter(Boolean))
     } else if (e.event === 'result.summary.completed') {
       add(e, d.mode === 'model' ? '形成业务结论' : '整理基本结果说明', text(d.summary))
+    } else if (e.event === 'sql.delivery.completed') {
+      add(e, '生成查询语句', text(d.summary))
     } else if (e.event === 'source.step.retry') {
       add(e, '重试超时查询', text(d.summary))
     } else if (e.event === 'source.step.completed') {

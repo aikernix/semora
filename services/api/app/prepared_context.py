@@ -119,6 +119,9 @@ def input_binding(run, ontology, scope):
         o.get("dataSourceId") or ontology.get("dataSourceId")
         for o in authorized_objects(run, ontology).values()
     }:
+        if source_id == getattr(run,'offline_source_id',None) and ontology.get('offlineProfile'):
+            scans[source_id] = ontology['offlineProfile']
+            continue
         try:
             source = datasource_service.repository.get(source_id)
             scans[source_id] = {
@@ -255,11 +258,13 @@ def context_packet(workflow, run, ontology, names):
         objects.append({"object": compact_definition(obj)})
         source_id = obj.get("dataSourceId") or ontology.get("dataSourceId")
         try:
-            source = datasource_service.repository.get(source_id)
             table = obj.get("table", "")
             def table_id(t):
                 return t.get("id") or ".".join(str(t.get(k)) for k in ("catalog","schema","name") if t.get(k))
-            scanned = source.scan_result.get("tables", [])
+            if source_id == getattr(run,'offline_source_id',None) and ontology.get('offlineProfile'):
+                scanned = ontology['offlineTables']
+            else:
+                scanned = datasource_service.repository.get(source_id).scan_result.get("tables", [])
             matches = [t for t in scanned if table_id(t) == table]
             if not matches and "." not in table:
                 matches = [t for t in scanned if (t.get("name") or t.get("table_name")) == table]

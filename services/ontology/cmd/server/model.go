@@ -80,6 +80,7 @@ type Ontology struct {
 	Metrics           []Metric           `json:"metrics"`
 	DefaultFilters    []DefaultFilter    `json:"defaultFilters,omitempty"`
 	SourcePackageRefs []SourcePackageRef `json:"sourcePackageRefs,omitempty"`
+	OfflineSourceIDs  []string           `json:"offlineSourceIds,omitempty"`
 }
 
 type Snapshot struct {
@@ -94,14 +95,15 @@ type Snapshot struct {
 }
 
 type DraftSummary struct {
-	Domain    string    `json:"domain"`
-	Name      string    `json:"name"`
-	Version   string    `json:"version"`
-	Status    string    `json:"status"`
-	Objects   int       `json:"objects"`
-	Relations int       `json:"relations"`
-	Metrics   int       `json:"metrics"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	Domain           string    `json:"domain"`
+	Name             string    `json:"name"`
+	Version          string    `json:"version"`
+	Status           string    `json:"status"`
+	Objects          int       `json:"objects"`
+	Relations        int       `json:"relations"`
+	Metrics          int       `json:"metrics"`
+	UpdatedAt        time.Time `json:"updatedAt"`
+	OfflineSourceIDs []string  `json:"offlineSourceIds,omitempty"`
 }
 
 type Candidate struct {

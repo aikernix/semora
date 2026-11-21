@@ -144,7 +144,21 @@ func (s *Store) saveDraft(ctx context.Context, ontology Ontology) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `LOCK TABLE ontology_core.drafts IN ROW EXCLUSIVE MODE`); err != nil {
+	if _, err = tx.ExecContext(ctx, `LOCK TABLE ontology_core.drafts IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+		return err
+	}
+	var previous Ontology
+	var raw []byte
+	err = tx.QueryRowContext(ctx, `SELECT payload FROM ontology_core.drafts WHERE domain=$1 AND deleted_at IS NULL FOR UPDATE`, ontology.Domain).Scan(&raw)
+	if err == nil {
+		if err = json.Unmarshal(raw, &previous); err != nil {
+			return err
+		}
+	} else if !isNotFound(err) {
+		return err
+	}
+	ontology.OfflineSourceIDs = previous.OfflineSourceIDs
+	if err = checkSourceBindingChange(previous, ontology); err != nil {
 		return err
 	}
 	if err = ensureDatasourceBindings(ctx, tx, ontology); err != nil {
@@ -217,7 +231,7 @@ func (s *Store) listDrafts(ctx context.Context) ([]DraftSummary, error) {
 		if len(ontology.Objects) == 0 {
 			status = "unconfigured"
 		}
-		result = append(result, DraftSummary{domain, name, version, status, len(ontology.Objects), len(ontology.Relations), len(ontology.Metrics), updatedAt})
+		result = append(result, DraftSummary{domain, name, version, status, len(ontology.Objects), len(ontology.Relations), len(ontology.Metrics), updatedAt, ontology.OfflineSourceIDs})
 	}
 	return result, rows.Err()
 }

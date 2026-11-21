@@ -117,7 +117,8 @@ function openRecord() { recordOpen.value = true }
       </section>
       <section class="query-results detail-section">
         <h2 class="block-title"><span>03</span>查询结果</h2>
-        <template v-if="run.result">
+        <p v-if="run.offline_source_id && run.status === 'completed'" class="block-placeholder">当前数据源未连接数据库。SQL 语句请在右上角执行记录中查看。</p>
+        <template v-else-if="run.result">
         <div class="section-heading"><h2>{{ run.result.row_count ? `已返回 ${run.result.row_count.toLocaleString()} 条结果` : '没有符合条件的记录' }}</h2><span v-if="run.result.rows.length > 1000">预览前 1,000 条</span></div>
         <p v-if="run.result.truncated" class="result-limit">结果已达到本次返回上限，可能还有符合条件的记录。可在执行记录中查看查询限制。</p>
         <div v-if="run.result.row_count" ref="resultTable" class="result-table"><table><thead><tr><th v-for="(column, index) in run.result.columns" :key="column">{{ labels[column] || `结果 ${index + 1}` }}</th></tr></thead><tbody><tr v-for="(row, index) in pageRows" :key="`${resultPage}-${index}`"><td v-for="(cell, ci) in row" :key="ci">{{ displayValue(cell) }}</td></tr></tbody></table></div>
@@ -130,7 +131,7 @@ function openRecord() { recordOpen.value = true }
         <div v-else-if="run.status === 'completed'" class="sql-only"><p>本次查询语句已生成，未保存执行结果。可在执行记录中查看查询语句及校验状态。</p><button class="inline-record" @click="openRecord">查看查询语句 <ChevronRightIcon/></button></div>
         <p v-else class="block-placeholder">{{ run.status === 'failed' ? '本次查询尚未取得结果。' : '查询完成后将在这里展示结果。' }}</p>
       </section>
-      <section class="explanation-section detail-section">
+      <section v-if="!run.offline_source_id" class="explanation-section detail-section">
         <h2 class="block-title"><span>04</span>结果说明</h2>
         <p v-if="run.result && explanation && run.status !== 'failed'" class="explanation-copy">{{ explanation }}</p>
         <p v-else class="block-placeholder">{{ run.result ? '本次没有额外的结果说明。' : '查询完成后展示结果说明。' }}</p>

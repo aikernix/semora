@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api } from '../api'
+import type { OfflineSource } from '../offlineSources'
 import { hasRole } from '../auth'
 import DeleteResourceDialog from '../components/DeleteResourceDialog.vue'
 import { ontologyNames } from '../ontologyNames'
@@ -116,11 +117,15 @@ function editable(value: any) {
   return configuration
 }
 async function loadDomains() {
-  const [items, sources] = await Promise.all([api.get('/ontology/configurations'), api.get('/datasources')])
+  const offlineRequest = import.meta.env.VITE_OFFLINE_MODELING_ENABLED === 'true'
+    ? api.get<OfflineSource[]>('/ontology/offline-sources').then(({data})=>data).catch(()=>[])
+    : Promise.resolve([])
+  const [items, sources, offline] = await Promise.all([api.get('/ontology/configurations'), api.get('/datasources'), offlineRequest])
   domains.value = items.data
-  dataSources.value = sources.data
+  dataSources.value = [...sources.data, ...offline.map(source=>({...source,type:source.product,offline:true}))]
   const packages: Record<string, any> = {}
-  await Promise.all(dataSources.value.map(async source => {
+  for (const source of offline) packages[source.id] = source
+  await Promise.all(sources.data.map(async (source:any) => {
     try { packages[source.id] = (await api.get(`/datasources/${source.id}/source-ontology`)).data }
     catch (reason: any) { if (reason.response?.status !== 404) throw reason }
   }))
@@ -128,23 +133,36 @@ async function loadDomains() {
   if (!domains.value.some(item => item.domain === selectedDomain.value)) selectedDomain.value = domains.value[0]?.domain || ''
 }
 const boundSourceIds = computed(() => new Set([
+  ...(ontology.value?.offlineSourceIds || []),
   ...(ontology.value?.sourcePackageRefs || []).map((item: any) => item.dataSourceId),
   ...(ontology.value?.objects || []).map((item: any) => item.dataSourceId || ontology.value?.dataSourceId),
 ].filter(Boolean)))
 function isModeledSource(sourceId: string) {
   return ['ready', 'ready_with_pending'].includes(sourcePackages.value[sourceId]?.status)
 }
-const crossSources = computed(() => dataSources.value.filter(source => boundSourceIds.value.has(source.id) && isModeledSource(source.id)))
-const boundSources = computed(() => dataSources.value.filter(source => boundSourceIds.value.has(source.id)))
-const availableSources = computed(() => dataSources.value.filter(source => !boundSourceIds.value.has(source.id) && isModeledSource(source.id)))
+const crossSources = computed(() => dataSources.value.filter(source => !source.offline && boundSourceIds.value.has(source.id) && isModeledSource(source.id)))
+const boundSources = computed(() => [
+  ...dataSources.value.filter(source => boundSourceIds.value.has(source.id)),
+  ...(ontology.value?.offlineSourceIds || [])
+    .filter((id:string)=>!dataSources.value.some(source=>source.id===id))
+    .map((id:string)=>({id,name:'离线数据源暂不可用',type:'',offline:true})),
+])
+const mappedObjectCount = computed(() => (ontology.value?.objects?.length || 0) +
+  boundSources.value.filter(source=>source.offline).reduce((sum,source)=>sum+(sourcePackages.value[source.id]?.object_count || 0),0))
+const hasOfflineBinding = computed(() => !!ontology.value?.offlineSourceIds?.length)
+const hasOnlineBinding = computed(() => !!(ontology.value?.dataSourceId || ontology.value?.sourcePackageRefs?.length || ontology.value?.objects?.length))
+const sourceConflict = computed(() => hasOfflineBinding.value && (hasOnlineBinding.value || ontology.value.offlineSourceIds.length > 1))
+const availableSources = computed(() => dataSources.value.filter(source => !hasOfflineBinding.value &&
+  (!hasOnlineBinding.value || !source.offline) && !boundSourceIds.value.has(source.id) && isModeledSource(source.id)))
 const canBindSource = computed(() => availableSources.value.some(source => source.id === sourceToAdd.value))
 watch([relationFilter,selectedPairKey],()=>relationPage.value=1)
 watch(()=>visibleRelations.value.length,total=>relationPage.value=Math.min(relationPage.value,Math.max(1,Math.ceil(total/20))))
 function openSourcePicker() { sourceToAdd.value = ''; sourcePickerVisible.value = true }
 async function bindSource(sourceId: string) {
-  if (saving.value || !availableSources.value.some(source => source.id === sourceId)) return
+  const source = availableSources.value.find(source => source.id === sourceId)
+  if (saving.value || !source) return
   saving.value = true; error.value = ''
-  try { ontology.value = mapped((await api.post(`/ontology/configurations/${selectedDomain.value}/sources/${sourceId}`)).data); await loadDomainRelations(); sourcePickerVisible.value = false; sourceToAdd.value = ''; message.value = '数据源已添加到当前业务域。' }
+  try { ontology.value = mapped((await api.post(`/ontology/configurations/${selectedDomain.value}/${source.offline?'offline-sources':'sources'}/${sourceId}`)).data); await loadDomainRelations(); sourcePickerVisible.value = false; sourceToAdd.value = ''; message.value = '数据源已添加到当前业务域。' }
   catch (reason: any) { error.value = reason.response?.data?.detail || '绑定数据源失败' }
   finally { saving.value = false }
 }
@@ -424,11 +442,12 @@ onUnmounted(() => { if (crossTimer) clearTimeout(crossTimer) })
     </div>
     <template v-if="ontology">
       <section class="domain-summary">
-        <div class="domain-heading"><span>当前业务域 <strong>{{ ontology.name }}</strong></span><t-tag variant="light" :theme="ontology.objects.length ? 'success' : 'default'">{{ ontology.objects.length ? '已配置' : '待配置' }}</t-tag></div>
-        <div class="ontology-stats"><span>表映射 <b>{{ ontology.objects.length }}</b></span><span>已生效跨库关系 <b>{{ reviewCounts.accepted || 0 }}</b></span></div>
+        <div class="domain-heading"><span>当前业务域 <strong>{{ ontology.name }}</strong></span><t-tag variant="light" :theme="mappedObjectCount ? 'success' : 'default'">{{ mappedObjectCount ? '已配置' : '待配置' }}</t-tag></div>
+        <div class="ontology-stats"><span>表映射 <b>{{ mappedObjectCount }}</b></span><span>已生效跨库关系 <b>{{ reviewCounts.accepted || 0 }}</b></span></div>
       </section>
       <section class="source-package-panel">
-        <div class="section-heading"><h2 class="panel-title">已绑定数据源</h2><t-button variant="outline" :disabled="saving" @click="openSourcePicker">＋ 添加数据源</t-button></div>
+        <div class="section-heading"><h2 class="panel-title">已绑定数据源</h2><t-button variant="outline" :disabled="saving || hasOfflineBinding" @click="openSourcePicker">＋ 添加数据源</t-button></div>
+        <t-alert v-if="sourceConflict" theme="warning" message="这个业务域有不兼容的历史绑定。保留一个离线数据源，或保留在线数据源后，即可继续查询。" />
         <div v-if="boundSources.length" class="ontology-table-wrap">
           <table class="ontology-table source-table" aria-label="已绑定数据源">
             <thead><tr><th scope="col">数据源</th><th scope="col">对象数</th><th scope="col">关系数</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead>

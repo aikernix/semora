@@ -70,3 +70,22 @@ func (s *server) effectiveConfiguration(w http.ResponseWriter, r *http.Request) 
 	}
 	jsonResponse(w, 200, value)
 }
+
+func (s *server) bindOfflineSource(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, 405, map[string]string{"error": "method not allowed"})
+		return
+	}
+	value, err := s.store.bindOfflineSource(r.Context(), r.PathValue("domain"), r.PathValue("source"))
+	var validation *validationError
+	switch {
+	case isNotFound(err):
+		jsonResponse(w, 404, map[string]string{"error": "业务域不存在"})
+	case errors.As(err, &validation):
+		jsonResponse(w, 422, map[string]any{"error": validation.Error(), "issues": validation.issues})
+	case err != nil:
+		jsonResponse(w, 500, map[string]string{"error": "绑定离线数据源失败"})
+	default:
+		jsonResponse(w, 200, value)
+	}
+}

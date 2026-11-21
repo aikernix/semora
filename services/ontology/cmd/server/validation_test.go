@@ -2,6 +2,40 @@ package main
 
 import "testing"
 
+func TestOfflineOnlyDomainPublishesAndUnbindsWithoutExecutionConnection(t *testing.T) {
+	id := "3884f2863dd14b52a05ad2215208618b"
+	value := Ontology{Domain: "offline", Name: "离线", Version: "1.0.0", OfflineSourceIDs: []string{id}}
+	snapshot, err := preparePublication(value)
+	if err != nil || snapshot.Ontology.DataSourceID != "" || len(snapshot.Ontology.OfflineSourceIDs) != 1 {
+		t.Fatalf("offline-only configuration should publish as a reference: %#v %v", snapshot, err)
+	}
+	if stripped := withoutSource(value, id); len(stripped.OfflineSourceIDs) != 0 || len(value.OfflineSourceIDs) != 1 {
+		t.Fatal("unbind must only remove the reference from the new configuration")
+	}
+	value.DataSourceID = id
+	if _, err = preparePublication(value); err == nil {
+		t.Fatal("offline reference must not be used as an execution connection")
+	}
+}
+
+func TestNewBindingsCannotMixOnlineAndOfflineOrAddSecondOffline(t *testing.T) {
+	first, second := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	offline := Ontology{OfflineSourceIDs: []string{first}}
+	online := Ontology{SourcePackageRefs: []SourcePackageRef{{DataSourceID: "online"}}}
+	mixed := Ontology{OfflineSourceIDs: offline.OfflineSourceIDs, SourcePackageRefs: online.SourcePackageRefs}
+	for _, pair := range [][2]Ontology{{offline, mixed}, {online, mixed}, {offline, {OfflineSourceIDs: []string{first, second}}}} {
+		if err := checkSourceBindingChange(pair[0], pair[1]); err == nil {
+			t.Fatalf("incompatible binding change accepted: %#v", pair)
+		}
+	}
+	if err := checkSourceBindingChange(mixed, offline); err != nil {
+		t.Fatalf("legacy conflict must allow unbinding: %v", err)
+	}
+	if err := checkSourceBindingChange(mixed, mixed); err != nil {
+		t.Fatalf("legacy conflict must not block unchanged bindings: %v", err)
+	}
+}
+
 func TestKnowledgeBaseBindingIsOptional(t *testing.T) {
 	ontology := demoOntology()
 	ontology.KnowledgeBaseIDs = nil

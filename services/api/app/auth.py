@@ -70,6 +70,8 @@ def required_roles(method: str, path: str) -> frozenset[str]:
         return frozenset({"admin"})
     if path.startswith("/api/v1/settings"):
         return frozenset({"admin"} if method != "GET" else ALL_APPLICATION_ROLES)
+    if path.startswith("/api/v1/domains") and path.endswith("/offline-sql"):
+        return frozenset({"business_user", "analyst", "admin"})
     if path.startswith("/api/v1/domains"):
         return frozenset(ALL_APPLICATION_ROLES)
     if path.startswith("/api/v1/approvals"):
@@ -81,6 +83,8 @@ def required_roles(method: str, path: str) -> frozenset[str]:
             return frozenset({"data_steward", "admin"})
         return frozenset({"analyst", "data_steward", "admin"})
     if path.startswith("/api/v1/ontology"):
+        if method == "DELETE" and path.startswith("/api/v1/ontology/offline-sources/"):
+            return frozenset({"admin"})
         if method in {"POST", "PUT", "PATCH", "DELETE"}:
             return frozenset({"data_steward", "admin"})
         return frozenset({"analyst", "data_steward", "admin"})

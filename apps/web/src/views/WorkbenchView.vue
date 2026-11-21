@@ -10,6 +10,9 @@ const domains = ref<any[]>([])
 const queryableDomains = computed(() => domains.value.filter(domain => domain.status !== 'unconfigured'))
 const activeSession = ref('')
 const selectedDomain = ref('')
+const activeDomainConfig = computed(() => queryableDomains.value.find(domain=>domain.domain===selectedDomain.value))
+const domainConflict = computed(()=>activeDomainConfig.value?.sourceMode === 'conflict')
+const canSubmit = computed(() => modelConfigured.value && !domainConflict.value)
 const requirementForm = reactive({ title: '', objective: '', time_range: '', scope: '', output: '' })
 const modelConfigured = ref(false)
 const initializing = ref(true)
@@ -106,7 +109,7 @@ function createSession() {
   Object.assign(requirementForm, { title: '', objective: '', time_range: '', scope: '', output: '' })
 }
 async function submitRequirement() {
-  if (!requirementForm.title.trim() || !requirementForm.objective.trim() || !modelConfigured.value || loading.value) return
+  if (!requirementForm.title.trim() || !requirementForm.objective.trim() || !canSubmit.value || loading.value) return
   if (!selectedDomain.value) { pageError.value = '请先选择业务域'; return }
   const version = selectionVersion
   const form = { ...requirementForm }
@@ -137,7 +140,8 @@ async function selectSession(session: QuerySession) {
   createSession()
   const version = selectionVersion
   activeSession.value = session.id
-  Object.assign(requirementForm, session.requirement_form || {})
+  Object.assign(requirementForm, Object.fromEntries(Object.keys(requirementForm)
+    .map(key=>[key,session.requirement_form?.[key] || ''])))
   try {
     const { data } = await api.get<QueryRun[]>(`/sessions/${session.id}/runs`, { params: { limit: 1 } })
     if (version !== selectionVersion) return
@@ -229,7 +233,7 @@ onMounted(async () => {
       <div class="session-head"><strong>查询工作台</strong></div>
       <div class="domain-context">
         <span class="domain-caption">当前业务域</span>
-        <t-select v-model="selectedDomain" class="domain-picker" :placeholder="!initializing && !queryableDomains.length ? '暂无已绑定数据源的业务域' : '选择业务域'" @change="switchDomain">
+        <t-select v-model="selectedDomain" class="domain-picker" :placeholder="!initializing && !queryableDomains.length ? '暂无可用业务域' : '选择业务域'" @change="switchDomain">
           <t-option v-for="domain in queryableDomains" :key="domain.domain" :value="domain.domain" :label="domain.name" />
         </t-select>
       </div>
@@ -275,10 +279,11 @@ onMounted(async () => {
         <div class="query-composer">
           <div class="composer-eyebrow">SEMORA · 业务查询</div><h1>您想了解什么？</h1><p class="composer-intro">描述您的业务问题，必要时我们会向您确认关键口径。</p>
           <t-alert v-if="!modelConfigured" theme="warning" title="请先配置模型"><template #message>配置完成后即可开始查询。<router-link to="/settings#model">前往配置</router-link></template></t-alert>
+          <t-alert v-if="domainConflict" theme="warning" message="该业务域有不兼容的数据源绑定。请在本体工作室解除多余绑定后再发起查询。" />
           <form class="requirement-form" @submit.prevent="submitRequirement">
             <label class="title-label">查询名称 <span class="required-mark">*</span><input v-model="requirementForm.title" required maxlength="100" placeholder="为本次查询取一个便于查找的名称" /></label>
             <label class="objective-label">查询需求 <span class="required-mark">*</span><textarea v-model="requirementForm.objective" required maxlength="1500" rows="7" placeholder="请说明您想了解什么。建议写清时间范围、涉及的数据范围，以及希望查看的明细或汇总结果；不确定的地方可以直接说明，我们会协助您确认。" /></label>
-            <div class="composer-footer"><span>本次查询将归属 {{ activeDomainName || '所选业务域' }}</span><t-button type="submit" theme="primary" :loading="loading" :disabled="!modelConfigured || !selectedDomain || !requirementForm.title.trim() || !requirementForm.objective.trim()">提交需求，开始分析</t-button></div>
+            <div class="composer-footer"><span>本次查询将归属 {{ activeDomainName || '所选业务域' }}</span><t-button type="submit" theme="primary" :loading="loading" :disabled="!canSubmit || !selectedDomain || !requirementForm.title.trim() || !requirementForm.objective.trim()">提交需求，开始分析</t-button></div>
           </form>
         </div>
       </div>

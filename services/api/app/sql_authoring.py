@@ -112,14 +112,19 @@ def context(workflow, run, question):
     packet = material(run)
     ids = {o["object"].get("dataSourceId") for o in packet.get("objects", [])}
     sources = []
+    offline = (run.agent_memory.get('offline_source') or [None])[-1]
     for source_id in ids - {None, ""}:
+        if offline and source_id == offline['id']:
+            sources.append(offline)
+            continue
         source = datasource_service.repository.get(source_id)
         from .database_profile import source_profile
 
         from .sql_dialect import dialect_for
         sources.append({"id": source_id, "name": source.name, **source_profile(source), "dialect": dialect_for(source_id)})
     return {
-        "sql_contract": {"authoring_dialect": "per_step", "local_dialect": "duckdb", "parameter_style": ":name"},
+        "sql_contract": ({"authoring_dialect":"per_step","parameter_style":":name","output":"single_source_statement"}
+                         if offline else {"authoring_dialect":"per_step","local_dialect":"duckdb","parameter_style":":name"}),
         "request": question,
         "confirmed_answers": confirmed_fact_context(workflow, run),
         "materials": packet,
@@ -209,6 +214,9 @@ async def structured(workflow, run, prompt, payload, schema):
                 )
                 candidate = apply_coverage_edits(original, parsed)
             if candidate is not None:
+                offline = (run.agent_memory.get('offline_source') or [None])[-1]
+                if offline and len(candidate.steps)!=1:
+                    raise ValueError('离线查询需要一条可独立运行的目标数据库语句')
                 allowed = {s["id"] for s in payload.get("data_sources", [])}
                 if any(
                     s.engine == "source" and s.data_source_id not in allowed
@@ -234,7 +242,7 @@ async def structured(workflow, run, prompt, payload, schema):
                     )
                     try:
                         from .sql_dialect import step_dialect
-                        step.dialect = step_dialect(step)
+                        step.dialect = step_dialect(step,offline)
                         tree = readonly_tree(step.sql, tables, step.dialect)
                         if step.engine == "source":
                             from .sql_column_refs import validate_physical_column_refs
@@ -577,15 +585,17 @@ async def repair_step(workflow, run, name, issue):
     # A compile failure may leave the previous artifact in memory. Never
     # present that stale target statement as the output of the current source.
     current_artifact = artifact if artifact and artifact.semantic_sql == step.sql else None
-    from .sql_dialect import dialect_for
+    from .sql_dialect import step_dialect
+    offline = (run.agent_memory.get('offline_source') or [None])[-1]
+    target_dialect = step_dialect(step,offline)
 
     payload.update(
         confirmed_requirement=run.requirement.model_dump(mode="json") if run.requirement else None,
         program=run.plan.sql_program.model_dump(mode="json"),
         current_step=name,
-        editable_baseline={"dialect": "duckdb" if step.engine == "local" else dialect_for(step.data_source_id), "sql": step.sql, "parameters": step.parameters},
+        editable_baseline={"dialect": target_dialect, "sql": step.sql, "parameters": step.parameters},
         execution_diagnostic={
-            "target_dialect": "duckdb" if step.engine == "local" else dialect_for(step.data_source_id),
+            "target_dialect": target_dialect,
             "target_sql": current_artifact.physical_sql if current_artifact else None,
             "error": issue,
         },
@@ -601,8 +611,7 @@ async def repair_step(workflow, run, name, issue):
     from .run_state import digest
 
     before_hash = digest([step.sql, step.parameters])
-    from .sql_dialect import step_dialect
-    step.sql, step.parameters, step.dialect = fixed.sql, fixed.parameters, step_dialect(step)
+    step.sql, step.parameters, step.dialect = fixed.sql, fixed.parameters, target_dialect
     run.agent_memory.setdefault("sql_repairs", []).append(
         {"step": name, "error": issue, "change_summary": fixed.change_summary, "attempt": attempt}
     )

@@ -302,6 +302,7 @@ func main() {
 	mux.HandleFunc("/api/v1/ontology/drafts/{domain}/knowledge-bases", app.internal(app.knowledgeBinding))
 	mux.HandleFunc("/api/v1/ontology/configurations/{domain}", app.internal(app.effectiveConfiguration))
 	mux.HandleFunc("/api/v1/ontology/configurations/{domain}/sources/{source}", app.internal(app.unbindSource))
+	mux.HandleFunc("/api/v1/ontology/configurations/{domain}/offline-sources/{source}", app.internal(app.bindOfflineSource))
 	mux.HandleFunc("/api/v1/ontology/source-packages", app.internal(app.sourcePackage))
 	mux.HandleFunc("/api/v1/ontology/cross-relations/append", app.internal(app.appendCrossRelations))
 	mux.HandleFunc("/api/v1/ontology/domains", app.internal(app.createDomain))

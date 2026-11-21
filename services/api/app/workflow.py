@@ -176,6 +176,10 @@ class Workflow:
         self.emit(run, "retrieval.started", RunStatus.RETRIEVING)
         try:
             run.ontology, ontology_model = await self._ontology_snapshot(run.domain)
+            if run.offline_source_id:
+                from .offline_domains import query_catalog
+
+                run.ontology, ontology_model = await query_catalog(run.ontology, ontology_model, run)
             source_id = str(ontology_model.get("dataSourceId") or "")
             if not source_id:
                 raise ValueError("本体未绑定数据源")
@@ -345,9 +349,16 @@ class Workflow:
             return {}
         self.emit(run, "compilation.started", RunStatus.COMPILING)
         try:
+            if run.offline_source_id and len(run.plan.sql_program.steps) != 1:
+                raise ValueError('离线查询需要一条可独立运行的目标数据库语句')
             if run.ontology and run.ontology.artifact_version == "draft":
                 raise ValueError("当前本体仍为草稿，请先发布本体后重新生成SQL")
             await SQLExecution(self, run, state["ontology_model"], state["settings"]).compile()
+            if run.offline_source_id:
+                for artifact in run.source_artifacts.values():
+                    artifact.compilation['validation'] = {'state':'skipped','method':'offline_schema'}
+                run.answer = '当前数据源未连接数据库。SQL 语句请在右上角执行记录中查看。'
+                self.emit(run, 'sql.delivery.completed', RunStatus.COMPLETED, {'summary':run.answer}, 'sql_author')
         except TaskSupersededError:
             return self._discard_superseded_task(run)
         except Exception as exc:
@@ -450,6 +461,7 @@ class Workflow:
             self.store._persist_session(session)
         run = QueryRun(
             session_id=session_id,
+            offline_source_id=session.requirement_form.get('offline_source_id') or None,
             domain=domain,
             question=question,
             authorization=authorization,

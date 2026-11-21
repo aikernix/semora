@@ -106,6 +106,8 @@ def field_mapping(objects):
 
 
 async def supplement(workflow, run, question, ontology, scope, saved, report, *, service=None):
+    if getattr(run, 'offline_source_id', None):
+        return False
     selected = set(saved['packet'].get('selected_objects', []))
     routing_calls = await route_technical_questions(workflow, run, question, selected, report)
     pairs = gap_pairs(report, selected)

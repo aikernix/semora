@@ -7,6 +7,8 @@ import { hasRole } from '../auth'
 import DatabaseIcon from '../components/DatabaseIcon.vue'
 import RelationshipCard from '../components/RelationshipCard.vue'
 import DataSourceCreateDialog from '../components/DataSourceCreateDialog.vue'
+import OfflineSourceCreateDialog from '../components/OfflineSourceCreateDialog.vue'
+import { offlineApi, offlineErrorMessage, offlineImportPath, type OfflineSource } from '../offlineSources'
 
 interface DataSource { id:string; name:string; type:string; status:string; access:string; objects:number; connection?:Record<string,any>; onboarding?:Record<string,any>; relationshipJob?:Record<string,any>; last_scan_at?:string }
 const emptyForm=()=>({name:'',type:'postgresql',host:'',port:5432,database:'',username:'',password:'',schema_name:'',catalog:'',compatibility_mode:'',service_kind:'service',jdbc_url:'',driver_id:'',product_override:''})
@@ -15,12 +17,63 @@ const selectedId=ref(''),sourceSearch=ref(''),creating=ref(false),createVisible=
 const form=ref(emptyForm()),connectionLoading=ref(false)
 const connectionState=ref<'idle'|'testing'|'success'|'error'>('idle'),connectionMessage=ref(''),detectedVersion=ref(''),detectedProduct=ref(''),pageError=ref('')
 const canManage=computed(()=>hasRole('data_steward','admin'));let poller:ReturnType<typeof setTimeout>|undefined;let polling=false,disposed=false
-const deletingSource = ref<DataSource | null>(null)
+const offlineEnabled = import.meta.env.VITE_OFFLINE_MODELING_ENABLED === 'true'
+const offlineSources = ref<OfflineSource[]>([])
+const offlineCreateVisible = ref(false)
+const offlineSelectedId = ref('')
+const offlineError = ref('')
+let offlineListRequest = 0
+let offlinePoller:ReturnType<typeof setTimeout>|undefined
+const selectedOffline = computed(() => offlineSources.value.find(source => source.id === offlineSelectedId.value))
+const currentSource = computed(() => selectedOffline.value || selected.value)
+const offlineAnalysisActive = computed(() => ['运行中','取消中'].includes(selectedOffline.value?.analysis || ''))
+const relationOperationsBusy = computed(() => !!modelingAction.value || (selectedOffline.value ? offlineAnalysisActive.value : modelingBusy.value))
+const filteredOffline = computed(() => {
+  const query = sourceSearch.value.trim().toLowerCase()
+  return offlineSources.value.filter(source => `${source.name} ${source.product_label || ''} 离线数据源`.toLowerCase().includes(query))
+})
+const offlineStatuses: Record<string,string> = {importing:'解析中',preview:'待确认导入',ready:'已导入',failed:'导入失败'}
+async function loadOfflineSources() {
+  if (!offlineEnabled || !canManage.value || disposed) return
+  const request = ++offlineListRequest
+  try {
+    const {data} = await offlineApi.get<OfflineSource[]>('/imports',{timeout:5000})
+    if (request !== offlineListRequest || disposed) return
+    const wasAnalyzing = offlineAnalysisActive.value
+    offlineSources.value = data
+    offlineError.value = ''
+    if (wasAnalyzing && !offlineAnalysisActive.value && selectedOffline.value && showRelations.value) {
+      await loadRelations().catch(reason=>{relationError.value=offlineErrorMessage(reason,'无法读取关联关系')})
+    }
+  } catch (reason) {
+    if (request === offlineListRequest && !disposed) offlineError.value = offlineErrorMessage(reason,'无法读取离线数据源')
+  } finally {
+    if (request === offlineListRequest && !disposed) {
+      if (offlinePoller) clearTimeout(offlinePoller)
+      if (offlineSources.value.some(source=>source.status==='importing'||['运行中','取消中'].includes(source.analysis||''))) {
+        offlinePoller=setTimeout(()=>void loadOfflineSources(),2000)
+      }
+    }
+  }
+}
+async function offlineSourceCreated(id:string) {
+  await loadOfflineSources()
+  const source = offlineSources.value.find(item=>item.id===id)
+  if (source) selectOffline(source)
+}
+function selectOffline(source:OfflineSource) {
+  offlineSelectedId.value = source.id
+  selectedId.value = ''
+  pageError.value = ''
+  showTables.value = false
+  showRelations.value = false
+}
+const deletingSource = ref<{id:string;name:string;offline?:boolean} | null>(null)
 const deletionBusy = ref(false)
 const deletionError = ref('')
-function openDeleteSource(item: DataSource) {
+function openDeleteSource(item:{id:string;name:string},offline=false) {
   deletionError.value = ''
-  deletingSource.value = item
+  deletingSource.value = {...item,offline}
 }
 async function deleteSource() {
   const item = deletingSource.value
@@ -28,12 +81,22 @@ async function deleteSource() {
   deletionBusy.value = true
   deletionError.value = ''
   try {
-    await api.delete(`/datasources/${encodeURIComponent(item.id)}`)
+    if(item.offline) await api.delete(`/ontology/offline-sources/${encodeURIComponent(item.id)}`)
+    else await api.delete(`/datasources/${encodeURIComponent(item.id)}`)
   } catch (cause: any) {
-    deletionError.value = cause.response?.data?.detail || '删除数据源失败'
+    deletionError.value = item.offline ? offlineErrorMessage(cause,'删除数据源失败') : cause.response?.data?.detail || '删除数据源失败'
     return
   } finally { deletionBusy.value = false }
   deletingSource.value = null
+  if (item.offline) {
+    offlineSources.value=offlineSources.value.filter(source=>source.id!==item.id)
+    if (offlineSelectedId.value===item.id) {
+      offlineSelectedId.value='';showTables.value=false;showRelations.value=false
+      if (sources.value.length) await selectSource(sources.value[0])
+    }
+    await loadOfflineSources()
+    return
+  }
   sources.value = sources.value.filter(source => source.id !== item.id)
   if (selectedId.value === item.id) {
     selectedId.value = ''
@@ -91,7 +154,7 @@ async function loadSources(first=false,checkJobs=true){
   }))
   if(disposed)return
   sources.value=items
-  if(first&&!selectedId.value&&items.length)await selectSource(items[0])
+  if(first&&!selectedId.value&&!offlineSelectedId.value&&items.length)await selectSource(items[0])
 }
 function schedulePoll(){
   if(poller)clearTimeout(poller)
@@ -124,7 +187,7 @@ async function pollActiveJobs(){
 }
 watch(()=>sources.value.filter(s=>isModelingActive(s.onboarding)).map(s=>`${s.id}:${s.onboarding?.id}`).join('|'),schedulePoll)
 
-async function selectSource(item:DataSource){pageError.value='';selectedId.value=item.id;connectionLoading.value=true;form.value={...emptyForm(),name:item.name,type:item.type};connectionState.value='idle';connectionMessage.value='';try{const connection=(await api.get(`/datasources/${item.id}/connection`)).data;if(selectedId.value!==item.id)return;form.value={...emptyForm(),...connection,name:item.name,type:item.type,password:''};detectedVersion.value=item.connection?.version||'';detectedProduct.value=item.connection?.product||''}catch(cause:any){if(selectedId.value===item.id)pageError.value=cause.response?.data?.detail||'无法读取数据源连接配置'}finally{if(selectedId.value===item.id)connectionLoading.value=false}}
+async function selectSource(item:DataSource){offlineSelectedId.value='';pageError.value='';selectedId.value=item.id;connectionLoading.value=true;form.value={...emptyForm(),name:item.name,type:item.type};connectionState.value='idle';connectionMessage.value='';try{const connection=(await api.get(`/datasources/${item.id}/connection`)).data;if(selectedId.value!==item.id)return;form.value={...emptyForm(),...connection,name:item.name,type:item.type,password:''};detectedVersion.value=item.connection?.version||'';detectedProduct.value=item.connection?.product||''}catch(cause:any){if(selectedId.value===item.id)pageError.value=cause.response?.data?.detail||'无法读取数据源连接配置'}finally{if(selectedId.value===item.id)connectionLoading.value=false}}
 async function sourceCreated(created:any){try{await loadSources();const item=sources.value.find(source=>source.id===created.id);if(item)await selectSource(item)}catch(cause:any){pageError.value=cause.response?.data?.detail||'无法刷新数据源'}}
 async function testConnection(){if(!selected.value||connectionLoading.value||connectionState.value==='testing')return;const sourceId=selected.value.id;connectionState.value='testing';connectionMessage.value='';pageError.value='';try{const result=(await api.post(`/datasources/${sourceId}/test`)).data;if(selectedId.value!==sourceId)return;detectedVersion.value=result.version||detectedVersion.value;detectedProduct.value=result.product||detectedProduct.value;connectionMessage.value=`连接成功${result.version?` · ${result.version}`:''}`;await loadSources();if(selectedId.value===sourceId)connectionState.value='success'}catch(cause:any){if(selectedId.value!==sourceId)return;connectionState.value='error';connectionMessage.value=cause.response?.data?.detail||cause.message||'连接失败'}}
 async function saveSource(){if(!selected.value||connectionLoading.value||creating.value)return;creating.value=true;pageError.value='';try{await api.patch(`/datasources/${selected.value.id}`,{name:form.value.name});await loadSources()}catch(cause:any){pageError.value=cause.response?.data?.detail||cause.message||'保存失败'}finally{creating.value=false}}
@@ -142,15 +205,87 @@ async function modelingOperation(action:'scan'|'analyze'|'cancel'|'resume'){
 }
 async function resumeAnalysis(){await modelingOperation('resume')}
 async function rescan(){await modelingOperation('scan')}
-const analysisConfirmation=ref<DataSource|null>(null)
-function analyzeRelations(){if(selected.value&&!modelingBusy.value){pageError.value='';analysisConfirmation.value=selected.value}}
-async function confirmAnalysis(){if(analysisConfirmation.value?.id!==selected.value?.id)return;await modelingOperation('analyze');if(!pageError.value)analysisConfirmation.value=null}
-async function cancelModeling(){await modelingOperation('cancel')}
+const analysisConfirmation=ref<{id:string;name:string;offline:boolean}|null>(null)
+function analyzeRelations(){
+  if (currentSource.value && !relationOperationsBusy.value) {
+    pageError.value=''
+    analysisConfirmation.value={id:currentSource.value.id,name:currentSource.value.name,offline:!!selectedOffline.value}
+  }
+}
+async function offlineModelingOperation(action:'analyze'|'cancel'){
+  const item=selectedOffline.value
+  if(!item||modelingAction.value)return
+  modelingAction.value=action;pageError.value=''
+  try {
+    await offlineApi.post(offlineImportPath(item.id)+'/analysis'+(action==='cancel'?'/cancel':''))
+    item.analysis=action==='cancel'?'取消中':'运行中'
+    await loadOfflineSources()
+  } catch (reason) {
+    pageError.value=offlineErrorMessage(reason,'关联分析操作失败，请重试')
+  } finally {modelingAction.value=''}
+}
+async function confirmAnalysis(){
+  const confirmation=analysisConfirmation.value
+  if (!confirmation || confirmation.id!==currentSource.value?.id || confirmation.offline!==!!selectedOffline.value)return
+  if (confirmation.offline) await offlineModelingOperation('analyze')
+  else await modelingOperation('analyze')
+  if(!pageError.value)analysisConfirmation.value=null
+}
+async function cancelModeling(){
+  if (selectedOffline.value) await offlineModelingOperation('cancel')
+  else await modelingOperation('cancel')
+}
+async function retryOfflineImport(){
+  if(!selectedOffline.value||modelingAction.value)return
+  modelingAction.value='retry';pageError.value=''
+  try {
+    await offlineApi.post(offlineImportPath(selectedOffline.value.id)+'/retry')
+    await loadOfflineSources()
+  } catch(reason) {pageError.value=offlineErrorMessage(reason,'重新导入失败')}
+  finally {modelingAction.value=''}
+}
+async function confirmOfflineImport(){
+  if(!selectedOffline.value||modelingAction.value)return
+  modelingAction.value='confirm';pageError.value=''
+  try {
+    await offlineApi.post(offlineImportPath(selectedOffline.value.id)+'/confirm')
+    await loadOfflineSources()
+  } catch(reason) {pageError.value=offlineErrorMessage(reason,'确认导入失败')}
+  finally {modelingAction.value=''}
+}
+function sourceCatalogClient(){
+  if(selectedOffline.value)return {client:offlineApi,path:offlineImportPath(selectedOffline.value.id)}
+  if(selected.value)return {client:api,path:`/datasources/${encodeURIComponent(selected.value.id)}`}
+  return null
+}
 
 const showTables=ref(false),tableQuery=ref(''),tablePage=ref(1),tablePageSize=ref(20),tableTotal=ref(0),tableItems=ref<any[]>([]),tableDetail=ref<any>(null),drawerLoading=ref(false)
-async function loadTables(reset=false){if(!selected.value)return;if(reset)tablePage.value=1;drawerLoading.value=true;tableDetail.value=null;try{const result=(await api.get(`/datasources/${selected.value.id}/tables`,{params:{page:tablePage.value,page_size:tablePageSize.value,query:tableQuery.value}})).data;tableItems.value=result.items;tableTotal.value=result.total}finally{drawerLoading.value=false}}
+let tableRequest=0
+async function loadTables(reset=false){
+  const source=sourceCatalogClient()
+  if(!source)return
+  const request=++tableRequest
+  if(reset)tablePage.value=1
+  drawerLoading.value=true;tableDetail.value=null;tableItems.value=[];tableTotal.value=0
+  try {
+    const {data}=await source.client.get(source.path+'/tables',{params:{page:tablePage.value,page_size:tablePageSize.value,query:tableQuery.value}})
+    if(request!==tableRequest||source.path!==sourceCatalogClient()?.path)return
+    tableItems.value=data.items;tableTotal.value=data.total
+  }catch(reason:any){if(request===tableRequest)pageError.value=reason.response?.data?.detail||'无法读取数据表'}
+  finally{if(request===tableRequest)drawerLoading.value=false}
+}
 async function openTables(){showTables.value=true;tableQuery.value='';await loadTables(true)}
-async function openTableDetail(table:any){if(!selected.value)return;drawerLoading.value=true;try{tableDetail.value=(await api.get(`/datasources/${selected.value.id}/tables/detail`,{params:{table_id:table.id}})).data}finally{drawerLoading.value=false}}
+async function openTableDetail(table:any){
+  const source=sourceCatalogClient()
+  if(!source)return
+  const request=++tableRequest
+  drawerLoading.value=true
+  try {
+    const {data}=await source.client.get(source.path+'/tables/detail',{params:{table_id:table.id}})
+    if(request===tableRequest&&source.path===sourceCatalogClient()?.path)tableDetail.value=data
+  }catch(reason:any){if(request===tableRequest)pageError.value=reason.response?.data?.detail||'无法读取表结构'}
+  finally{if(request===tableRequest)drawerLoading.value=false}
+}
 function changeTablePage(value:number){tablePage.value=value;void loadTables()}
 function changeTablePageSize(value:number){tablePageSize.value=value;void loadTables(true)}
 
@@ -159,15 +294,78 @@ const relationStatus=ref<'all'|'accepted'|'pending'|'disabled'>('all')
 const relationCounts=ref<Record<string,number>>({all:0,accepted:0,pending:0,disabled:0})
 const relationForm=ref<any>({}),relationTables=ref<any[]>([]),relationColumns=ref<Record<string,any[]>>({source:[],target:[]})
 const knownCardinalities=['1:1','1:N','N:1','N:N']
-async function loadRelations(){if(!selected.value)return;const r=(await api.get(`/datasources/${selected.value.id}/relationships`,{params:{status:relationStatus.value,page:relationPage.value,page_size:20}})).data;relationItems.value=r.items;relationTotal.value=r.total;relationCounts.value=r.counts||{all:0,accepted:0,pending:0,disabled:0}}
-async function changeRelationStatus(value:string|number){relationStatus.value=value as typeof relationStatus.value;relationPage.value=1;await loadRelations()}
-async function searchRelationTables(query=''){if(!selected.value)return;const r=(await api.get(`/datasources/${selected.value.id}/tables`,{params:{query,page:1,page_size:100}})).data;relationTables.value=r.items.map((t:any)=>({label:t.id,value:t.id}))}
-async function openRelations(){showRelations.value=true;relationEditing.value=false;relationStatus.value='all';relationPage.value=1;relationError.value='';try{await loadRelations()}catch(e:any){relationError.value=e.response?.data?.detail||'无法读取关联关系'}}
-async function relationSide(side:'source'|'target'){const id=relationForm.value[side+'_table_id'];relationColumns.value[side]=id?(await api.get(`/datasources/${selected.value?.id}/tables/detail`,{params:{table_id:id}})).data.columns:[]}
-async function editSourceRelation(r?:any){relationError.value='';relationForm.value=r?JSON.parse(JSON.stringify(r)):{source_table_id:'',target_table_id:'',cardinality:'N:1',key_pairs:[{source:'',target:''}]};relationEditing.value=true;try{await searchRelationTables();for(const id of [r?.source_table_id,r?.target_table_id].filter(Boolean)){if(!relationTables.value.some(t=>t.value===id))relationTables.value.push({label:id,value:id})}await Promise.all([relationSide('source'),relationSide('target')])}catch(e:any){relationError.value=e.response?.data?.detail||'无法读取表字段'}}
-async function saveSourceRelation(){if(!selected.value)return;relationBusy.value=true;relationError.value='';try{const f=relationForm.value;const body={source_table_id:f.source_table_id,target_table_id:f.target_table_id,key_pairs:f.key_pairs,cardinality:f.cardinality};if(f.id)await api.put(`/datasources/${selected.value.id}/relationships/${f.id}`,body);else await api.post(`/datasources/${selected.value.id}/relationships`,body);relationEditing.value=false;await loadRelations()}catch(e:any){relationError.value=e.response?.data?.detail||'保存关系失败'}finally{relationBusy.value=false}}
+let relationshipRequest=0
+async function loadRelations(){
+  const source=sourceCatalogClient()
+  if(!source)return
+  const request=++relationshipRequest
+  const {data}=await source.client.get(source.path+'/relationships',{params:{status:relationStatus.value,page:relationPage.value,page_size:20}})
+  if(request!==relationshipRequest||source.path!==sourceCatalogClient()?.path)return
+  relationItems.value=data.items;relationTotal.value=data.total
+  relationCounts.value=data.counts||{all:0,accepted:0,pending:0,disabled:0}
+}
+async function refreshRelations(){
+  try{await loadRelations()}
+  catch(reason:any){relationError.value=reason.response?.data?.detail||'无法读取关联关系'}
+}
+async function changeRelationStatus(value:string|number){relationStatus.value=value as typeof relationStatus.value;relationPage.value=1;await refreshRelations()}
+async function searchRelationTables(query=''){
+  const source=sourceCatalogClient()
+  if(!source)return
+  const {data}=await source.client.get(source.path+'/tables',{params:{query,page:1,page_size:100}})
+  relationTables.value=data.items.map((t:any)=>({label:t.id,value:t.id}))
+}
+async function openRelations(){
+  showRelations.value=true;relationEditing.value=false;relationStatus.value='all';relationPage.value=1;relationError.value=''
+  relationItems.value=[];relationTotal.value=0;relationCounts.value={all:0,accepted:0,pending:0,disabled:0}
+  await refreshRelations()
+}
+async function relationSide(side:'source'|'target'){
+  const source=sourceCatalogClient()
+  const id=relationForm.value[side+'_table_id']
+  relationColumns.value[side]=id&&source?(await source.client.get(source.path+'/tables/detail',{params:{table_id:id}})).data.columns:[]
+}
+async function editSourceRelation(r?:any){relationError.value='';relationForm.value=r?JSON.parse(JSON.stringify(r)):{source_table_id:'',target_table_id:'',cardinality:'N:1',key_pairs:[{source:'',target:''}],condition:''};relationEditing.value=true;try{await searchRelationTables();for(const id of [r?.source_table_id,r?.target_table_id].filter(Boolean)){if(!relationTables.value.some(t=>t.value===id))relationTables.value.push({label:id,value:id})}await Promise.all([relationSide('source'),relationSide('target')])}catch(e:any){relationError.value=e.response?.data?.detail||'无法读取表字段'}}
+function offlineRelationBody(relation:any,status:string){
+  return {source:relation.source_table_id,target:relation.target_table_id,cardinality:relation.cardinality,
+          condition:relation.condition||'',pairs:relation.key_pairs.map((pair:any)=>[pair.source,pair.target]),status}
+}
+async function saveSourceRelation(){
+  const source=sourceCatalogClient()
+  if(!source)return
+  relationBusy.value=true;relationError.value=''
+  try{
+    const f=relationForm.value
+    const body=selectedOffline.value?offlineRelationBody(f,'active'):{source_table_id:f.source_table_id,target_table_id:f.target_table_id,key_pairs:f.key_pairs,cardinality:f.cardinality}
+    const path=source.path+(selectedOffline.value?'/relations':'/relationships')
+    if(f.id)await source.client.put(`${path}/${encodeURIComponent(f.id)}`,body)
+    else await source.client.post(path,body)
+    relationEditing.value=false
+    await loadRelations()
+  }catch(e:any){relationError.value=e.response?.data?.detail||'保存关系失败'}
+  finally{relationBusy.value=false}
+}
 const disablingSourceRelation=ref<any>(null)
-async function decideSourceRelation(action:'approve'|'reject'|'disable'|'enable',r?:any){const target=r||disablingSourceRelation.value;if(!selected.value||!target)return;relationBusy.value=true;relationError.value='';try{await api.post(`/datasources/${selected.value.id}/relationships/${target.id}/decision`,{action});disablingSourceRelation.value=null;relationPage.value=1;await loadRelations()}catch(e:any){relationError.value=e.response?.data?.detail||'关系状态更新失败'}finally{relationBusy.value=false}}
+async function decideSourceRelation(action:'approve'|'reject'|'disable'|'enable',r?:any){
+  const source=sourceCatalogClient()
+  const target=r||disablingSourceRelation.value
+  if(!source||!target)return
+  relationBusy.value=true;relationError.value=''
+  try {
+    if(selectedOffline.value){
+      const status=({approve:'active',reject:'rejected',disable:'disabled',enable:'active'})[action]
+      await source.client.put(`${source.path}/relations/${encodeURIComponent(target.id)}`,offlineRelationBody(target,status))
+    }else await source.client.post(`${source.path}/relationships/${target.id}/decision`,{action})
+    disablingSourceRelation.value=null;relationPage.value=1
+    await loadRelations()
+  }catch(e:any){relationError.value=e.response?.data?.detail||'关系状态更新失败'}
+  finally{relationBusy.value=false}
+}
+function relationCondition(relation:any){
+  if(!selectedOffline.value||!relation.condition)return undefined
+  const condition=relation.condition.replace(/(["`]?)(source|target)\1\s*\./g,(_match:string,_quote:string,side:'source'|'target')=>relation[side+'_table_id']+'.')
+  return [relation.key_pairs.map((pair:any)=>`${relation.source_table_id}.${pair.source} = ${relation.target_table_id}.${pair.target}`).join(' AND '),condition].join(' AND ')
+}
 function relationStatusLabel(status:string){return({accepted:'已生效',pending:'待审核',disabled:'已停用'} as Record<string,string>)[status]||status}
 function relationStatusTheme(status:string){return status==='accepted'?'success':status==='pending'?'warning':'default'}
 
@@ -176,17 +374,38 @@ const driverKeys=['name','driver_class','version','enabled','dialect','readonly_
 async function installDriver(){try{const value=JSON.parse(driverConfig.value);if(editingDriverId.value)await api.put(`/settings/database-drivers/${editingDriverId.value}`,value);else{const data=new FormData();data.append('config',driverConfig.value);driverFiles.value.forEach(file=>data.append('files',file));await api.post('/settings/database-drivers',data,{timeout:200000})}drivers.value=(await api.get('/settings/database-drivers')).data;editingDriverId.value=''}catch(cause:any){pageError.value=cause.response?.data?.detail||'驱动保存失败'}}
 function editDriver(driver:any){editingDriverId.value=driver.id;driverConfig.value=JSON.stringify(Object.fromEntries(driverKeys.filter(key=>key in driver).map(key=>[key,driver[key]])),null,2)}
 async function toggleDriver(driver:any){const value=Object.fromEntries(driverKeys.filter(key=>key in driver).map(key=>[key,driver[key]]));value.enabled=!driver.enabled;await api.put(`/settings/database-drivers/${driver.id}`,value);drivers.value=(await api.get('/settings/database-drivers')).data}
-onMounted(async()=>{try{products.value=(await api.get('/datasource-products')).data;drivers.value=(await api.get('/settings/database-drivers')).data;await loadSources(true);schedulePoll()}catch(cause:any){pageError.value=cause.response?.data?.detail||'无法加载数据源'}})
-onUnmounted(()=>{disposed=true;if(poller)clearTimeout(poller)})
+onMounted(async()=>{
+  if (offlineEnabled) window.addEventListener('focus',loadOfflineSources)
+  void loadOfflineSources()
+  try{products.value=(await api.get('/datasource-products')).data;drivers.value=(await api.get('/settings/database-drivers')).data;await loadSources(true);schedulePoll()}catch(cause:any){pageError.value=cause.response?.data?.detail||'无法加载数据源'}})
+onUnmounted(()=>{disposed=true;if(poller)clearTimeout(poller);if(offlinePoller)clearTimeout(offlinePoller);window.removeEventListener('focus',loadOfflineSources)})
 </script>
 
 <template>
   <div class="page management-page datasource-page">
-    <div class="page-header"><div><h1>数据源</h1><p>维护只读数据库连接，查看已扫描的表结构与关联关系。</p></div><div class="header-actions"><t-button v-if="hasRole('admin')" variant="outline" @click="showDrivers=true">驱动管理</t-button><t-button v-if="canManage" theme="primary" @click="createVisible=true">添加数据源</t-button></div></div>
+    <div class="page-header">
+      <div><h1>数据源</h1><p>管理数据库连接和离线数据源，查看表结构与关联关系。</p></div>
+      <div class="header-actions">
+        <t-button v-if="hasRole('admin')" variant="outline" @click="showDrivers=true">驱动管理</t-button>
+        <t-button v-if="canManage" theme="primary" @click="createVisible=true">添加数据源</t-button>
+        <t-button v-if="canManage && offlineEnabled" variant="outline" @click="offlineCreateVisible=true">添加离线数据源</t-button>
+      </div>
+    </div>
     <t-alert v-if="pageError" theme="error" :message="pageError" closable @close="pageError=''" />
+    <t-alert v-if="offlineError" theme="warning" :message="offlineError" />
     <div class="workspace">
-      <aside class="source-sidebar"><div class="source-search"><t-input v-model="sourceSearch" clearable placeholder="搜索数据源"><template #prefix-icon><SearchIcon /></template></t-input></div><button v-for="item in filteredSources" :key="item.id" class="source-item" :class="{active:item.id===selectedId}" @click="selectSource(item)"><DatabaseIcon :type="item.type" /><span class="source-copy"><strong :title="item.name">{{ item.name }}</strong><small>{{ item.type }} · {{ item.objects }} 张表</small><small v-if="item.onboarding&&!isTableScan(item.onboarding)&&isModelingActive(item.onboarding)">{{ phaseLabel(item.onboarding.phase) }} {{ item.onboarding.progress }}%</small></span><i class="connection-dot" :class="item.status"></i></button><div v-if="!filteredSources.length" class="source-list-empty">
-        <template v-if="sourceSearch.trim() && sources.length">
+      <aside class="source-sidebar"><div class="source-search"><t-input v-model="sourceSearch" clearable placeholder="搜索数据源"><template #prefix-icon><SearchIcon /></template></t-input></div><button v-for="item in filteredSources" :key="item.id" class="source-item" :class="{active:item.id===selectedId}" @click="selectSource(item)"><DatabaseIcon :type="item.type" /><span class="source-copy"><strong :title="item.name">{{ item.name }}</strong><small>{{ item.type }} · {{ item.objects }} 张表</small><small v-if="item.onboarding&&!isTableScan(item.onboarding)&&isModelingActive(item.onboarding)">{{ phaseLabel(item.onboarding.phase) }} {{ item.onboarding.progress }}%</small></span><i class="connection-dot" :class="item.status"></i></button>
+        <button v-for="item in filteredOffline" :key="'offline:'+item.id" class="source-item"
+                :class="{active:item.id===offlineSelectedId}" @click="selectOffline(item)">
+          <DatabaseIcon :type="item.product || ''" />
+          <span class="source-copy">
+            <strong :title="item.name">{{ item.name }}</strong>
+            <small>{{ item.product_label }}<template v-if="item.status!=='ready'"> · {{ offlineStatuses[item.status] || item.status }}</template></small>
+          </span>
+          <i class="connection-dot" :class="{healthy:item.status==='ready',unsafe:item.status==='failed'}"></i>
+        </button>
+        <div v-if="!filteredSources.length && !filteredOffline.length" class="source-list-empty">
+        <template v-if="sourceSearch.trim() && (sources.length || offlineSources.length)">
           <span>没有匹配的数据源</span>
           <t-button size="small" variant="text" theme="primary" @click="sourceSearch=''">清除搜索</t-button>
         </template>
@@ -245,22 +464,54 @@ onUnmounted(()=>{disposed=true;if(poller)clearTimeout(poller)})
               <p v-if="scanOutcome" class="scan-outcome" :class="{ 'error-text': !scanOutcome.success }" role="status">{{ scanOutcome.message }}</p>
             </section>
           </div>
-        </template><div v-else class="blank-state"><DataBaseIcon size="48px"/><h3>选择一个数据源</h3><p>从左侧选择数据源查看详情，或点击右上角添加数据源。</p></div>
+        </template>
+        <template v-else-if="selectedOffline">
+          <div class="form-heading">
+            <div class="source-title">
+              <DatabaseIcon :type="selectedOffline.product || ''" branded />
+              <div><div class="source-title-line"><h2>{{ selectedOffline.name }}</h2><t-tag v-if="selectedOffline.status!=='ready'" variant="light">{{ offlineStatuses[selectedOffline.status] || selectedOffline.status }}</t-tag></div>
+                <p class="source-subtitle">{{ selectedOffline.product_label }}</p></div>
+            </div>
+            <div class="resource-links">
+              <t-button variant="outline" :disabled="selectedOffline.status!=='ready'" @click="openTables"><template #icon><DataBaseIcon /></template>查看数据表</t-button>
+              <t-button variant="outline" :disabled="selectedOffline.status!=='ready'" @click="openRelations"><template #icon><LinkIcon /></template>查看关联关系</t-button>
+              <t-button v-if="hasRole('admin')" theme="danger" variant="text" @click="openDeleteSource(selectedOffline,true)">删除数据源</t-button>
+            </div>
+          </div>
+          <section class="detail-panel offline-details">
+            <div class="detail-panel-heading"><h3>数据源信息</h3></div>
+            <dl class="connection-facts">
+              <div><dt>数据库类型</dt><dd>{{ selectedOffline.product_label || '未填写' }}</dd></div>
+              <div><dt>数据库版本</dt><dd>{{ selectedOffline.version || '未填写' }}</dd></div>
+            </dl>
+            <t-alert v-if="selectedOffline.error" theme="error" :message="selectedOffline.error" />
+            <t-button v-if="selectedOffline.status==='failed'" :loading="modelingAction==='retry'" @click="retryOfflineImport">重新导入</t-button>
+            <t-button v-if="selectedOffline.status==='preview'" :loading="modelingAction==='confirm'" @click="confirmOfflineImport">确认导入</t-button>
+          </section>
+        </template>
+        <div v-else class="blank-state"><DataBaseIcon size="48px"/><h3>选择一个数据源</h3><p>从左侧选择数据源查看详情，或点击右上角添加数据源。</p></div>
       </div>
     </div>
 
     <DeleteResourceDialog kind="数据源" :name="deletingSource?.name || ''" :busy="deletionBusy"
+                          :description="deletingSource?.offline?'删除后，导入文件、表结构和关联关系将一并移除。':undefined"
                           :error="deletionError" @confirm="deleteSource" @cancel="deletingSource = null" />
+    <OfflineSourceCreateDialog v-if="offlineEnabled&&canManage" v-model:visible="offlineCreateVisible" @created="offlineSourceCreated" />
     <DataSourceCreateDialog v-model:visible="createVisible" :products="products" :drivers="drivers" @created="sourceCreated" />
 
-    <t-drawer :close-btn="true" :close-on-esc-keydown="true" :visible="showTables" :header="tableDetail?'表结构详情':`${selected?.name||''} · 数据表`" :footer="false" size="min(1040px, 96vw)" @close="showTables=false"><div v-if="!tableDetail" class="drawer-body management-controls"><div class="drawer-toolbar"><t-input v-model="tableQuery" clearable placeholder="搜索表名、Schema 或说明" @enter="loadTables(true)"><template #prefix-icon><SearchIcon /></template></t-input><t-button @click="loadTables(true)">搜索</t-button></div><div class="data-table"><div class="table-row table-head"><span>表名</span><span>类型</span><span>说明</span><span>字段数</span><span></span></div><div v-for="table in tableItems" :key="table.id" class="table-row"><span><strong>{{ [table.schema,table.name].filter(Boolean).join('.') }}</strong><small>{{ table.primary_keys?.length?`主键：${table.primary_keys.flatMap((key:any)=>key.columns||[]).join(', ')}`:'未声明主键' }}</small></span><span>{{ table.kind||'TABLE' }}</span><span>{{ table.description||'—' }}</span><span>{{ table.column_count }}</span><span><t-button variant="text" @click="openTableDetail(table)">查看 Schema</t-button></span></div></div><t-pagination :current="tablePage" :page-size="tablePageSize" :total="tableTotal" :page-size-options="[10,20,50,100]" @current-change="changeTablePage" @page-size-change="changeTablePageSize" /></div><div v-else class="schema-detail management-controls"><t-button variant="text" @click="tableDetail=null">← 返回表目录</t-button><div class="schema-title"><h3>{{ [tableDetail.schema,tableDetail.name].filter(Boolean).join('.') }}</h3><p>{{ tableDetail.description||'暂无表说明' }}</p></div><div class="column-table"><div class="column-head"><span>字段</span><span>类型</span><span>可空</span><span>说明</span></div><div v-for="column in tableDetail.columns||[]" :key="column.name" class="column-line"><code>{{ column.name }}</code><span>{{ column.raw_type||column.type }}</span><span>{{ column.nullable?'是':'否' }}</span><span>{{ column.description||column.comment||'—' }}</span></div></div><div class="constraint-grid"><article><h4>主键</h4><pre>{{ JSON.stringify(tableDetail.primary_keys||[],null,2) }}</pre></article><article><h4>唯一约束</h4><pre>{{ JSON.stringify(tableDetail.unique_constraints||[],null,2) }}</pre></article><article><h4>外键</h4><pre>{{ JSON.stringify(tableDetail.foreign_keys||[],null,2) }}</pre></article><article><h4>索引</h4><pre>{{ JSON.stringify(tableDetail.indexes||[],null,2) }}</pre></article></div></div></t-drawer>
+    <t-drawer :close-btn="true" :close-on-esc-keydown="true" :visible="showTables" :header="tableDetail?'表结构详情':`${currentSource?.name||''} · 数据表`" :footer="false" size="min(1040px, 96vw)" @close="showTables=false"><div v-if="!tableDetail" class="drawer-body management-controls"><div class="drawer-toolbar"><t-input v-model="tableQuery" clearable placeholder="搜索表名、Schema 或说明" @enter="loadTables(true)"><template #prefix-icon><SearchIcon /></template></t-input><t-button @click="loadTables(true)">搜索</t-button></div><div class="data-table"><div class="table-row table-head"><span>表名</span><span>类型</span><span>说明</span><span>字段数</span><span></span></div><div v-for="table in tableItems" :key="table.id" class="table-row"><span><strong>{{ [table.schema,table.name].filter(Boolean).join('.') }}</strong><small>{{ table.primary_keys?.length?`主键：${table.primary_keys.flatMap((key:any)=>key.columns||[]).join(', ')}`:'未声明主键' }}</small></span><span>{{ table.kind||'TABLE' }}</span><span>{{ table.description||'—' }}</span><span>{{ table.column_count }}</span><span><t-button variant="text" @click="openTableDetail(table)">查看 Schema</t-button></span></div></div><t-pagination :current="tablePage" :page-size="tablePageSize" :total="tableTotal" :page-size-options="[10,20,50,100]" @current-change="changeTablePage" @page-size-change="changeTablePageSize" /></div><div v-else class="schema-detail management-controls"><t-button variant="text" @click="tableDetail=null">← 返回表目录</t-button><div class="schema-title"><h3>{{ [tableDetail.schema,tableDetail.name].filter(Boolean).join('.') }}</h3><p>{{ tableDetail.description||'暂无表说明' }}</p></div><div class="column-table"><div class="column-head"><span>字段</span><span>类型</span><span>可空</span><span>说明</span></div><div v-for="column in tableDetail.columns||[]" :key="column.name" class="column-line"><code>{{ column.name }}</code><span>{{ column.raw_type||column.type }}</span><span>{{ column.nullable?'是':'否' }}</span><span>{{ column.description||column.comment||'—' }}</span></div></div><div class="constraint-grid"><article><h4>主键</h4><pre>{{ JSON.stringify(tableDetail.primary_keys||[],null,2) }}</pre></article><article><h4>唯一约束</h4><pre>{{ JSON.stringify(tableDetail.unique_constraints||[],null,2) }}</pre></article><article><h4>外键</h4><pre>{{ JSON.stringify(tableDetail.foreign_keys||[],null,2) }}</pre></article><article><h4>索引</h4><pre>{{ JSON.stringify(tableDetail.indexes||[],null,2) }}</pre></article></div></div></t-drawer>
 
-    <t-drawer :close-btn="true" :close-on-esc-keydown="true" v-model:visible="showRelations" :header="`${selected?.name||''} · 关联关系`" :footer="false" size="min(1040px,96vw)">
+    <t-drawer :close-btn="true" :close-on-esc-keydown="true" v-model:visible="showRelations" :header="`${currentSource?.name||''} · 关联关系`" :footer="false" size="min(1040px,96vw)">
       <div class="drawer-body management-controls"><t-alert v-if="relationError" theme="error" :message="relationError" />
-      <div class="drawer-toolbar"><t-button v-if="canManage" theme="primary" :disabled="modelingBusy" @click="editSourceRelation()">添加关联关系</t-button><t-button v-if="canManage" :disabled="modelingBusy||!!modelingAction" :loading="modelingAction==='analyze'" @click="analyzeRelations">重新分析关联关系</t-button><t-button v-if="canManage&&canCancelModeling" theme="danger" @click="cancelModeling">取消任务</t-button></div>
+      <div class="drawer-toolbar">
+        <t-button v-if="canManage" theme="primary" :disabled="relationOperationsBusy" @click="editSourceRelation()">添加关联关系</t-button>
+        <t-button v-if="canManage" :disabled="relationOperationsBusy" :loading="modelingAction==='analyze'" @click="analyzeRelations">{{ selectedOffline && !selectedOffline.analysis ? '分析关联关系' : '重新分析关联关系' }}</t-button>
+        <t-button v-if="canManage&&(selectedOffline ? selectedOffline.analysis==='运行中' : canCancelModeling)" theme="danger" :loading="modelingAction==='cancel'" @click="cancelModeling">取消任务</t-button>
+      </div>
+      <t-alert v-if="selectedOffline?.analysis && selectedOffline.analysis!=='完成'" :theme="offlineAnalysisActive ? 'info' : 'warning'" :message="selectedOffline.analysis==='运行中'?'正在分析关联关系':selectedOffline.analysis" />
       <t-tabs :value="relationStatus" @change="changeRelationStatus"><t-tab-panel value="all" :label="`全部 ${relationCounts.all||0}`" /><t-tab-panel value="accepted" :label="`已生效 ${relationCounts.accepted||0}`" /><t-tab-panel value="pending" :label="`待审核 ${relationCounts.pending||0}`" /><t-tab-panel value="disabled" :label="`已停用 ${relationCounts.disabled||0}`" /></t-tabs>
-      <div class="relation-list"><RelationshipCard v-for="r in relationItems" :key="r.id" :source-table="r.source_table_id" :target-table="r.target_table_id" :source-fields="r.source_columns" :target-fields="r.target_columns" :cardinality="r.cardinality" :status="r.status" :reason="r.decision_reason" :busy="modelingBusy||relationBusy" :can-manage="canManage" @edit="editSourceRelation(r)" @decision="action=>action==='disable'?disablingSourceRelation=r:decideSourceRelation(action,r)" /><div v-if="!relationItems.length" class="empty-list">暂无关联关系</div></div>
-      <t-pagination v-model="relationPage" :total="relationTotal" :page-size="20" @current-change="loadRelations" /></div>
+      <div class="relation-list"><RelationshipCard v-for="r in relationItems" :key="r.id" :source-table="r.source_table_id" :target-table="r.target_table_id" :source-fields="r.source_columns" :target-fields="r.target_columns" :cardinality="r.cardinality" :status="r.status" :reason="r.decision_reason" :condition="relationCondition(r)" :busy="relationOperationsBusy||relationBusy" :can-manage="canManage" @edit="editSourceRelation(r)" @decision="action=>action==='disable'?disablingSourceRelation=r:decideSourceRelation(action,r)" /><div v-if="!relationItems.length" class="empty-list">暂无关联关系</div></div>
+      <t-pagination v-model="relationPage" :total="relationTotal" :page-size="20" @current-change="refreshRelations" /></div>
     </t-drawer>
     <t-dialog v-model:visible="relationEditing" :header="relationForm.id?'编辑关联关系':'添加关联关系'" width="min(800px, 94vw)" :footer="false" :close-on-overlay-click="!relationBusy" :close-btn="!relationBusy" :close-on-esc-keydown="!relationBusy">
       <div class="relation-editor management-controls">
@@ -268,7 +519,8 @@ onUnmounted(()=>{disposed=true;if(poller)clearTimeout(poller)})
         <div class="form-grid"><label>来源表<t-select v-model="relationForm.source_table_id" filterable :options="relationTables" @search="searchRelationTables" @change="relationSide('source')" /></label><label>目标表<t-select v-model="relationForm.target_table_id" filterable :options="relationTables" @search="searchRelationTables" @change="relationSide('target')" /></label><label>关联基数<t-select v-model="relationForm.cardinality" :options="knownCardinalities.map(v=>({label:v,value:v}))" placeholder="请选择明确基数" /></label></div>
         <h3>关联条件</h3><div v-for="(pair,i) in relationForm.key_pairs" :key="i" class="pair-row"><t-select v-model="pair.source" filterable :options="relationColumns.source.map(c=>({label:c.name,value:c.name}))" /><span>=</span><t-select v-model="pair.target" filterable :options="relationColumns.target.map(c=>({label:c.name,value:c.name}))" /><t-button variant="text" :disabled="relationForm.key_pairs.length===1" @click="relationForm.key_pairs.splice(i,1)">移除</t-button></div>
         <t-button :disabled="relationForm.key_pairs.length>=8" @click="relationForm.key_pairs.push({source:'',target:''})">添加字段对</t-button>
-        <div class="form-actions"><t-button :disabled="relationBusy" @click="relationEditing=false">取消</t-button><t-button :loading="relationBusy" :disabled="modelingBusy||!knownCardinalities.includes(relationForm.cardinality)||!relationForm.source_table_id||!relationForm.target_table_id||relationForm.key_pairs.some((p:any)=>!p.source||!p.target)" theme="primary" @click="saveSourceRelation">保存并生效</t-button></div>
+        <label v-if="selectedOffline" class="offline-condition">附加条件（选填）<t-input v-model="relationForm.condition" placeholder="使用 source.字段 或 target.字段" /></label>
+        <div class="form-actions"><t-button :disabled="relationBusy" @click="relationEditing=false">取消</t-button><t-button :loading="relationBusy" :disabled="relationOperationsBusy||!knownCardinalities.includes(relationForm.cardinality)||!relationForm.source_table_id||!relationForm.target_table_id||relationForm.key_pairs.some((p:any)=>!p.source||!p.target)" theme="primary" @click="saveSourceRelation">保存并生效</t-button></div>
       </div>
     </t-dialog>
     <t-dialog :visible="!!analysisConfirmation" header="确认重新分析关联关系" :confirm-btn="{content:'确认分析',loading:modelingAction==='analyze'}" :cancel-btn="{disabled:!!modelingAction}" :close-btn="!modelingAction" :close-on-overlay-click="!modelingAction" :close-on-esc-keydown="!modelingAction" @confirm="confirmAnalysis" @cancel="analysisConfirmation=null" @close="analysisConfirmation=null"><p>将使用最近一次保存的表结构，重新分析“{{analysisConfirmation?.name}}”的关联关系，可能需要几分钟并消耗模型额度。</p><p>分析期间可取消；原有已生效关系保持可用，完整分析成功后才更新结果。</p><t-alert v-if="pageError" theme="error" :message="pageError" /></t-dialog>
@@ -291,6 +543,8 @@ onUnmounted(()=>{disposed=true;if(poller)clearTimeout(poller)})
 .source-item { grid-template-columns: 36px minmax(0, 1fr) 8px; gap: 12px; min-height: 64px; padding: 8px 10px; margin-bottom: 3px; }
 .source-item:hover { background: #f3f7fb; }
 .source-item.active { background: #e7f0fc; }
+.offline-details{margin-top:20px}
+.offline-condition{display:grid;gap:6px;margin-top:16px}
 .source-copy strong { font-size: 14px; }
 .source-form-panel { padding: 0 0 20px 30px; }
 .form-heading { align-items: center; padding: 0; border: 0; flex-wrap: wrap; }

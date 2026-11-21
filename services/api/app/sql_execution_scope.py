@@ -14,6 +14,8 @@ def execution_scope(payload):
              'source_targets': targets,
              'result_target': {'engine': 'local', 'dialect': 'duckdb',
                                'table_namespace': 'previous_steps.name', 'column_namespace': 'previous_steps.output_columns'}}
+    if payload.get('sql_contract', {}).get('output') == 'single_source_statement':
+        scope.pop('result_target')
     steps = payload.get('program_steps') or (payload.get('program') or {}).get('steps', [])
     previous = []
     scopes = []
@@ -91,6 +93,10 @@ def program_output_contract(payload, original):
                 'dialect': {'const': target['dialect']},
                 'sql': {'type': 'string', 'description': '只读execution_scope中本数据源允许的表；前序结果仅通过inputs绑定键值。'}}}]}
         branches.append({'$ref': '#/$defs/' + name})
+    if branches and payload.get('sql_contract', {}).get('output') == 'single_source_statement':
+        base['properties']['inputs']['maxItems'] = 0
+        schema['properties']['steps'].update({'items':{'oneOf':branches},'minItems':1,'maxItems':1})
+        return schema
     schema['$defs']['LocalResultSQL'] = {'allOf': [{'$ref': '#/$defs/SQLProgramStep'}, {
         'type': 'object', 'required': ['engine'], 'properties': {
             'engine': {'const': 'local'}, 'data_source_id': {'const': ''}, 'dialect': {'const': 'duckdb'},

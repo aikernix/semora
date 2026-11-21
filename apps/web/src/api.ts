@@ -74,6 +74,7 @@ export interface KnowledgeResearchResult {
   evidence: any[]
 }
 export interface QueryRun {
+  offline_source_id?: string | null
   created_at?: string
   query_rehearsal?: { summary: string; target_state: 'known' | 'needs_direction'; skeleton: string[]; questions: ClarificationQuestion[]; technical_gaps: QueryConfigurationGap[]; confidence?: {level: 'high' | 'medium' | 'low'; reason: string} }
   delivery?: { kind: 'sql' | 'result' | 'clarification' | 'blocked' | 'cancelled' | 'interrupted'; title: string; summary: string; warnings: string[]; next_action: string; result_verified: boolean }

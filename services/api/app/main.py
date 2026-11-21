@@ -45,6 +45,7 @@ from .settings import settings_service
 from .model_settings import model_settings, ModelConfigInput
 from .candidate_extraction import CandidateExtractionError, candidate_extractor
 from .database_routes import router as database_router, modeling_service
+from .offline_domains import router as offline_domain_router, domain_source_mode, ready_offline_sources
 
 
 @asynccontextmanager
@@ -79,6 +80,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(database_router)
+app.include_router(offline_domain_router)
 workflow = Workflow(store)
 
 
@@ -324,17 +326,46 @@ def list_sessions(request: Request) -> list[dict]:
 @app.get("/api/v1/domains")
 async def list_domains() -> list[dict]:
     try:
-        return await ontology_service.list_drafts()
+        drafts = await ontology_service.list_drafts()
     except OntologyCoreError as exc:
         raise_ontology_error(exc)
+    sources = {}
+    if any(domain_source_mode(draft) == 'offline' for draft in drafts):
+        try:
+            sources = {source['id']:source for source in await ready_offline_sources()}
+        except HTTPException:
+            pass
+    for draft in drafts:
+        mode = draft['sourceMode'] = domain_source_mode(draft)
+        if mode == 'offline':
+            source_id = draft['offlineSourceIds'][0]
+            draft['status'] = 'configured' if source_id in sources else 'unconfigured'
+        elif mode == 'conflict':
+            draft['status'] = 'configured'
+    return drafts
+
+
+async def validate_query_scope(body: SessionCreate):
+    try:
+        draft = await ontology_service.get_draft(body.domain)
+    except OntologyCoreError as exc:
+        raise HTTPException(422, f"业务域不存在或不可用：{exc}") from exc
+    mode = domain_source_mode(draft)
+    if mode == 'conflict':
+        raise HTTPException(409, '请先在本体工作室解除不兼容的数据源绑定')
+    offline_id = draft['offlineSourceIds'][0] if mode == 'offline' else None
+    requested = body.requirement_form.get('offline_source_id')
+    if requested and requested != offline_id:
+        raise HTTPException(422,'该离线数据源未绑定当前业务域')
+    if offline_id:
+        body.requirement_form['offline_source_id'] = offline_id
+    else:
+        body.requirement_form.pop('offline_source_id', None)
 
 
 @app.post("/api/v1/sessions", status_code=201)
 async def create_session(body: SessionCreate, request: Request) -> dict:
-    try:
-        await ontology_service.get_draft(body.domain)
-    except OntologyCoreError as exc:
-        raise HTTPException(422, f"业务域不存在或不可用：{exc}") from exc
+    await validate_query_scope(body)
     principal = request_principal(request)
     session = store.create_session(body.title, body.domain, principal.subject if principal else None)
     session.requirement_form = body.requirement_form
@@ -377,12 +408,13 @@ def list_session_runs(
 
 
 @app.put('/api/v1/sessions/{session_id}/requirement')
-def update_session_requirement(session_id: str, body: SessionCreate, request: Request):
+async def update_session_requirement(session_id: str, body: SessionCreate, request: Request):
     session=require_session_access(session_id,request)
     if session.run_ids:
         raise HTTPException(409,'需求单已经开始分析，请在对话中补充或新建需求')
     if session.domain!=body.domain:
         raise HTTPException(409,'业务域已绑定，请新建需求切换业务域')
+    await validate_query_scope(body)
     session.title=body.title
     session.requirement_form=body.requirement_form
     store._persist_session(session)

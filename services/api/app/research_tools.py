@@ -156,7 +156,7 @@ class ResearchTools:
             )
 
         functions = [request_context]
-        if self.context_state and self.context_state["packet"].get("schemas"):
+        if not getattr(self.run,'offline_source_id',None) and self.context_state and self.context_state["packet"].get("schemas"):
             functions.append(self.inspect_field_values)
         if self.run.evidence:
             functions.append(read_evidence)

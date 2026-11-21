@@ -188,9 +188,10 @@ def validate_grouping(tree, objects):
 
 def compile_step(step, ontology, results=None, *, template=False, row_limit=1000, result_keys=None):
     results = results or {}
+    offline = ontology.get('offlineProfile')
+    dialect = step_dialect(step, offline)
     if step.engine == "local":
         allowed = list(results)
-        dialect = "duckdb"
         source_label = "结果合并"
     else:
         allowed = [
@@ -198,8 +199,7 @@ def compile_step(step, ontology, results=None, *, template=False, row_limit=1000
             for o in ontology.get("objects", [])
             if (o.get("dataSourceId") or ontology.get("dataSourceId")) == step.data_source_id
         ]
-        dialect = dialect_for(step.data_source_id)
-        source_label = datasource_service.repository.get(step.data_source_id).name
+        source_label = offline['name'] if offline else datasource_service.repository.get(step.data_source_id).name
     tree = readonly_tree(step.sql, allowed, step.dialect or "postgres")
     if step.engine == "source":
         from .sql_column_refs import validate_physical_column_refs
@@ -212,9 +212,7 @@ def compile_step(step, ontology, results=None, *, template=False, row_limit=1000
     if step.engine == "source":
         from .database_profile import source_profile, validate_features
 
-        validate_features(
-            tree, source_profile(datasource_service.repository.get(step.data_source_id))
-        )
+        validate_features(tree, offline or source_profile(datasource_service.repository.get(step.data_source_id)))
     values, markers = {}, {}
     params = dict(step.parameters)
     dynamic = {b.parameter: b for b in step.inputs}
@@ -312,7 +310,8 @@ def compile_step(step, ontology, results=None, *, template=False, row_limit=1000
                 )
     pagination_strategy="sqlglot"
     if step.engine=="source" and dialect=="oracle":
-        pagination_strategy=datasource_service.repository.get(step.data_source_id).scan_result.get("capabilities",{}).get("pagination_strategy",baseline_pagination(dialect))
+        capabilities = offline['capabilities'] if offline else datasource_service.repository.get(step.data_source_id).scan_result.get("capabilities",{})
+        pagination_strategy=capabilities.get("pagination_strategy",baseline_pagination(dialect))
     try:
         tree=apply_pagination(tree,dialect,pagination_strategy)
     except ValueError as exc:
@@ -365,5 +364,9 @@ def compile_step(step, ontology, results=None, *, template=False, row_limit=1000
     )
 
 
-def step_dialect(step):
+def step_dialect(step, offline=None):
+    if offline:
+        if step.engine != 'source' or step.data_source_id != offline['id'] or step.inputs:
+            raise SQLIssue('离线查询需要一条可独立运行的目标数据库语句')
+        return offline['dialect']
     return "duckdb" if step.engine == "local" else dialect_for(step.data_source_id)

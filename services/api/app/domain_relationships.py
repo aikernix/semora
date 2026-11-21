@@ -66,6 +66,8 @@ def manual_record(relation,configuration,domain,service,identifier=None):
     if not cross_relation(relation,objects):raise HTTPException(422,'本体工作室只维护跨数据库关系')
     if relation.get('cardinality') not in KNOWN_CARDINALITIES:raise HTTPException(422,'请先选择明确的关联基数')
     source,target=objects[relation['from']],objects[relation['to']]
+    if {source.get('dataSourceId'),target.get('dataSourceId')}.intersection(configuration.get('offlineSourceIds') or []):
+        raise HTTPException(422,'离线数据源不能参与跨库关联')
     maps={side:{p['name']:p.get('column') or p['name'] for p in obj.get('properties',[])}
           for side,obj in [('source',source),('target',target)]}
     aliases={relation['from']:'source',relation['to']:'target'}

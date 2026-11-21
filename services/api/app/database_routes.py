@@ -15,7 +15,7 @@ from semora_contracts.database import PRODUCTS, native_protocol
 from .datasources import datasource_service
 from .mdl_export import build_mdl, merge_snapshot, column_type
 from .datasource_table_storage import tables_digest
-from .ontology import ontology_service
+from .ontology import OntologyCoreError, ontology_service
 from .datasource_modeling import ModelingService, TERMINAL, _indexed, package_objects, package_relations, GENERATOR_VERSION, sampling_key
 from .relation_output import clean_relations
 
@@ -581,11 +581,16 @@ async def bind_source_package(domain: str,identifier: str):
         raise HTTPException(409,"请先手动更新关联关系，使其与当前结构一致")
     try:configuration=await ontology_service.get_configuration(domain)
     except Exception as exc:raise HTTPException(404,"业务域不存在") from exc
+    if configuration.get('offlineSourceIds'):
+        raise HTTPException(409,"业务域已绑定离线数据源，请先解除绑定")
     refs={ref["dataSourceId"]:ref for ref in configuration.get("sourcePackageRefs",[]) if ref.get("dataSourceId")}
     refs[identifier]={"dataSourceId":identifier,"schemaHash":package["schema_hash"]}
     configuration['sourcePackageRefs']=list(refs.values())
     configuration["dataSourceId"]=configuration.get("dataSourceId") or item.id
-    return await ontology_service.save_configuration(domain,configuration)
+    try:
+        return await ontology_service.save_configuration(domain,configuration)
+    except OntologyCoreError as exc:
+        raise HTTPException(exc.status_code,str(exc)) from exc
 
 
 @router.delete('/ontology/configurations/{domain}/sources/{identifier}')
@@ -672,6 +677,8 @@ async def list_cross_source_analysis(domain:str):
 async def start_cross_source(domain: str,body: CrossSourceInput):
     try:configuration=await ontology_service.get_configuration(domain)
     except Exception as exc:raise HTTPException(404,"业务域不存在") from exc
+    if {body.left_source_id,body.right_source_id}.intersection(configuration.get("offlineSourceIds") or []):
+        raise HTTPException(422,"离线数据源不能参与跨库关联")
     bound={ref.get("dataSourceId") for ref in configuration.get("sourcePackageRefs",[])}
     bound.update(obj.get("dataSourceId") or configuration.get("dataSourceId") for obj in configuration.get("objects",[]))
     if body.left_source_id not in bound or body.right_source_id not in bound:

@@ -14,6 +14,13 @@ func withoutSource(value Ontology, sourceID string) Ontology {
 		}
 	}
 	value.SourcePackageRefs = refs
+	offline := []string{}
+	for _, id := range value.OfflineSourceIDs {
+		if id != sourceID {
+			offline = append(offline, id)
+		}
+	}
+	value.OfflineSourceIDs = offline
 	objects := []ObjectClass{}
 	removed := map[string]bool{}
 	for _, object := range value.Objects {
@@ -76,8 +83,8 @@ func (s *Store) unbindSource(ctx context.Context, domain, sourceID string) (Onto
 		return Ontology{}, err
 	}
 	value := withoutSource(composeReferences(previous, packages), sourceID)
-	if len(value.Objects) > 0 || len(value.SourcePackageRefs) > 0 {
-		value, err = s.saveEffectiveTx(ctx, tx, value)
+	if len(value.Objects) > 0 || len(value.SourcePackageRefs) > 0 || len(value.OfflineSourceIDs) > 0 {
+		value, err = s.saveEffectiveTx(ctx, tx, value, true)
 	} else {
 		value.Version = bumpPatchVersion(previous.Version)
 		var snapshot Snapshot

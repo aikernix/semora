@@ -544,6 +544,7 @@ class QueryRun(BaseModel):
     delivery_warnings: list[str] = Field(default_factory=list)
     id: str = Field(default_factory=lambda: str(uuid4()))
     session_id: str
+    offline_source_id: str | None = None
     domain: str = ""
     question: str
     message_mode: Literal["auto", "continue", "new"] = "auto"

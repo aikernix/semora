@@ -519,7 +519,7 @@ func (s *Store) updateSourcePackage(ctx context.Context, input sourcePackageUpda
 			return e
 		}
 		effective := pruneInvalidReferences(composeReferences(pruneSourceObjects(definition, packages), packages))
-		if _, e = s.saveEffectiveTx(ctx, tx, effective); e != nil {
+		if _, e = s.saveEffectiveTx(ctx, tx, effective, false); e != nil {
 			return e
 		}
 	}

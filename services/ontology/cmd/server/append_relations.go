@@ -155,7 +155,7 @@ func (s *Store) appendCrossRelations(ctx context.Context, input crossRelationApp
 	if err != nil {
 		return err
 	}
-	if _, err = s.saveEffectiveTx(ctx, tx, value); err != nil {
+	if _, err = s.saveEffectiveTx(ctx, tx, value, false); err != nil {
 		return err
 	}
 	return tx.Commit()
