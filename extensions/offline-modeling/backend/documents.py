@@ -12,8 +12,6 @@ MAX_EXPANDED = 96 * 1024 * 1024
 WORD = r'[^\W\d][\w$]*'
 REF = rf'{WORD}(?:\.{WORD})+'
 EQUALITY = re.compile(rf'({REF})\s*=\s*({REF})', re.UNICODE)
-DECLARATION = re.compile(r'^\s*(?:声明关系|关联关系|外键|relationship|foreign key)\s*[:：]\s*', re.I)
-SQL_HEAD = re.compile(r'\b(?:WITH|SELECT)\b', re.I)
 CARDINALITY = {'一对一':'1:1', '一对多':'1:N', '多对一':'N:1', '多对多':'N:N'}
 
 
@@ -24,7 +22,7 @@ def blocks(path: Path, filename: str):
             if sum(x.file_size for x in bundle.infolist()) > MAX_EXPANDED:
                 raise ValueError(f'{filename} 解压后超过大小限制')
     count = 0
-    for locator, value, explicit in _regions(path, suffix):
+    for locator, value, layout in _regions(path, suffix):
         text = value.strip()
         if not text:
             continue
@@ -35,7 +33,7 @@ def blocks(path: Path, filename: str):
                 raise ValueError(f'{filename} 文档区域数超限')
             yield {'file': filename, 'locator': locator, 'part': start // MAX_BLOCK_CHARS + 1,
                    'text': text[start:start+MAX_BLOCK_CHARS],
-                   'explicit': explicit and len(text) <= MAX_BLOCK_CHARS}
+                   **(layout if len(text) <= MAX_BLOCK_CHARS else {'section':layout.get('section','')})}
 
 
 def _regions(path, suffix):
@@ -45,16 +43,10 @@ def _regions(path, suffix):
             book = load_workbook(stream, read_only=True, data_only=True, keep_links=False)
             try:
                 for sheet in book:
-                    columns = []
                     for i, row in enumerate(sheet.iter_rows(values_only=True), 1):
                         values = ['' if v is None else str(v) for v in row]
-                        headers = [j for j, v in enumerate(values) if v.strip() in {'关联关系','关联条件','外键表达式','JOIN条件','Join 条件'}]
-                        if headers and not any('=' in values[j] for j in headers):
-                            columns = headers
-                        selected = [values[j] for j in columns if j < len(values) and '=' in values[j]]
-                        for v in selected:
-                            yield f'{sheet.title}!第 {i} 行', v, True
-                        yield f'{sheet.title}!第 {i} 行', ' | '.join(v for v in values if v and v != '#N/A'), False
+                        yield f'{sheet.title}!第 {i} 行', ' | '.join(values).strip(' |'), {
+                            'section':sheet.title,'cells':values}
             finally:
                 book.close()
     elif suffix == '.docx':
@@ -63,27 +55,25 @@ def _regions(path, suffix):
         from docx.text.paragraph import Paragraph
         with path.open('rb') as stream:
             doc = Document(stream)
+            title = ''
             for i, item in enumerate(doc.element.body, 1):
                 if item.tag.endswith('}p'):
-                    yield f'段落 {i}', Paragraph(item, doc).text, False
+                    paragraph = Paragraph(item, doc)
+                    if (paragraph.style.name or '').casefold().startswith(('heading','title','标题')):
+                        title = paragraph.text
+                    yield f'段落 {i}', paragraph.text, {'section':title}
                 elif item.tag.endswith('}tbl'):
-                    headers = []
                     for j, row in enumerate(Table(item, doc).rows, 1):
                         cells = [c.text for c in row.cells]
-                        found = [k for k, cell in enumerate(cells) if cell.strip() in {'关联关系','关联条件','外键表达式'}]
-                        if found:
-                            headers = found
-                        for k in headers:
-                            if k < len(cells) and '=' in cells[k]:
-                                yield f'表格 {i} 第 {j} 行', cells[k], True
-                        yield f'表格 {i} 第 {j} 行', ' | '.join(cells), False
+                        yield f'表格 {i} 第 {j} 行', ' | '.join(cells).strip(' |'), {
+                            'section':f'{title} · 表格 {i}','cells':cells}
     elif suffix in {'.txt', '.sql'}:
         with path.open(encoding='utf-8-sig') as stream:
             start, lines, size = 1, [], 0
             for i, line in enumerate(stream, 1):
                 if not line.strip() or size + len(line) > MAX_BLOCK_CHARS:
                     if lines:
-                        yield f'第 {start}–{i-1} 行', ''.join(lines), False
+                        yield f'第 {start}–{i-1} 行', ''.join(lines), {}
                     lines, start, size = [], i, 0
                 if line.strip():
                     if not lines:
@@ -91,7 +81,7 @@ def _regions(path, suffix):
                     lines.append(line)
                     size += len(line)
             if lines:
-                yield f'第 {start}–{i} 行', ''.join(lines), False
+                yield f'第 {start}–{i} 行', ''.join(lines), {}
     else:
         raise ValueError(f'不支持的资料格式：{suffix}')
 
@@ -111,25 +101,6 @@ def declared_mappings(text):
     if not pairs:
         return None
     return pairs, guards
-
-
-def extract(records):
-    for record in records:
-        text = record['text']
-        if record['explicit']:
-            yield {'kind': 'declaration', 'mapping': declared_mappings(text), 'record': record}
-        else:
-            for line in text.splitlines():
-                prefix = DECLARATION.match(line)
-                if prefix:
-                    yield {'kind': 'declaration', 'mapping': declared_mappings(line[prefix.end():]), 'record': record}
-            match = SQL_HEAD.search(text)
-            if match:
-                declared = re.search(r'(?:关联基数|基数|cardinality)\s*[:：]\s*(一对一|一对多|多对一|多对多|[1N]:[1N])',
-                                     text[:match.start()], re.I)
-                value = declared[1].upper() if declared else None
-                yield {'kind': 'history', 'sql': text[match.start():].removesuffix('```').strip(),
-                       'record': record, 'cardinality': CARDINALITY.get(value, value)}
 
 
 def historical_mappings(sql, dialect):
@@ -189,8 +160,4 @@ def historical_mappings(sql, dialect):
                                     if pair not in mapping:
                                         mapping.append(pair)
                                 continue
-                            if isinstance(b,exp.Column):
-                                a,b = b,a
-                            if isinstance(a,exp.Column) and aliases.get(a.table) in endpoints and isinstance(b,(exp.Literal,exp.Boolean,exp.Neg)):
-                                guards.append((f'{aliases[a.table]}.{a.name}',b.sql(dialect=dialect)))
                     yield mapping, list(dict.fromkeys(guards))

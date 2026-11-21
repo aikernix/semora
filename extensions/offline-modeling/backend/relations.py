@@ -5,8 +5,6 @@ import re
 import sqlglot
 from sqlglot import exp
 
-from .documents import extract, historical_mappings
-
 
 def signature(r):
     direct = (r['source'], r['target'], sorted(tuple(p) for p in r['pairs']))
@@ -82,7 +80,25 @@ def validate(r, tables, dialect):
     return r
 
 
-def initial_relations(catalog, records, dialect):
+def bind_document_mapping(mapping, tables, dialect):
+    fields, guards = mapping
+    left, right, pairs = bind(fields, tables)
+    conditions = []
+    for field, literal in guards:
+        table, _, column = field.rpartition('.')
+        matching = [(side,ident) for side,ident in [('source',left),('target',right)]
+                    if table.casefold() in {ident.casefold(),ident.rsplit('.',1)[-1].casefold()}]
+        if len(matching) != 1:
+            raise ValueError(f'无法定位附加条件：{field}')
+        side, ident = matching[0]
+        columns = [c['name'] for c in tables[ident]['columns'] if c['name'].casefold()==column.casefold()]
+        if len(columns)!=1:
+            raise ValueError(f'无法定位附加条件：{field}')
+        conditions.append(f"{exp.column(columns[0], table=side, quoted=True).sql(dialect=dialect)} = {literal}")
+    return left, right, pairs, ' AND '.join(conditions)
+
+
+def initial_relations(catalog, dialect):
     tables = catalog['tables']
     candidates = {}
     for r in catalog['relations']:
@@ -90,59 +106,4 @@ def initial_relations(catalog, records, dialect):
             candidates[signature(r)] = validate(r, tables, dialect)
         except ValueError as exc:
             catalog['warnings'].append(f"{r['evidence']}：{exc}")
-    for item in extract(records):
-        record = item['record']
-        evidence = f"{record['file']} · {record['locator']}"
-        declared = item['kind'] == 'declaration'
-        mappings = [item['mapping']] if declared else list(historical_mappings(item['sql'], dialect))
-        for mapping in mappings:
-            try:
-                if not mapping:
-                    raise ValueError('声明关系需给出可定位的完整等值映射，请手动检查')
-                fields, guards = mapping
-                left, right, pairs = bind(fields, tables)
-                conditions = []
-                for field, literal in guards:
-                    table, _, column = field.rpartition('.')
-                    matching = [(side,t) for side,t in [('source',left),('target',right)]
-                                if table.casefold() in {t.casefold(),t.rsplit('.',1)[-1].casefold()}]
-                    if len(matching) != 1:
-                        raise ValueError(f'无法定位附加条件：{field}')
-                    side, ident = matching[0]
-                    columns = [c['name'] for c in tables[ident]['columns'] if c['name'].casefold()==column.casefold()]
-                    if len(columns)!=1:
-                        raise ValueError(f'无法定位附加条件：{field}')
-                    conditions.append(f"{exp.column(columns[0], table=side, quoted=True).sql(dialect=dialect)} = {literal}")
-                known = cardinality(tables,left,right,pairs)
-                explicit = item.get('cardinality') if len(mappings) == 1 else None
-                if known == 'unknown' and explicit in {'1:1','N:1','1:N','N:N'}:
-                    known = explicit
-                elif explicit in {'1:1','N:1','1:N','N:N'} and any(
-                    inferred == '1' and stated == 'N' for inferred,stated in zip(known,explicit)
-                ):
-                    catalog['warnings'].append(f'{evidence}：历史基数与 DDL 唯一约束冲突，请确认')
-                    known = 'unknown'
-                elif explicit in {'1:1','N:1','1:N','N:N'}:
-                    known = explicit
-                r = validate({'source':left, 'target':right, 'pairs':pairs, 'condition':' AND '.join(conditions),
-                    'cardinality':known, 'status':'active' if declared or known != 'unknown' else 'pending',
-                    'origin':'document' if declared else 'history', 'evidence':evidence}, tables, dialect)
-                candidates.setdefault(signature(r), r)
-            except ValueError as exc:
-                if declared:
-                    catalog['warnings'].append(f'{evidence}：{exc}')
     return candidates
-
-
-def recall_groups(tables):
-    """Recall related objects by meaningful name or comment terms across the catalog."""
-    index = {}
-    generic = {'id','name','type','status','code','key','table','created','updated','varchar','null','int'}
-    for key, table in tables.items():
-        labels = [table['name'], table.get('comment','')]
-        for column in table['columns']:
-            labels.extend((column['name'], column.get('comment','')))
-        terms = set(re.findall(r'[a-zA-Z]{3,}|[\u4e00-\u9fff]{2,8}', ' '.join(labels).lower())) - generic
-        for term in terms:
-            index.setdefault(term, set()).add(key)
-    return sorted({tuple(sorted(ids)) for ids in index.values() if 1 < len(ids) <= 15})

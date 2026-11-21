@@ -397,7 +397,10 @@ onUnmounted(()=>{disposed=true;if(poller)clearTimeout(poller);if(offlinePoller)c
       <aside class="source-sidebar"><div class="source-search"><t-input v-model="sourceSearch" clearable placeholder="搜索数据源"><template #prefix-icon><SearchIcon /></template></t-input></div><button v-for="item in filteredSources" :key="item.id" class="source-item" :class="{active:item.id===selectedId}" @click="selectSource(item)"><DatabaseIcon :type="item.type" /><span class="source-copy"><strong :title="item.name">{{ item.name }}</strong><small>{{ item.type }} · {{ item.objects }} 张表</small><small v-if="item.onboarding&&!isTableScan(item.onboarding)&&isModelingActive(item.onboarding)">{{ phaseLabel(item.onboarding.phase) }} {{ item.onboarding.progress }}%</small></span><i class="connection-dot" :class="item.status"></i></button>
         <button v-for="item in filteredOffline" :key="'offline:'+item.id" class="source-item"
                 :class="{active:item.id===offlineSelectedId}" @click="selectOffline(item)">
-          <DatabaseIcon :type="item.product || ''" />
+          <span class="offline-source-avatar">
+            <DatabaseIcon :type="item.product || ''" />
+            <span class="offline-source-badge">离线</span>
+          </span>
           <span class="source-copy">
             <strong :title="item.name">{{ item.name }}</strong>
             <small>{{ item.product_label }}<template v-if="item.status!=='ready'"> · {{ offlineStatuses[item.status] || item.status }}</template></small>
@@ -543,6 +546,21 @@ onUnmounted(()=>{disposed=true;if(poller)clearTimeout(poller);if(offlinePoller)c
 .source-item { grid-template-columns: 36px minmax(0, 1fr) 8px; gap: 12px; min-height: 64px; padding: 8px 10px; margin-bottom: 3px; }
 .source-item:hover { background: #f3f7fb; }
 .source-item.active { background: #e7f0fc; }
+.offline-source-avatar { position: relative; display: grid; place-items: center; width: 36px; height: 36px; }
+.offline-source-badge {
+  position: absolute;
+  right: -4px;
+  bottom: -3px;
+  padding: 1px 3px;
+  border: 1px solid #fff;
+  border-radius: 999px;
+  background: #616b79;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 12px;
+  white-space: nowrap;
+}
 .offline-details{margin-top:20px}
 .offline-condition{display:grid;gap:6px;margin-top:16px}
 .source-copy strong { font-size: 14px; }

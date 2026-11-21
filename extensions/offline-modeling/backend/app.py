@@ -63,6 +63,10 @@ def connect():
         id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL, config TEXT NOT NULL,
         payload TEXT, error TEXT, analysis TEXT, revision INTEGER NOT NULL DEFAULT 0
     )''')
+    db.execute('''CREATE TABLE IF NOT EXISTS analysis_checkpoints (
+        import_id TEXT NOT NULL, work_key TEXT NOT NULL, payload TEXT NOT NULL,
+        PRIMARY KEY (import_id, work_key)
+    )''')
     return db
 
 
@@ -99,11 +103,11 @@ def parse_import(ident):
                     chars += len(block['text'])
                     if chars > 10_000_000:
                         raise ValueError('本次导入的有效文档文本超过处理上限')
-                    records.append(block)
+                    records.append({**block,'file_index':i+1})
                 log_stage('offline.document.completed', ident, file_started, file_index=i+1,
                           format=Path(file).suffix.lower(), blocks=len(records)-before)
             stage, binding_started = 'binding', perf_counter()
-            relations = initial_relations(catalog, records, cfg['dialect'])
+            relations = initial_relations(catalog, cfg['dialect'])
             payload = {'tables':catalog['tables'], 'relations':relations,'records':records,'warnings':catalog['warnings'],
                        'ddl_relations':catalog['relations']}
             status = 'ready' if cfg.get('auto_confirm') else 'preview'
@@ -194,6 +198,7 @@ def details(ident: str):
     payload.pop('records', None)
     payload.pop('ddl_relations', None)
     payload.pop('analysis_completed', None)
+    payload.pop('document_directory', None)
     return {**row, 'config':json.loads(row['config']), **payload}
 
 
@@ -289,6 +294,7 @@ def delete_import(ident: str):
                 if directory.exists():
                     directory.rename(staged)
                     moved = True
+                db.execute('DELETE FROM analysis_checkpoints WHERE import_id=?', (ident,))
                 db.execute('DELETE FROM imports WHERE id=?', (ident,))
         except Exception:
             if moved:
@@ -392,13 +398,33 @@ def analyze(ident):
             def cancelled():
                 return get(db, ident)['analysis'] == '取消中'
 
+            def checkpoint(key, result=None):
+                if result is None:
+                    saved = db.execute('SELECT payload FROM analysis_checkpoints WHERE import_id=? AND work_key=?',
+                                       (ident, key)).fetchone()
+                    return json.loads(saved['payload']) if saved else None
+                with db:
+                    db.execute('INSERT OR REPLACE INTO analysis_checkpoints VALUES (?, ?, ?)',
+                               (ident, key, json.dumps(result, ensure_ascii=False)))
+
             if cancelled():
                 raise AnalysisCancelled()
             previous_pending = {key: relation for key, relation in payload['relations'].items()
                                 if relation['origin'] == 'model' and relation['status'] == 'pending'}
             known = {key: relation for key, relation in payload['relations'].items() if key not in previous_pending}
-            with analysis_progress(lambda event, **counts: log_stage(event, ident, started, **counts), cancelled):
-                proposals = dict(discover(payload['tables'], payload['records'], json.loads(row['config'])['dialect'], known))
+            document_summary, document_directory = None, None
+
+            def report(event, **counts):
+                nonlocal document_summary, document_directory
+                if event == 'offline.analysis.documents_completed':
+                    document_summary = counts['summary']
+                    document_directory = counts['directory']
+                    counts = {key:value for key,value in document_summary.items() if key!='gaps'}
+                log_stage(event, ident, started, **counts)
+
+            with analysis_progress(report, cancelled, checkpoint):
+                proposals = dict(discover(payload['tables'], payload['records'], json.loads(row['config'])['dialect'],
+                                          known, declared=payload.get('ddl_relations')))
             with db:
                 db.execute('BEGIN IMMEDIATE')
                 current = get(db,ident)
@@ -413,8 +439,12 @@ def analyze(ident):
                     if key not in suppressed:
                         latest['relations'].setdefault(key,r)
                 latest['analysis_completed'] = True
+                if document_summary is not None:
+                    latest['document_analysis'] = document_summary
+                    latest['document_directory'] = document_directory
                 db.execute('UPDATE imports SET payload=?,analysis=?,revision=revision+1 WHERE id=?',
                            (json.dumps(latest,ensure_ascii=False),'完成',ident))
+                db.execute('DELETE FROM analysis_checkpoints WHERE import_id=?', (ident,))
             log_stage('offline.analysis.completed', ident, started, proposals=len(proposals))
         except AnalysisCancelled:
             update(db,ident,'analysis=?',(available_analysis(get(db, ident),'已取消'),))
